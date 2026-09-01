@@ -1,0 +1,19 @@
+{
+  "name": "harness-workbench",
+  "version": "0.1.0",
+  "description": "Roni Workbench - self-hosted AI agent platform (多厂商多模型对话 / 会话 / 工具 / 技能)",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "express": "^4.21.0",
+    "mysql2": "^3.11.0"
+  }
+}

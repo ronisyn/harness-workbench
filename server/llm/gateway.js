@@ -1,0 +1,72 @@
+// server/llm/gateway.js - OpenAI 兼容统一网关（流式对话）
+import { findProvider } from './providers.js';
+
+function resolve(providerId, keys) {
+  const p = findProvider(providerId);
+  if (!p) throw new Error('未知厂商: ' + providerId);
+  const key = keys[p.keyEnv];
+  if (!key) throw new Error(`厂商「${p.name}」未配置 API Key`);
+  return { ...p, key };
+}
+
+// 非流式调用（工具场景/测试用）
+export async function chatOnce(providerId, messages, opts = {}, keys) {
+  const p = resolve(providerId, keys);
+  const model = opts.model || p.defaultModel;
+  const res = await fetch(p.base + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: false }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
+  const content = j.choices?.[0]?.message?.content || '';
+  const usage = j.usage || {};
+  return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0 };
+}
+
+// 流式调用：async generator，逐个产出 content 增量
+export async function* chatStream(providerId, messages, opts = {}, keys) {
+  const p = resolve(providerId, keys);
+  const model = opts.model || p.defaultModel;
+  const res = await fetch(p.base + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: true }),
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const data = t.slice(5).trim();
+      if (data === '[DONE]') return;
+      try {
+        const j = JSON.parse(data);
+        const delta = j.choices?.[0]?.delta?.content;
+        if (delta) yield delta;
+      } catch { /* 忽略不完整帧 */ }
+    }
+  }
+}
+
+// 拉取厂商模型列表（模型市场「加载模型」按钮用）
+export async function fetchModels(providerId, keys) {
+  const p = resolve(providerId, keys);
+  const res = await fetch(p.base + '/models', { headers: { Authorization: 'Bearer ' + p.key } });
+  if (!res.ok) throw new Error(`${p.name} 模型列表获取失败 ${res.status}`);
+  const j = await res.json().catch(() => ({}));
+  const list = (j.data || []).map((m) => ({ id: m.id, name: m.name || m.id }));
+  return list;
+}
