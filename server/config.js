@@ -20,6 +20,10 @@ function loadEnvFile() {
 }
 
 const envFile = loadEnvFile();
+// 把 .env 变量写回 process.env，供所有模块直接读取（如 FEISHU_APP_ID）
+for (const [k, v] of Object.entries(envFile)) {
+  if (process.env[k] === undefined) process.env[k] = v;
+}
 const env = (k, def) => process.env[k] ?? envFile[k] ?? def;
 
 export const config = {
