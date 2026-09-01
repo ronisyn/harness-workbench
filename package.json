@@ -6,14 +6,20 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "node --watch server/index.js",
+    "build": "vite build",
+    "dev:web": "vite"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
     "bcryptjs": "^3.0.2",
     "express": "^4.21.0",
-    "mysql2": "^3.11.0"
+    "mysql2": "^3.11.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "vite": "^8.2.2"
   }
 }

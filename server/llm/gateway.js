@@ -25,14 +25,14 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
   return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0 };
 }
 
-// 流式调用：async generator，逐个产出 content 增量
-export async function* chatStream(providerId, messages, opts = {}, keys) {
+// 流式调用：async generator，逐个产出 content 增量；ctx 可带回 usage（流式最后一个 chunk 常带）
+export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {}) {
   const p = resolve(providerId, keys);
   const model = opts.model || p.defaultModel;
   const res = await fetch(p.base + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: true }),
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: true, stream_options: { include_usage: true } }),
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => '');
@@ -56,6 +56,13 @@ export async function* chatStream(providerId, messages, opts = {}, keys) {
         const j = JSON.parse(data);
         const delta = j.choices?.[0]?.delta?.content;
         if (delta) yield delta;
+        if (j.usage && !ctx.usage) {
+          ctx.usage = {
+            tokens_in: j.usage.prompt_tokens || 0,
+            tokens_out: j.usage.completion_tokens || 0,
+            cache_hit: j.usage.prompt_tokens_details?.cached_tokens || 0,
+          };
+        }
       } catch { /* 忽略不完整帧 */ }
     }
   }

@@ -1,0 +1,101 @@
+/* src/styles.css - Roni Workbench 太阳大地色主题 */
+:root {
+  --rw-bg: #faf3e7;
+  --rw-panel: #fffdf8;
+  --rw-red: #e2542b;
+  --rw-red-dark: #c04421;
+  --rw-yellow: #c98b2e;
+  --rw-ink: #3d2f1f;
+  --rw-muted: #8a7a63;
+  --rw-border: #e3cf9c;
+  --rw-tint: #f4e3c4;
+  --rw-shadow: rgba(61, 47, 31, 0.12);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--rw-bg); color: var(--rw-ink); font-size: 14px;
+}
+
+/* 登录页 */
+.rw-login { height: 100%; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at 30% 20%, #f7e8cd 0%, var(--rw-bg) 60%); }
+.rw-login-card { width: 360px; background: var(--rw-panel); border: 1px solid var(--rw-border);
+  border-radius: 16px; padding: 36px 32px; box-shadow: 0 12px 40px var(--rw-shadow); }
+.rw-login-logo { font-size: 26px; color: var(--rw-red); text-align: center; letter-spacing: 1px; }
+.rw-login-sub { text-align: center; color: var(--rw-muted); margin: 6px 0 24px; font-size: 13px; }
+.rw-login form { display: flex; flex-direction: column; gap: 12px; }
+.rw-login-btn { padding: 11px; font-size: 15px; letter-spacing: 4px; margin-top: 4px; }
+
+.rw-loading { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--rw-muted); }
+
+/* 输入/按钮/选择 */
+.rw-input { background: var(--rw-panel); border: 1px solid var(--rw-border); color: var(--rw-ink);
+  padding: 9px 12px; border-radius: 9px; outline: none; font-size: 14px; width: 100%; }
+.rw-input:focus { border-color: var(--rw-red); }
+.rw-btn { background: var(--rw-panel); color: var(--rw-ink); border: 1px solid var(--rw-yellow);
+  padding: 6px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; }
+.rw-btn:hover { border-color: var(--rw-red); color: var(--rw-red); }
+.rw-btn.pri { background: var(--rw-red); border-color: var(--rw-red); color: #fff; font-weight: 600; }
+.rw-btn.pri:hover { background: var(--rw-red-dark); color: #fff; }
+.rw-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.rw-select { background: var(--rw-panel); border: 1px solid var(--rw-border); color: var(--rw-ink);
+  padding: 5px 10px; border-radius: 8px; outline: none; }
+.rw-err { color: var(--rw-red); font-size: 13px; }
+
+/* 主布局 */
+.rw-shell { display: flex; height: 100%; }
+.rw-side { width: 220px; border-right: 1px solid var(--rw-border); background: var(--rw-panel);
+  display: flex; flex-direction: column; }
+.rw-side-head { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid var(--rw-border); }
+.rw-side-title { font-weight: 700; color: var(--rw-red); }
+.rw-side-list { flex: 1; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.rw-conv { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
+  border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.rw-conv:hover { background: var(--rw-tint); }
+.rw-conv.sel { background: var(--rw-tint); border-color: var(--rw-red); }
+.rw-conv-t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rw-conv-del { border: none; background: none; color: var(--rw-muted); cursor: pointer; font-size: 11px; padding: 2px 6px; }
+.rw-conv-del:hover { color: var(--rw-red); }
+.rw-side-foot { padding: 10px 12px; border-top: 1px solid var(--rw-border); display: flex; align-items: center; justify-content: space-between; }
+.rw-user { font-size: 12px; color: var(--rw-muted); }
+
+.rw-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.rw-main-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px;
+  border-bottom: 1px solid var(--rw-border); background: var(--rw-panel); }
+.rw-main-title { font-weight: 700; color: var(--rw-red); font-size: 15px; }
+.rw-model-row { display: flex; gap: 8px; align-items: center; }
+
+.rw-msgs { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 12px; }
+.rw-empty { color: var(--rw-muted); text-align: center; margin-top: 80px; }
+.rw-msg { display: flex; gap: 10px; max-width: 85%; }
+.rw-msg.me { align-self: flex-end; flex-direction: row-reverse; }
+.rw-msg-role { flex-shrink: 0; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 700; color: #fff; }
+.rw-msg.me .rw-msg-role { background: var(--rw-red); }
+.rw-msg.ai .rw-msg-role { background: var(--rw-yellow); }
+.rw-msg-c { background: var(--rw-panel); border: 1px solid var(--rw-border); border-radius: 12px;
+  padding: 10px 14px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+.rw-msg.me .rw-msg-c { background: var(--rw-tint); }
+.rw-caret { animation: blink 1s infinite; color: var(--rw-red); }
+@keyframes blink { 50% { opacity: 0; } }
+
+.rw-stats { border-top: 1px dashed var(--rw-border); padding: 4px 16px; font-size: 11px; color: var(--rw-muted); background: var(--rw-panel); }
+.rw-inputbar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--rw-border); background: var(--rw-panel); }
+.rw-inputbar .rw-input { flex: 1; }
+
+/* 抽屉 */
+.rw-mask { position: fixed; inset: 0; background: rgba(61, 47, 31, 0.35); z-index: 100; display: flex; justify-content: flex-end; }
+.rw-drawer { width: 300px; background: var(--rw-panel); height: 100%; display: flex; flex-direction: column;
+  border-left: 1px solid var(--rw-border); box-shadow: -8px 0 30px var(--rw-shadow); }
+.rw-drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--rw-border); font-weight: 700; }
+.rw-drawer-body { flex: 1; overflow-y: auto; padding: 10px 14px; }
+.rw-cap-group { margin-bottom: 14px; }
+.rw-cap-gtitle { color: var(--rw-red); font-weight: 700; margin-bottom: 6px; font-size: 13px; }
+.rw-cap-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; font-size: 13px; }
+.rw-cap-item input { accent-color: var(--rw-red); }
+
+.rw-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--rw-ink);
+  color: #fff; padding: 8px 18px; border-radius: 10px; font-size: 13px; z-index: 200; box-shadow: 0 6px 20px rgba(0,0,0,0.25); }
