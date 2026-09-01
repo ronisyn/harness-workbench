@@ -9,6 +9,7 @@ import { activeProviders, allProviders } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
 import { runAgent } from './agent.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
+import { startWechatChannel } from './channels/wechat.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -215,6 +216,10 @@ async function main() {
     }
   } catch { /* 初始化失败不阻塞 */ }
   scheduleMarketRefresh();
+  // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
+  if (process.env.RW_WECHAT !== '0') {
+    startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));
+  }
   app.listen(config.port, () => {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);
   });
