@@ -8,6 +8,7 @@ import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
 import { runAgent } from './agent.js';
+import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -174,6 +175,25 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
   });
 });
 
+// ---------- 模型市场（P3） ----------
+app.get('/api/market/list', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, sources: await marketList() }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
+app.post('/api/market/refresh', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, results: await refreshMarket() }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
+app.post('/api/market/connect', requireAuth, async (req, res) => {
+  try {
+    const { source, modelIds } = req.body || {};
+    if (!source || !Array.isArray(modelIds) || !modelIds.length) return res.status(400).json({ ok: false, message: '参数缺失' });
+    res.json({ ok: true, ...(await connectModels(source, modelIds)) });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 静态前端 ----------
 const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));
@@ -185,6 +205,16 @@ app.get(/^(?!\/api).*/, (req, res) => {
 async function main() {
   await initSchema();
   await ensureAdmin();
+  // 初始化 providers 表（同步硬编码 9 家）+ 每日市场刷新
+  try {
+    const pCount = await db.query('SELECT COUNT(*) c FROM providers');
+    if (!pCount[0]?.c) {
+      for (const p of allProviders(config.keys)) {
+        await db.query('INSERT INTO providers (provider_key, name, base_url, api_key_env, enabled, sort_order) VALUES (?,?,?,?,1,?)', [p.id, p.name, p.base, p.keyEnv, p.id === 'deepseek' ? 0 : 10]);
+      }
+    }
+  } catch { /* 初始化失败不阻塞 */ }
+  scheduleMarketRefresh();
   app.listen(config.port, () => {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);
   });

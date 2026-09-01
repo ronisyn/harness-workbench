@@ -18,7 +18,11 @@ export default function Chat({ user, onLogout }) {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState({});
   const [drawer, setDrawer] = useState(false);
+  const [drawerTab, setDrawerTab] = useState('caps');
   const [caps, setCaps] = useState([]);
+  const [market, setMarket] = useState([]);
+  const [marketBusy, setMarketBusy] = useState(false);
+  const [selModels, setSelModels] = useState({});
   const [toast, setToast] = useState('');
   const bottomRef = useRef(null);
 
@@ -87,6 +91,28 @@ export default function Chat({ user, onLogout }) {
     setDrawer(true);
     const d = await api.capabilities();
     setCaps(d.list);
+  };
+
+  const loadMarket = async () => {
+    setMarketBusy(true);
+    try { const d = await api.marketList(); setMarket(d.sources); }
+    catch (ex) { setToast(ex.message); }
+    finally { setMarketBusy(false); }
+  };
+
+  const refreshMarket = async () => {
+    setMarketBusy(true);
+    try { await api.marketRefresh(); setToast('市场已刷新'); await loadMarket(); }
+    catch (ex) { setToast(ex.message); setMarketBusy(false); }
+  };
+
+  const connectMarket = async (source, models) => {
+    try {
+      const d = await api.marketConnect(source, models);
+      setToast(`已接入 ${d.inserted.length} 个模型（${d.provider}）`);
+      setSelModels({});
+      loadMarket();
+    } catch (ex) { setToast(ex.message); }
   };
 
   const toggleCap = async (key, v) => {
@@ -167,9 +193,13 @@ export default function Chat({ user, onLogout }) {
       {drawer && (
         <div className="rw-mask" onClick={() => setDrawer(false)}>
           <div className="rw-drawer" onClick={(e) => e.stopPropagation()}>
-            <div className="rw-drawer-head"><span>能力设置</span><button className="rw-btn" onClick={() => setDrawer(false)}>收起</button></div>
+            <div className="rw-drawer-head"><span>设置</span><button className="rw-btn" onClick={() => setDrawer(false)}>收起</button></div>
             <div className="rw-drawer-body">
-              {['A', 'B', 'C'].map((g) => (
+              <div className="rw-drawer-tabs">
+                <button className={'rw-dtab' + (drawerTab === 'caps' ? ' sel' : '')} onClick={() => setDrawerTab('caps')}>能力开关</button>
+                <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => { setDrawerTab('market'); loadMarket(); }}>模型市场</button>
+              </div>
+              {drawerTab === 'caps' && ['A', 'B', 'C'].map((g) => (
                 <div key={g} className="rw-cap-group">
                   <div className="rw-cap-gtitle">能力组 {g}</div>
                   {caps.filter((c) => c.group === g).map((c) => (
@@ -180,6 +210,32 @@ export default function Chat({ user, onLogout }) {
                   ))}
                 </div>
               ))}
+              {drawerTab === 'market' && (
+                <div className="rw-market">
+                  <div className="rw-market-head">
+                    <button className="rw-btn" onClick={refreshMarket} disabled={marketBusy}>{marketBusy ? '刷新中…' : '🔄 刷新市场'}</button>
+                    <span className="rw-market-hint">勾选模型→接入（归属该平台）</span>
+                  </div>
+                  {market.map((src) => (
+                    <div key={src.source} className="rw-market-src">
+                      <div className="rw-market-srcname">{src.source}（{src.count} 个）</div>
+                      <div className="rw-market-models">
+                        {src.models.slice(0, 40).map((m) => (
+                          <label key={m.id} className="rw-market-m">
+                            <input type="checkbox" checked={Boolean(selModels[m.id])} disabled={m.connected}
+                              onChange={(e) => setSelModels((s) => ({ ...s, [m.id]: e.target.checked }))} />
+                            <span className={m.connected ? 'conn' : ''}>{m.id}{m.connected ? ' ✓' : ''}</span>
+                          </label>
+                        ))}
+                      </div>
+                      {Object.keys(selModels).filter((k) => selModels[k]).length > 0 && (
+                        <button className="rw-btn pri" onClick={() => connectMarket(src.source, Object.keys(selModels).filter((k) => selModels[k]))}>接入选中模型</button>
+                      )}
+                    </div>
+                  ))}
+                  {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
+                </div>
+              )}
             </div>
           </div>
         </div>

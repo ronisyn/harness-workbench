@@ -28,6 +28,9 @@ export const api = {
   capabilities: () => request('/api/capabilities'),
   setCapabilities: (updates) => request('/api/capabilities', { method: 'PUT', body: JSON.stringify({ updates }) }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),
+  marketList: () => request('/api/market/list'),
+  marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),
+  marketConnect: (source, modelIds) => request('/api/market/connect', { method: 'POST', body: JSON.stringify({ source, modelIds }) }),
 };
 
 // SSE 流式对话：onDelta(增量), onDone, onError
