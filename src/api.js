@@ -31,6 +31,7 @@ export const api = {
   marketList: () => request('/api/market/list'),
   marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),
   marketConnect: (source, modelIds) => request('/api/market/connect', { method: 'POST', body: JSON.stringify({ source, modelIds }) }),
+  upload: (name, base64) => request('/api/upload', { method: 'POST', body: JSON.stringify({ name, data: base64 }) }),
 };
 
 // SSE 流式对话：onDelta(增量), onDone, onError

@@ -2,6 +2,7 @@
 // P1 核心：登录 + 会话管理 + 多模型流式对话(SSE) + 能力开关 + 用量统计
 import express from 'express';
 import path from 'node:path';
+import fs from 'node:fs';
 import { config, ROOT } from './config.js';
 import { initSchema, db } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
@@ -174,6 +175,20 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       tokensOut: u.tout || 0,
     },
   });
+});
+
+// ---------- 上传文件（B29） ----------
+app.post('/api/upload', requireAuth, async (req, res) => {
+  try {
+    const { name, data } = req.body || {};
+    if (!name || !data) return res.status(400).json({ ok: false, message: '参数缺失' });
+    const dir = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'uploads');
+    fs.mkdirSync(dir, { recursive: true });
+    const safe = path.basename(String(name).replace(/[\\/]/g, '_'));
+    const file = path.join(dir, Date.now() + '-' + safe);
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    res.json({ ok: true, path: file });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 模型市场（P3） ----------

@@ -68,6 +68,19 @@ export const TOOLS = [
     params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
     run: async (a) => { const c = readTxt(a.path); const off = a.offset || 0; return { content: c.slice(off, off + (a.length || 10000)) }; } },
 
+  // ---------- B20 OCR ----------
+  { name: 'ocr_image', description: '图片 OCR 文字识别（Tesseract.js，中英文）', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '图片文件路径' } },
+    run: async (a) => {
+      try {
+        const { createWorker } = await import('tesseract.js');
+        const worker = await createWorker('chi_sim+eng');
+        const { data } = await worker.recognize(a.path);
+        await worker.terminate();
+        return { text: (data.text || '').slice(0, 8000), confidence: Math.round((data.confidence || 0) * 10) / 10 };
+      } catch (e) { throw new Error('OCR 失败: ' + e.message); }
+    } },
+
   // ---------- B11-B13 命令 ----------
   { name: 'run_command', description: '执行命令（write 级仅工作区内；full 任意）', permission: 'full',
     params: { cmd: { type: 'string', required: true, desc: '命令（如 ls -la）' } },
