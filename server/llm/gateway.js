@@ -68,6 +68,33 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
   }
 }
 
+// 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage }
+export async function chatOnceWithTools(providerId, model, messages, tools, keys) {
+  const p = resolve(providerId, keys);
+  const body = {
+    model: model || p.defaultModel,
+    messages,
+    tools: tools || [],
+    tool_choice: 'auto',
+    max_tokens: 4000,
+    stream: false,
+  };
+  const res = await fetch(p.base + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
+    body: JSON.stringify(body),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${p.name} 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
+  const msg = j.choices?.[0]?.message || {};
+  const usage = j.usage || {};
+  return {
+    content: msg.content || '',
+    toolCalls: msg.tool_calls || [],
+    usage: { tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0 },
+  };
+}
+
 // 拉取厂商模型列表（模型市场「加载模型」按钮用）
 export async function fetchModels(providerId, keys) {
   const p = resolve(providerId, keys);

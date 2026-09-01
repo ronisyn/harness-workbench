@@ -7,6 +7,7 @@ import { initSchema, db } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
+import { runAgent } from './agent.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -98,7 +99,7 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   res.json({ ok: true, messages: rows });
 });
 
-// ---------- 对话（SSE 流式） ----------
+// ---------- 对话（Agent 模式：工具调用 + SSE 流式输出） ----------
 app.post('/api/chat', requireAuth, async (req, res) => {
   const { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
@@ -112,7 +113,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
 
   // 组装历史
   const hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
-  const messages = hist.map(m => ({ role: m.role, content: m.content }));
+  const messages = hist.map((m) => ({ role: m.role, content: m.content }));
 
   // SSE 头
   res.writeHead(200, {
@@ -122,22 +123,28 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   });
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
-  let full = '';
   const t0 = Date.now();
   let firstTokenMs = 0;
-  const ctx = { usage: null };
   try {
-    for await (const delta of chatStream(provider, messages, { model }, config.keys, ctx)) {
-      if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-      full += delta;
-      send({ type: 'delta', delta });
+    // Agent 执行（内部可能多轮工具调用）
+    const agentCtx = { permission, accountId: req.user.id, conversationId, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
+    const result = await runAgent({ provider, model, messages, permission, ctx: agentCtx, keys: config.keys });
+    for (const tl of result.toolLog) {
+      send({ type: 'tool', name: tl.name, result: tl.result });
     }
-    const usage = ctx.usage || {};
+    const answer = result.content || '（无输出）';
+    // 流式输出最终回答（分块模拟）
+    const chunkSize = 8;
+    for (let i = 0; i < answer.length; i += chunkSize) {
+      if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+      send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+    }
+    const usage = result.usage || {};
     send({ type: 'done', usage });
     // 存 assistant 消息
     const r = await db.query('INSERT INTO messages (conversation_id, role, content, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?)',
-      [conversationId, 'assistant', full, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
-    // 用量统计（P1 无 models 表 id，provider/model 存字符串字段）
+      [conversationId, 'assistant', answer, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
+    // 用量统计
     await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW())',
       [req.user.id, conversationId, r.insertId, provider, model || provider, usage.tokens_in || 0, usage.tokens_out || 0, Date.now() - t0, firstTokenMs]);
   } catch (e) {
