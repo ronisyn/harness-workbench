@@ -78,12 +78,8 @@ export async function startWechatChannel() {
   client.on('error', (e) => console.error('[wechat] 连接错误:', e.message));
   client.on('sessionExpired', () => console.error('[wechat] 会话过期，请重新扫码登录'));
 
-  try {
-    await client.start();
-    console.log('[wechat] 微信渠道已启动（复用 iLink 登录态）');
-    return client;
-  } catch (e) {
-    console.error('[wechat] 启动失败:', e.message);
-    return null;
-  }
+  // start() 内部为常驻轮询（startMonitor），不 await，fire-and-forget
+  client.start().catch((e) => console.error('[wechat] 轮询停止:', e.message));
+  console.log('[wechat] 微信渠道已启动（复用 iLink 登录态）');
+  return client;
 }
