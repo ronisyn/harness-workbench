@@ -415,6 +415,11 @@ app.post('/api/approvals/:id', requireAuth, async (req, res) => {
   const { decision } = req.body || {};
   if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ ok: false, message: 'decision=approve|reject' });
   const decided = decideApproval(req.params.id, decision);
+  // 审计：审批裁决留痕（谁、批什么、结果）
+  try {
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'approval:' + decision, JSON.stringify({ id: req.params.id, decided })]);
+  } catch { /* 审计失败不影响 */ }
   res.json({ ok: true, decided });
 });
 
