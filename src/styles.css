@@ -120,6 +120,24 @@ body {
 .rw-caret { animation: blink 1s infinite; color: var(--rw-red); }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* 对话流轨迹卡片 */
+.rw-msg-traces { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.rw-trace-card { border: 1px solid var(--rw-border); border-radius: 9px; background: #fdf9f0;
+  font-size: 12px; cursor: pointer; overflow: hidden; }
+.rw-trace-card.fail { border-color: #c62828; }
+.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+.rw-trace-badge { font-size: 11px; width: 16px; text-align: center; }
+.rw-trace-badge.done { color: #2e7d32; }
+.rw-trace-badge.fail { color: #c62828; }
+.rw-trace-tool { font-weight: 600; flex: 1; }
+.rw-trace-seq { color: var(--rw-muted); font-size: 10px; }
+.rw-trace-ms { color: var(--rw-muted); font-size: 11px; }
+.rw-trace-toggle { color: var(--rw-muted); font-size: 10px; }
+.rw-trace-card-detail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; display: flex; flex-direction: column; gap: 5px; }
+.rw-trace-line b { display: block; color: var(--rw-muted); font-size: 10px; margin-bottom: 2px; }
+.rw-trace-line pre { background: #f4e3c4; border-radius: 6px; padding: 5px 8px; margin: 0;
+  font-family: "SF Mono", Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto; }
+
 .rw-stats { border-top: 1px dashed var(--rw-border); padding: 5px 20px; font-size: 11px; color: var(--rw-muted); background: var(--rw-panel); letter-spacing: 0.3px; }
 .rw-inputbar { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--rw-border); background: var(--rw-panel); }
 .rw-inputbar .rw-input { flex: 1; padding: 10px 14px; font-size: 14px; }

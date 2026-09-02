@@ -36,8 +36,8 @@ export const api = {
   upload: (name, base64) => request('/api/upload', { method: 'POST', body: JSON.stringify({ name, data: base64 }) }),
 };
 
-// SSE 流式对话：onDelta/onDone/onError；signal 可中止（终止生成）
-export async function streamChat({ conversationId, content, provider, model }, onDelta, onDone, onError, signal) {
+// SSE 流式对话：onDelta/onDone/onError；signal 可中止；onTool(toolObj) 轨迹回调
+export async function streamChat({ conversationId, content, provider, model }, onDelta, onDone, onError, signal, onTool) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -63,9 +63,15 @@ export async function streamChat({ conversationId, content, provider, model }, o
       try {
         const j = JSON.parse(line.slice(5).trim());
         if (j.type === 'delta') onDelta(j.delta);
+        else if (j.type === 'tool') { if (onTool) onTool(j.tool); }
         else if (j.type === 'done') onDone(j.usage || {});
         else if (j.type === 'error') onError(j.message);
       } catch { /* ignore */ }
     }
   }
+}
+
+// SSE 流式对话（带轨迹回调）：onTool(toolObj) 收到工具轨迹
+export async function streamChatWithTools({ conversationId, content, provider, model }, { onDelta, onTool, onDone, onError }, signal) {
+  return streamChat({ conversationId, content, provider, model }, onDelta, onDone, onError, signal, onTool);
 }

@@ -54,8 +54,11 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     for (const call of calls) {
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
+      const t0 = Date.now();
       const result = await execTool(call.function.name, args, ctx);
-      toolLog.push({ name: call.function.name, args, result: result.error ? '错误: ' + result.error : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500)) });
+      const status = result.error ? 'fail' : 'done';
+      const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
+      toolLog.push({ name: call.function.name, args, result: resultText, status, durationMs: Date.now() - t0, seq: toolLog.length + 1 });
       msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 4000) });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续

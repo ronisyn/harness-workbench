@@ -13,6 +13,31 @@ function Md({ text }) {
   );
 }
 
+// 轨迹卡片（对话流内联渲染，对齐 3080 工具调用展示）
+function ToolCard({ t }) {
+  const [open, setOpen] = React.useState(false);
+  const st = t.status === 'fail' ? '✕' : t.status === 'running' ? '●' : '✓';
+  const argsText = typeof t.args === 'string' ? t.args : JSON.stringify(t.args);
+  const resText = typeof t.result === 'string' ? t.result : JSON.stringify(t.result);
+  return (
+    <div className={'rw-trace-card ' + (t.status === 'fail' ? 'fail' : '')} onClick={() => setOpen(!open)}>
+      <div className="rw-trace-card-head">
+        <span className={'rw-trace-badge ' + (t.status || 'done')}>{st}</span>
+        <span className="rw-trace-tool">🔧 {t.name}</span>
+        {t.seq ? <span className="rw-trace-seq">#{t.seq}</span> : null}
+        <span className="rw-trace-ms">{(t.duration_ms || 0) / 1000 > 0 ? ((t.duration_ms || 0) / 1000).toFixed(1) + 's' : ''}</span>
+        <span className="rw-trace-toggle">{open ? '▾' : '▸'}</span>
+      </div>
+      {open && (
+        <div className="rw-trace-card-detail" onClick={(e) => e.stopPropagation()}>
+          {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 600)}</pre></div> : null}
+          {resText ? <div className="rw-trace-line"><b>结果</b><pre>{resText.slice(0, 1200)}</pre></div> : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PERM_LABEL = { read: '只读', write: '读写', full: '完全' };
 const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
@@ -76,7 +101,18 @@ export default function Chat({ user, onLogout }) {
   const openConv = async (id) => {
     setCur(id);
     const [md, tc] = await Promise.all([api.messages(id), api.toolcalls(id).catch(() => ({ toolcalls: [] }))]);
-    setMsgs(md.messages);
+    // 轨迹按 message_id 挂到对应 assistant 消息（历史回看）
+    const byMsg = {};
+    for (const t of tc.toolcalls || []) {
+      const mid = t.message_id;
+      if (mid) (byMsg[mid] = byMsg[mid] || []).unshift(t);
+    }
+    const msgsWithTraces = md.messages.map((msg) =>
+      msg.role === 'assistant' && byMsg[msg.id]
+        ? { ...msg, traces: byMsg[msg.id].map((t) => ({ name: t.tool_name, args: t.args, result: t.result_summary, status: t.status, duration_ms: t.duration_ms, seq: 0 })) }
+        : msg
+    );
+    setMsgs(msgsWithTraces);
     setToolcalls(tc.toolcalls || []);
     loadStats(id);
     const c = convs.find((x) => x.id === id);
@@ -109,7 +145,7 @@ export default function Chat({ user, onLogout }) {
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [] }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
@@ -125,7 +161,11 @@ export default function Chat({ user, onLogout }) {
           api.toolcalls(cur).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
         },
         (msg) => { setToast(msg); setMsgs((m) => m.map((x) => ({ ...x, streaming: false }))); setBusy(false); },
-        ac.signal);
+        ac.signal,
+        (toolObj) => {
+          // 轨迹实时追加到当前 assistant 消息
+          setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, traces: [...(x.traces || []), toolObj] } : x)));
+        });
     } catch (ex) {
       if (ex.name !== 'AbortError') { setToast(ex.message); }
       setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
@@ -236,7 +276,15 @@ export default function Chat({ user, onLogout }) {
                 <div className="rw-msg-role">{m.role === 'user' ? '我' : 'AI'}</div>
                 <div className="rw-msg-c">
                   {m.role === 'assistant'
-                    ? <>{m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}{m.streaming && <span className="rw-caret">▋</span>}</>
+                    ? <>
+                        {m.traces && m.traces.length > 0 && (
+                          <div className="rw-msg-traces">
+                            {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
+                          </div>
+                        )}
+                        {m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}
+                        {m.streaming && <span className="rw-caret">▋</span>}
+                      </>
                     : <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
                 </div>
               </div>

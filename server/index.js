@@ -108,7 +108,7 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
 
 // 会话轨迹（工具调用记录）
 app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
-  const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 50', [req.params.id]);
+  const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, message_id, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 100', [req.params.id]);
   res.json({ ok: true, toolcalls: rows });
 });
 
@@ -166,7 +166,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       answer = result.content || '（无输出）';
       usage = result.usage || {};
       for (const tl of result.toolLog) {
-        send({ type: 'tool', name: tl.name, result: tl.result });
+        send({ type: 'tool', tool: { name: tl.name, args: tl.args, result: tl.result, status: tl.status || 'done', duration_ms: tl.durationMs || 0, seq: tl.seq } });
       }
       // Agent 路径分块模拟流式
       const chunkSize = 8;
