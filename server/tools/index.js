@@ -313,9 +313,9 @@ export const TOOLS = [
     },
     run: async (a, ctx) => {
       if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限，请自己直接完成任务');
+      const { spawnSubagent, waitSub, subs } = await import('../subagent.js');
       const running = [...subs.values()].filter((s) => s.status === 'running').length;
       if (running >= 8) throw new Error('当前并发子代理已达上限(8)，稍后再试或减少并行数');
-      const { spawnSubagent, waitSub } = await import('../subagent.js');
       const prompt = String(a.prompt || '').trim();
       if (!prompt) throw new Error('prompt 必填');
       const { id } = await spawnSubagent({
