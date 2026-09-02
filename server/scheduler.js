@@ -8,16 +8,29 @@ import { config } from './config.js';
 export function cronToNext(cron, from = new Date()) {
   const parts = String(cron).trim().split(/\s+/);
   if (parts.length !== 5) return null;
-  const [min, hour, dom, mon, dow] = parts;
-  const m = (v, lo, hi) => (v === '*' ? null : Number(v));
-  const mm = m(min, 0, 59); const hh = m(hour, 0, 23); const dd = m(dom, 1, 31); const mo = m(mon, 1, 12);
+  // 解析每个字段：支持 *、*/n（步进）、固定值
+  const parse = (v) => {
+    if (v === '*') return { val: null, step: 1 };
+    if (/^\*\//.test(v)) return { val: null, step: Math.max(1, Number(v.slice(2)) || 1) };
+    const n = Number(v);
+    if (Number.isNaN(n)) return { val: -1, step: 1 };
+    return { val: n, step: 1 };
+  };
+  const [mm, hh, dd, mo, dw] = parts.map(parse);
+  if ([mm, hh, dd, mo, dw].some((x) => x.val === -1)) return null;
+  const match = (unit, x, lo, hi) => {
+    if (x.val !== null) return unit === x.val;
+    return x.step > 1 ? unit % x.step === 0 : true;
+  };
   for (let i = 0; i < 60 * 24 * 366; i++) {
     const d = new Date(from.getTime() + i * 60000);
-    if (mm !== null && d.getMinutes() !== mm) continue;
-    if (hh !== null && d.getHours() !== hh) continue;
-    if (dd !== null && d.getDate() !== dd) continue;
-    if (mo !== null && d.getMonth() + 1 !== mo) continue;
-    if (dow !== '*') { const wd = Number(dow); const dw = (d.getDay() + 6) % 7; if (dw !== wd) continue; }
+    if (!match(d.getMinutes(), mm, 0, 59)) continue;
+    if (!match(d.getHours(), hh, 0, 23)) continue;
+    if (!match(d.getDate(), dd, 1, 31)) continue;
+    if (!match(d.getMonth() + 1, mo, 1, 12)) continue;
+    const cw = (d.getDay() + 6) % 7; // 0=周一
+    if (dw.val !== null && cw !== dw.val) continue;
+    if (dw.val === null && dw.step > 1 && cw % dw.step !== 0) continue;
     return d;
   }
   return null;
