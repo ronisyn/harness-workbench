@@ -103,7 +103,14 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   res.json({ ok: true, messages: rows });
 });
 
-// ---------- 对话（Agent 模式：工具调用 + SSE 流式输出） ----------
+// ---------- 对话（双路径） ----------
+// 普通对话不带 tools（模型自然回答，保持出厂自我认知）；检测到工具意图时走 Agent（function calling）
+const TOOL_INTENT_RE = /(查|读|写|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索)/i;
+
+function needsTools(content) {
+  return TOOL_INTENT_RE.test(content);
+}
+
 app.post('/api/chat', requireAuth, async (req, res) => {
   const { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
@@ -130,20 +137,34 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const t0 = Date.now();
   let firstTokenMs = 0;
   try {
-    // Agent 执行（内部可能多轮工具调用）
-    const agentCtx = { permission, accountId: req.user.id, conversationId, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
-    const result = await runAgent({ provider, model, messages, permission, ctx: agentCtx, keys: config.keys });
-    for (const tl of result.toolLog) {
-      send({ type: 'tool', name: tl.name, result: tl.result });
+    const useTools = needsTools(content);
+    let answer = '';
+    let usage = {};
+    if (useTools) {
+      // Agent 路径：带工具（function calling）
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
+      const result = await runAgent({ provider, model, messages, permission, ctx: agentCtx, keys: config.keys });
+      answer = result.content || '（无输出）';
+      usage = result.usage || {};
+      for (const tl of result.toolLog) {
+        send({ type: 'tool', name: tl.name, result: tl.result });
+      }
+      // Agent 路径分块模拟流式
+      const chunkSize = 8;
+      for (let i = 0; i < answer.length; i += chunkSize) {
+        if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+        send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+      }
+    } else {
+      // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）
+      const ctx = { usage: null };
+      for await (const delta of chatStream(provider, messages, { model }, config.keys, ctx)) {
+        if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+        answer += delta;
+        send({ type: 'delta', delta });
+      }
+      usage = ctx.usage || {};
     }
-    const answer = result.content || '（无输出）';
-    // 流式输出最终回答（分块模拟）
-    const chunkSize = 8;
-    for (let i = 0; i < answer.length; i += chunkSize) {
-      if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-      send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
-    }
-    const usage = result.usage || {};
     send({ type: 'done', usage });
     // 存 assistant 消息
     const r = await db.query('INSERT INTO messages (conversation_id, role, content, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?)',
