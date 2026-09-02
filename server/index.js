@@ -247,6 +247,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             send({ type: 'tool_start', tool: ev.tool });
           } else if (ev.type === 'tool_done') {
             send({ type: 'tool_done', tool: ev.tool });
+          } else if (ev.type === 'plan') {
+            send({ type: 'plan', plan: ev.plan });
           }
         },
       });

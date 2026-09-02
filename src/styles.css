@@ -219,3 +219,8 @@ body {
 .rw-task-prompt { font-size: 12px; }
 .rw-task-last { color: var(--rw-muted); font-size: 11px; margin-top: 4px; }
 .rw-task-ops { display: flex; gap: 6px; margin-top: 8px; }
+/* 任务清单卡片 */
+.rw-plan { border: 1px solid var(--rw-border); border-radius: 10px; padding: 8px 12px; margin: 6px 0; background: #fdf9f0; }
+.rw-plan-step { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-size: 13px; }
+.rw-plan-step.done { color: var(--rw-muted); text-decoration: line-through; }
+.rw-plan-check { width: 18px; text-align: center; }

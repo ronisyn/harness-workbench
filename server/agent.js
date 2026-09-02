@@ -2,7 +2,7 @@
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
 // 保留运行时护栏（非预设轮次）：时间预算 / 循环检测 / 绝对兜底
 import { chatOnceWithTools } from './llm/gateway.js';
-import { toolDefs, execTool } from './tools/index.js';
+import { toolDefs, execTool, plans } from './tools/index.js';
 
 export const ENV_MAP = [
   '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
@@ -77,6 +77,11 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
       toolLog.push(toolItem);
       if (emit) emit({ type: 'tool_done', tool: toolItem });
+      // F9：任务清单工具调用后实时同步进度
+      if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
+        const p = plans.get(String(ctx.conversationId || 'g'));
+        if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
+      }
       msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 4000) });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续

@@ -27,6 +27,14 @@ const readTxt = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { 
 
 // 后台任务注册表（run_long_task 写入，job_list/job_output 读取）
 export const jobs = new Map();
+// 会话任务清单（F9：plan_tasks/plan_done 使用；key=conversationId）
+export const plans = new Map();
+
+function planOf(ctx) {
+  const key = String(ctx.conversationId || 'g');
+  if (!plans.has(key)) plans.set(key, { steps: [], done: 0 });
+  return plans.get(key);
+}
 
 export const TOOLS = [
   // ---------- B1-B10 文件 ----------
@@ -197,6 +205,26 @@ export const TOOLS = [
     run: async (a) => { const r = await runCmd('node', ['--check', a.path]); return { ok: r.ok, err: r.err }; } },
   { name: 'run_test', description: '运行测试（write 级仅工作区内）', permission: 'write', params: { dir: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await runCmd('npm', ['test'], { cwd: a.dir }); return { ok: r.ok, out: r.out, err: r.err }; } },
+
+  // ---------- F9 动态任务清单（多步任务规划与进度展示） ----------
+  { name: 'plan_tasks', description: '为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）', permission: 'read',
+    params: { tasks: { type: 'string', required: true, desc: '任务步骤列表，用换行或分号分隔' } },
+    run: async (a, ctx) => {
+      const steps = String(a.tasks || '').split(/[\n;；]+/).map((s) => s.trim()).filter(Boolean).map((text) => ({ text: text.slice(0, 120), done: false }));
+      if (!steps.length) throw new Error('任务步骤为空');
+      const plan = planOf(ctx);
+      plan.steps = steps; plan.done = 0;
+      return { plan: plan.steps.map((s) => s.text), total: steps.length };
+    } },
+  { name: 'plan_done', description: '标记任务清单中第 N 步已完成（从 1 开始）', permission: 'read',
+    params: { index: { type: 'number', required: true, desc: '步骤序号（从 1 开始）' } },
+    run: async (a, ctx) => {
+      const plan = planOf(ctx);
+      const i = (Number(a.index) || 1) - 1;
+      if (!plan.steps[i]) throw new Error('步骤不存在: ' + a.index);
+      if (!plan.steps[i].done) { plan.steps[i].done = true; plan.done++; }
+      return { plan: plan.steps.map((s) => ({ text: s.text, done: s.done })) };
+    } },
 
   // ---------- 图片理解（视觉模型分析图片） ----------
   { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',

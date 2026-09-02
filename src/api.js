@@ -46,7 +46,7 @@ export const api = {
 // SSE 流式对话（带轨迹流式回调）：
 // onDelta / onThinking(round) / onToolStart(tool) / onToolDone(tool) / onDone / onError；signal 可中止
 export async function streamChat({ conversationId, content, provider, model }, handlers, signal) {
-  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onDone, onError } = handlers || {};
+  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onDone, onError } = handlers || {};
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -76,6 +76,7 @@ export async function streamChat({ conversationId, content, provider, model }, h
         else if (j.type === 'think') onThink?.(j.text);
         else if (j.type === 'tool_start') onToolStart?.(j.tool);
         else if (j.type === 'tool_done') onToolDone?.(j.tool);
+        else if (j.type === 'plan') onPlan?.(j.plan);
         else if (j.type === 'done') onDone?.(j.usage || {});
         else if (j.type === 'error') onError?.(j.message);
       } catch { /* ignore */ }

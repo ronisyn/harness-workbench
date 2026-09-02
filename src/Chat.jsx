@@ -13,6 +13,20 @@ function Md({ text }) {
   );
 }
 
+// 任务清单卡片（F9：AI 规划多步任务时展示进度）
+function PlanCard({ plan }) {
+  return (
+    <div className="rw-plan">
+      {plan.map((p) => (
+        <div key={p.index} className={'rw-plan-step' + (p.done ? ' done' : '')}>
+          <span className="rw-plan-check">{p.done ? '✅' : '○'}</span>
+          <span>{p.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // 轨迹卡片（对话流内联渲染，对齐 3080 工具调用展示）
 const FILE_TOOLS = ['read_file', 'write_file', 'append_file', 'edit_file', 'extract_pdf', 'extract_docx', 'extract_xlsx', 'extract_pptx', 'syntax_check', 'ocr_image', 'view_image'];
 function ToolCard({ t }) {
@@ -206,7 +220,7 @@ export default function Chat({ user, onLogout }) {
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', thinking: true }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
@@ -232,6 +246,10 @@ export default function Chat({ user, onLogout }) {
           onToolDone: (tool) => {
             // 工具完成：按 seq 更新为完成卡片（实时刷新 ✓/结果/耗时）
             patchLast((x) => ({ ...x, traces: (x.traces || []).map((t) => (t.seq === tool.seq ? { ...tool } : t)) }));
+          },
+          onPlan: (plan) => {
+            // 任务清单进度实时更新
+            patchLast((x) => ({ ...x, plan }));
           },
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
@@ -374,6 +392,7 @@ export default function Chat({ user, onLogout }) {
                 <div className="rw-msg-c">
                   {m.role === 'assistant'
                     ? <>
+                        {m.plan && m.plan.length > 0 && <PlanCard plan={m.plan} />}
                         {m.traces && m.traces.length > 0 && (
                           <div className="rw-msg-traces">
                             {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
