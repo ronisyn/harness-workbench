@@ -43,13 +43,16 @@ app.get('/api/models', requireAuth, (req, res) => {
 });
 
 // ---------- 能力开关 ----------
+const A_NAMES = ['标题','粗体/斜体','列表','任务列表','表格','链接','图片','代码高亮','引用','数学公式','分隔线','脚注','定义列表','上下标','高亮标记','目录TOC','Mermaid图表','折叠块','警告块','数据图表','emoji','HTML渲染'];
+const B_NAMES = ['读取文件','写入文件','追加修改','列出目录','建删目录','复制移动','删除文件','查找文件','代码搜索','大文件分段','执行命令','后台长任务','终止进程','联网搜索','读网页','PDF解析','Word解析','Excel解析','PPT解析','图片OCR','数据库查询','数据库写入','Git状态','Git提交','Git分支','Git拉取推送','语法检查','运行测试','上传文件'];
+const C_NAMES = ['多厂商切换','自动路由','流式输出','多会话','会话持久化','长上下文压缩','系统提示词','高级参数','工具调用','技能系统','子代理','定时任务','多模态看图','操作留痕','用量统计','并发限制','对话导出','终止生成','快捷键'];
 const CAPABILITY_LIST = [
   // A 渲染
-  ...['a_md_headings','a_md_bold','a_md_list','a_md_tasklist','a_md_table','a_md_link','a_md_image','a_md_code','a_md_quote','a_md_math','a_md_hr','a_md_footnote','a_md_deflist','a_md_supsub','a_md_mark','a_md_toc','a_md_mermaid','a_md_details','a_md_admonition','a_md_chart','a_md_emoji','a_md_html'].map(k => ({ key: k, group: 'A', name: k })),
+  ...A_NAMES.map((name, i) => ({ key: `a_md_${['headings','bold','list','tasklist','table','link','image','code','quote','math','hr','footnote','deflist','supsub','mark','toc','mermaid','details','admonition','chart','emoji','html'][i]}`, group: 'A', name })),
   // B 工具
-  ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29].map(n => ({ key: `b_tool_${n}`, group: 'B', name: `工具${n}` })),
+  ...B_NAMES.map((name, i) => ({ key: `b_tool_${i + 1}`, group: 'B', name })),
   // C 平台
-  ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19].map(n => ({ key: `c_cap_${n}`, group: 'C', name: `能力${n}` })),
+  ...C_NAMES.map((name, i) => ({ key: `c_cap_${i + 1}`, group: 'C', name })),
 ];
 
 app.get('/api/capabilities', requireAuth, async (req, res) => {
@@ -101,6 +104,21 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT id, role, content, model, provider, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
   res.json({ ok: true, messages: rows });
+});
+
+// 会话轨迹（工具调用记录）
+app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
+  const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 50', [req.params.id]);
+  res.json({ ok: true, toolcalls: rows });
+});
+
+// 已接入厂商 + 模型（设置页展示）
+app.get('/api/providers', requireAuth, async (req, res) => {
+  const providers = await db.query('SELECT id, provider_key, name, base_url, enabled FROM providers ORDER BY sort_order, id');
+  const models = await db.query('SELECT id, provider_id, model_id, name, capabilities, enabled FROM models ORDER BY provider_id, model_id');
+  const byProvider = {};
+  for (const m of models) (byProvider[m.provider_id] = byProvider[m.provider_id] || []).push(m);
+  res.json({ ok: true, providers: providers.map((p) => ({ ...p, models: byProvider[p.id] || [] })) });
 });
 
 // ---------- 对话（双路径） ----------

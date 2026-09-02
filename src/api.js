@@ -20,11 +20,13 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   me: () => request('/api/auth/me'),
   models: () => request('/api/models'),
+  providers: () => request('/api/providers'),
   conversations: () => request('/api/conversations'),
   createConversation: (title, permission) => request('/api/conversations', { method: 'POST', body: JSON.stringify({ title, permission }) }),
   patchConversation: (id, patch) => request('/api/conversations/' + id, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
   messages: (id) => request('/api/conversations/' + id + '/messages'),
+  toolcalls: (id) => request('/api/conversations/' + id + '/toolcalls'),
   capabilities: () => request('/api/capabilities'),
   setCapabilities: (updates) => request('/api/capabilities', { method: 'PUT', body: JSON.stringify({ updates }) }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),
@@ -34,12 +36,13 @@ export const api = {
   upload: (name, base64) => request('/api/upload', { method: 'POST', body: JSON.stringify({ name, data: base64 }) }),
 };
 
-// SSE 流式对话：onDelta(增量), onDone, onError
-export async function streamChat({ conversationId, content, provider, model }, onDelta, onDone, onError) {
+// SSE 流式对话：onDelta/onDone/onError；signal 可中止（终止生成）
+export async function streamChat({ conversationId, content, provider, model }, onDelta, onDone, onError, signal) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
     body: JSON.stringify({ conversationId, content, provider, model }),
+    signal,
   });
   if (!res.ok || !res.body) {
     const j = await res.json().catch(() => ({}));
