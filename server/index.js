@@ -520,6 +520,11 @@ app.delete('/api/tasks/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- 健康检查（Agent 自开发演示产物，RW 自我开发闭环验证） ----------
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, service: 'rw', ts: Date.now() });
+});
+
 // ---------- 静态前端 ----------
 const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));
