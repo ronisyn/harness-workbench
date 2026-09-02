@@ -35,6 +35,8 @@ export const api = {
   marketConnect: (source, modelIds) => request('/api/market/connect', { method: 'POST', body: JSON.stringify({ source, modelIds }) }),
   upload: (name, base64) => request('/api/upload', { method: 'POST', body: JSON.stringify({ name, data: base64 }) }),
   getFile: (path) => request('/api/file?path=' + encodeURIComponent(path)),
+  getSettings: () => request('/api/settings'),
+  setSettings: (updates) => request('/api/settings', { method: 'PUT', body: JSON.stringify({ updates }) }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

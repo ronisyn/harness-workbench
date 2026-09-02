@@ -34,7 +34,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
   const res = await fetch(p.base + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: true, stream_options: { include_usage: true } }),
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
     signal: AbortSignal.timeout(60000), // 首次响应 60s；建立后流式读取无超时
   });
   if (!res.ok || !res.body) {
@@ -73,8 +73,8 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
   }
 }
 
-// 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage }
-export async function chatOnceWithTools(providerId, model, messages, tools, keys) {
+// 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage, reasoning }
+export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 1.0) {
   const p = resolve(providerId, keys);
   const body = {
     model: model || p.defaultModel,
@@ -82,6 +82,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     tools: tools || [],
     tool_choice: 'auto',
     max_tokens: 4000,
+    temperature,
     stream: false,
   };
   const res = await fetch(p.base + '/chat/completions', {

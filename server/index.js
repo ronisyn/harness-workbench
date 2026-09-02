@@ -130,8 +130,7 @@ function needsTools(content) {
 }
 
 // P1-F8 长对话摘要生成（懒加载：后台调 LLM 压缩早期消息）
-async function generateSummary(provider, earlyText, conversationId) {
-  try {
+async function generateSummary(provider, earlyText, conversationId) {  try {
     const key = config.keys[findProvider(provider)?.keyEnv];
     const base = findProvider(provider)?.base;
     if (!key || !base) return;
@@ -157,9 +156,42 @@ async function generateSummary(provider, earlyText, conversationId) {
   } catch { /* 摘要失败不影响对话 */ }
 }
 
+// ---------- 设置读写（settings 表） ----------
+async function getSetting(key, def) {
+  try {
+    const r = await db.query('SELECT svalue FROM settings WHERE skey=?', [key]);
+    return r[0] ? r[0].svalue : def;
+  } catch { return def; }
+}
+async function setSetting(key, val) {
+  await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
+}
+
+// ---------- 模型路由（F11 自动路由） ----------
+const VISION_RE = /(图片|看图|照片|截图|识别.*图|vision|image)/i;
+function resolveRoute(content, provider, model) {
+  if (provider !== 'auto' && model !== '__auto__') return { provider, model };
+  // 自动路由：视觉需求 → 豆包视觉；含工具意图且需要执行 → 默认主力（deepseek 已支持工具）
+  if (VISION_RE.test(content)) return { provider: 'ark', model: 'doubao-seed-2-0-mini-260428', note: '视觉任务→豆包视觉' };
+  return { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→DeepSeek V4 Flash' };
+}
+
+// ---------- 费用单价（元/百万 token，近似；F13 费用统计） ----------
+const PRICE_IN = { deepseek: 1, glm: 2, ark: 0.3, moonshot: 4, dashscope: 0.5, tokenhub: 2, qianfan: 8, minimax: 5, siliconflow: 2 };
+const PRICE_OUT = { deepseek: 2, glm: 5, ark: 0.8, moonshot: 16, dashscope: 2, tokenhub: 5, qianfan: 20, minimax: 12, siliconflow: 5 };
+function estCost(providerId, tin, tout) {
+  return ((tin / 1e6) * (PRICE_IN[providerId] ?? 2) + (tout / 1e6) * (PRICE_OUT[providerId] ?? 6)).toFixed(4);
+}
+
 app.post('/api/chat', requireAuth, async (req, res) => {
-  const { conversationId, content, provider, model } = req.body || {};
+  let { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
+  // F11 自动路由：provider/model 为 auto 时按内容路由
+  const route = resolveRoute(content, provider || 'deepseek', model);
+  provider = route.provider;
+  model = route.model;
+  // F12 高级参数：读全局温度设置（settings 表，默认 1.0）
+  const temperature = await getSetting('temperature', 1.0);
   const convs = await db.query('SELECT id, permission FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) return res.status(404).json({ ok: false, message: '会话不存在' });
   const permission = convs[0].permission || 'full';
@@ -204,7 +236,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
       const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws };
       const result = await runAgent({
-        provider, model, messages, permission, ctx: agentCtx, keys: config.keys,
+        provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
           if (ev.type === 'agent_thinking') {
             send({ type: 'thinking', round: ev.round });
@@ -228,7 +260,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     } else {
       // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）；思考过程实时透出
       const ctx = { usage: null, onThink: (txt) => send({ type: 'think', text: txt }) };
-      for await (const delta of chatStream(provider, messages, { model }, config.keys, ctx)) {
+      for await (const delta of chatStream(provider, messages, { model, temperature }, config.keys, ctx)) {
         if (!firstTokenMs) firstTokenMs = Date.now() - t0;
         answer += delta;
         send({ type: 'delta', delta });
@@ -241,9 +273,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       [conversationId, 'assistant', answer, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
     // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
     await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
-    // 用量统计
-    await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW())',
-      [req.user.id, conversationId, r.insertId, provider, model || provider, usage.tokens_in || 0, usage.tokens_out || 0, Date.now() - t0, firstTokenMs]);
+    // 用量统计（含费用估算 F13）
+    const tin = usage.tokens_in || 0;
+    const tout = usage.tokens_out || 0;
+    await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,NOW())',
+      [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
   } catch (e) {
     send({ type: 'error', message: e.message });
   }
@@ -256,7 +290,7 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
   const convId = conversationId ? Number(conversationId) : null;
   const p = convId ? [req.user.id, convId] : [req.user.id];
   const where = convId ? 'WHERE account_id=? AND conversation_id=?' : 'WHERE account_id=?';
-  const u = (await db.query(`SELECT COUNT(*) rounds, SUM(tokens_in) tin, SUM(tokens_out) tout, SUM(duration_ms) dur FROM usage_stats ${where}`, p))[0] || {};
+  const u = (await db.query(`SELECT COUNT(*) rounds, SUM(tokens_in) tin, SUM(tokens_out) tout, SUM(duration_ms) dur, SUM(cost) cost FROM usage_stats ${where}`, p))[0] || {};
   const t = await db.query('SELECT COUNT(*) steps FROM tool_calls WHERE conversation_id=?', [convId || 0]);
   const rounds = await db.query('SELECT COUNT(*) c FROM messages WHERE role="user" AND conversation_id=?', [convId || 0]);
   res.json({
@@ -267,8 +301,22 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       llmMs: u.dur || 0,
       tokensIn: u.tin || 0,
       tokensOut: u.tout || 0,
+      cost: Number(u.cost || 0),
     },
   });
+});
+
+// ---------- 设置 API（F12 温度等高级参数） ----------
+app.get('/api/settings', requireAuth, async (req, res) => {
+  const rows = await db.query('SELECT skey, svalue FROM settings');
+  const out = {};
+  for (const r of rows) { try { out[r.skey] = r.svalue; } catch { out[r.skey] = r.svalue; } }
+  res.json({ ok: true, settings: out });
+});
+app.put('/api/settings', requireAuth, async (req, res) => {
+  const { updates } = req.body || {};
+  for (const [k, v] of Object.entries(updates || {})) await setSetting(k, v);
+  res.json({ ok: true });
 });
 
 // ---------- 读文件（轨迹"打开文件"查看内容用） ----------

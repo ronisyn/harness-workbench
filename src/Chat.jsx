@@ -90,6 +90,7 @@ export default function Chat({ user, onLogout }) {
   const [selModels, setSelModels] = useState({});
   const [toast, setToast] = useState('');
   const [toolcalls, setToolcalls] = useState([]);
+  const [temperature, setTemperature] = useState(1.0);
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
 
@@ -120,6 +121,7 @@ export default function Chat({ user, onLogout }) {
 
   const switchProvider = (pid) => {
     setProvider(pid);
+    if (pid === 'auto') { setModelList([]); setModel('__auto__'); return; }
     const p = provList.find((x) => x.provider_key === pid);
     const ms = (p?.models || []).filter((m) => m.enabled);
     setModelList(ms);
@@ -255,9 +257,15 @@ export default function Chat({ user, onLogout }) {
     setDrawer(true); setDrawerTab(tab);
     const d = await api.capabilities();
     setCaps(d.list);
+    api.getSettings().then((s) => { if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0); }).catch(() => {});
     if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
     if (tab === 'market') await loadMarket();
     if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
+  };
+
+  const setTemp = async (v) => {
+    setTemperature(v);
+    try { await api.setSettings({ temperature: v }); } catch { /* ignore */ }
   };
 
   const loadMarket = async () => {
@@ -317,6 +325,7 @@ export default function Chat({ user, onLogout }) {
         <aside className="rw-side">
           <div className="rw-side-model">
             <select className="rw-select" value={provider} onChange={(e) => switchProvider(e.target.value)}>
+              <option value="auto">🤖 自动路由</option>
               {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             <select className="rw-select rw-model-sel" value={model} onChange={(e) => setModel(e.target.value)} title="选择模型">
@@ -373,7 +382,7 @@ export default function Chat({ user, onLogout }) {
           </div>
           <div className="rw-stats">
             {Object.keys(stats).length > 0 && (
-              <span>{stats.rounds} 轮 · {stats.steps} 步 ｜ LLM {(stats.llmMs / 1000).toFixed(1)}s ｜ 输入 {stats.tokensIn} tok · 输出 {stats.tokensOut} tok</span>
+              <span>{stats.rounds} 轮 · {stats.steps} 步 ｜ LLM {(stats.llmMs / 1000).toFixed(1)}s ｜ 输入 {stats.tokensIn} tok · 输出 {stats.tokensOut} tok{stats.cost ? ' ｜ ¥' + Number(stats.cost).toFixed(4) : ''}</span>
             )}
           </div>
           <div className="rw-inputbar">
@@ -401,6 +410,17 @@ export default function Chat({ user, onLogout }) {
               <button className="rw-btn" onClick={() => setDrawer(false)}>收起</button>
             </div>
             <div className="rw-drawer-body">
+              {drawerTab === 'caps' && (
+                <div className="rw-cap-group">
+                  <div className="rw-cap-gtitle">高级参数</div>
+                  <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>温度</span>
+                    <input type="range" min="0" max="1.5" step="0.1" value={temperature}
+                      onChange={(e) => setTemp(Number(e.target.value))} style={{ flex: 1 }} />
+                    <span>{temperature.toFixed(1)}</span>
+                  </label>
+                </div>
+              )}
               {drawerTab === 'caps' && ['A', 'B', 'C'].map((g) => (
                 <div key={g} className="rw-cap-group">
                   <div className="rw-cap-gtitle">{GROUP_NAME[g]}</div>

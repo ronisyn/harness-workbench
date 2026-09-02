@@ -29,7 +29,7 @@ const COMPLETION_HINT = [
   '- 若未完成或还需验证（如：写码后未测试、查询后未给结论、任务只做了一部分）：继续调用工具把任务做完，直到目标真正完成再总结。',
 ].join('\n');
 
-export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit }) {
+export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 1.0 }) {
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
@@ -44,7 +44,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
-    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys);
+    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys, temperature);
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
     const calls = res.toolCalls || [];
