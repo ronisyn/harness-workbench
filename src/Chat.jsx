@@ -186,8 +186,9 @@ export default function Chat({ user, onLogout }) {
     if (!msgs.length) { setToast('当前会话无消息'); return; }
     const body = msgs.map((m) => {
       const who = m.role === 'user' ? '**我**' : '**AI**';
+      const think = m.think ? m.think.split('\n').filter(Boolean).map((l) => '> 🧠 ' + l).join('\n') + '\n\n' : '';
       const t = (m.traces && m.traces.length ? m.traces.map((tr) => `> 🔧 ${tr.name}${tr.status === 'fail' ? ' ✕' : ''}${tr.result ? '\n> ' + String(tr.result).slice(0, 200) : ''}`).join('\n') + '\n\n' : '');
-      return `## ${who}\n\n${t}${m.content || ''}\n`;
+      return `## ${who}\n\n${think}${t}${m.content || ''}\n`;
     }).join('\n---\n\n');
     const blob = new Blob(['# ' + (curTitle || '对话') + '\n\n' + body], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
