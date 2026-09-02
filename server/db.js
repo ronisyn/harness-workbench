@@ -63,6 +63,7 @@ const SCHEMA = [
     conversation_id INT NOT NULL,
     role VARCHAR(16) NOT NULL,
     content MEDIUMTEXT,
+    reasoning MEDIUMTEXT,
     model VARCHAR(128),
     provider VARCHAR(32),
     tokens_in INT DEFAULT 0,
@@ -214,5 +215,12 @@ const SCHEMA = [
 export async function initSchema() {
   for (const sql of SCHEMA) {
     try { await pool.query(sql); } catch (e) { console.error('[db] schema error:', e.message); }
+  }
+  // 存量库迁移（幂等：列已存在时报错被吞掉）
+  const MIGRATIONS = [
+    'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
+  ];
+  for (const sql of MIGRATIONS) {
+    try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
   }
 }

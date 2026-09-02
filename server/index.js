@@ -108,7 +108,7 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
 });
 
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
-  const rows = await db.query('SELECT id, role, content, model, provider, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
+  const rows = await db.query('SELECT id, role, content, reasoning, model, provider, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
   res.json({ ok: true, messages: rows });
 });
 
@@ -268,6 +268,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const useTools = needsTools(content);
     let answer = '';
     let usage = {};
+    let thinkBuf = ''; // 本轮的思考过程（reasoning）累积，落库供历史回看
     if (useTools) {
       // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
@@ -279,6 +280,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           if (ev.type === 'agent_thinking') {
             send({ type: 'thinking', round: ev.round });
           } else if (ev.type === 'think') {
+            thinkBuf += ev.text;
             send({ type: 'think', text: ev.text });
           } else if (ev.type === 'tool_start') {
             send({ type: 'tool_start', tool: ev.tool });
@@ -302,8 +304,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     } else {
       // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）；思考过程实时透出
-      const ctx = { usage: null, onThink: (txt) => send({ type: 'think', text: txt }) };
+      const ctx = { usage: null, onThink: (txt) => { thinkBuf += txt; send({ type: 'think', text: txt }); } };
       for await (const delta of chatStream(provider, messages, { model, temperature }, config.keys, ctx)) {
+        if (actrl.signal.aborted) break; // 服务端停止：普通路径也支持中断（保留已生成部分）
         if (!firstTokenMs) firstTokenMs = Date.now() - t0;
         answer += delta;
         send({ type: 'delta', delta });
@@ -311,9 +314,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       usage = ctx.usage || {};
     }
     send({ type: 'done', usage });
-    // 存 assistant 消息
-    const r = await db.query('INSERT INTO messages (conversation_id, role, content, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?)',
-      [conversationId, 'assistant', answer, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
+    // 存 assistant 消息（reasoning=思考过程，历史回看可见）
+    const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?,?)',
+      [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
     // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
     await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
     // 用量统计（含费用估算 F13）

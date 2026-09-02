@@ -153,11 +153,13 @@ export default function Chat({ user, onLogout }) {
       const mid = t.message_id;
       if (mid) (byMsg[mid] = byMsg[mid] || []).unshift(t);
     }
-    const msgsWithTraces = md.messages.map((msg) =>
-      msg.role === 'assistant' && byMsg[msg.id]
+    const msgsWithTraces = md.messages.map((msg) => {
+      let m = msg.role === 'assistant' && byMsg[msg.id]
         ? { ...msg, traces: byMsg[msg.id].map((t) => ({ name: t.tool_name, args: t.args, result: t.result_summary, status: t.status, duration_ms: t.duration_ms, seq: 0 })) }
-        : msg
-    );
+        : msg;
+      if (msg.role === 'assistant' && msg.reasoning) m = { ...m, think: msg.reasoning }; // 历史思考过程回显
+      return m;
+    });
     setMsgs(msgsWithTraces);
     setToolcalls(tc.toolcalls || []);
     loadStats(id);
