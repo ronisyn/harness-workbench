@@ -68,8 +68,9 @@ body {
 .rw-body { flex: 1; display: flex; min-height: 0; }
 .rw-side { width: 250px; border-right: 1px solid var(--rw-border); background: var(--rw-panel);
   display: flex; flex-direction: column; flex-shrink: 0; }
-.rw-side-model { padding: 12px 12px 6px; }
+.rw-side-model { padding: 12px 12px 6px; display: flex; flex-direction: column; gap: 6px; }
 .rw-side-model .rw-select { width: 100%; }
+.rw-model-sel { font-size: 12px; }
 .rw-newbtn { margin: 8px 12px; }
 .rw-side-list { flex: 1; overflow-y: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 2px; }
 .rw-conv { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px;

@@ -24,6 +24,7 @@ export default function Chat({ user, onLogout }) {
   const [providers, setProviders] = useState([]);
   const [provider, setProvider] = useState('deepseek');
   const [model, setModel] = useState('');
+  const [modelList, setModelList] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState({});
@@ -50,12 +51,27 @@ export default function Chat({ user, onLogout }) {
 
   useEffect(() => {
     loadConvs();
-    api.models().then((d) => {
-      setProviders(d.providers);
-      if (d.providers[0]) { setProvider(d.providers[0].id); setModel(d.providers[0].defaultModel); }
+    // 已接入厂商 + 各厂商模型列表（模型下拉用）
+    api.providers().then((d) => {
+      const active = d.providers.filter((p) => p.provider_key !== 'openrouter');
+      setProviders(active.map((p) => ({ id: p.provider_key, name: p.name })));
+      setProvList(d.providers);
+      if (active[0]) {
+        setProvider(active[0].provider_key);
+        const ms = active[0].models.filter((m) => m.enabled);
+        setModelList(ms);
+        setModel(ms[0]?.model_id || '');
+      }
     }).catch(() => {});
-    api.providers().then((d) => setProvList(d.providers)).catch(() => {});
   }, [loadConvs]);
+
+  const switchProvider = (pid) => {
+    setProvider(pid);
+    const p = provList.find((x) => x.provider_key === pid);
+    const ms = (p?.models || []).filter((m) => m.enabled);
+    setModelList(ms);
+    setModel(ms[0]?.model_id || '');
+  };
 
   const openConv = async (id) => {
     setCur(id);
@@ -187,8 +203,11 @@ export default function Chat({ user, onLogout }) {
         {/* 左栏 */}
         <aside className="rw-side">
           <div className="rw-side-model">
-            <select className="rw-select" value={provider} onChange={(e) => { const p = providers.find((x) => x.id === e.target.value); setProvider(p?.id || e.target.value); setModel(p?.defaultModel || ''); }}>
+            <select className="rw-select" value={provider} onChange={(e) => switchProvider(e.target.value)}>
               {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <select className="rw-select rw-model-sel" value={model} onChange={(e) => setModel(e.target.value)} title="选择模型">
+              {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : <option value="">默认</option>}
             </select>
           </div>
           <button className="rw-btn pri rw-newbtn" onClick={newConv}>＋ 新建对话</button>
