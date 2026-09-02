@@ -5,7 +5,7 @@ import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
 
-function cronToNext(cron, from = new Date()) {
+export function cronToNext(cron, from = new Date()) {
   const parts = String(cron).trim().split(/\s+/);
   if (parts.length !== 5) return null;
   const [min, hour, dom, mon, dow] = parts;
