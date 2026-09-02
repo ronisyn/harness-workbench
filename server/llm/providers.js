@@ -1,7 +1,7 @@
 // server/llm/providers.js - 多厂商配置（全部 OpenAI 兼容）
 // 每项：id（唯一）/ name / base（OpenAI 兼容 base URL）/ keyEnv（config.keys 里的键名）/ defaultModel / capabilities
 export const PROVIDERS = [
-  { id: 'deepseek', name: 'DeepSeek', base: 'https://api.deepseek.com/v1', keyEnv: 'deepseek', defaultModel: 'deepseek-chat', capabilities: ['chat', 'code'] },
+  { id: 'deepseek', name: 'DeepSeek', base: 'https://api.deepseek.com/v1', keyEnv: 'deepseek', defaultModel: 'deepseek-v4-flash', capabilities: ['chat', 'code', 'reasoning'] },
   { id: 'glm', name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', keyEnv: 'glm', defaultModel: 'glm-4.5', capabilities: ['chat', 'tool', 'image'] },
   { id: 'ark', name: '豆包/火山方舟', base: 'https://ark.cn-beijing.volces.com/api/v3', keyEnv: 'ark', defaultModel: 'doubao-seed-2-1-pro-260628', capabilities: ['chat', 'vision', 'image', 'video'] },
   { id: 'moonshot', name: 'Kimi', base: 'https://api.moonshot.cn/v1', keyEnv: 'moonshot', defaultModel: 'kimi-k3', capabilities: ['chat', 'reasoning', 'code'] },

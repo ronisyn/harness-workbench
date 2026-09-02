@@ -491,6 +491,15 @@ async function main() {
       }
     }
   } catch { /* 初始化失败不阻塞 */ }
+  // 存量库修正：主默认模型统一 deepseek-v4-flash（reasoning 透传/思考可见），停用 deepseek-chat 别名
+  try {
+    const dpr = await db.query('SELECT id FROM providers WHERE provider_key=?', ['deepseek']);
+    if (dpr[0]) {
+      await db.query('INSERT INTO models (provider_id, model_id, name, capabilities, enabled, added_at, last_seen_at) VALUES (?,?,?,?,1,NOW(),NOW()) ON DUPLICATE KEY UPDATE enabled=1',
+        [dpr[0].id, 'deepseek-v4-flash', 'DeepSeek V4 Flash（默认）', JSON.stringify(['chat', 'code', 'reasoning'])]);
+      await db.query('UPDATE models SET enabled=0 WHERE provider_id=? AND model_id=?', [dpr[0].id, 'deepseek-chat']);
+    }
+  } catch { /* 修正失败不阻塞 */ }
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }

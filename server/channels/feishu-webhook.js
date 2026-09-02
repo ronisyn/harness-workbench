@@ -91,7 +91,7 @@ export function registerFeishuWebhook(app) {
       const hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conv.id]);
       const messages = hist.map((m) => ({ role: m.role, content: m.content }));
       const ctx = { permission: conv.permission || 'read', accountId: null, conversationId: conv.id, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
-      const result = await runAgent({ provider: 'deepseek', model: 'deepseek-chat', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
+      const result = await runAgent({ provider: 'deepseek', model: 'deepseek-v4-flash', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
       const reply = result.content || '（无回复）';
       await sendFeishuText(chatId, 'chat_id', reply);
       await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'assistant', reply]);

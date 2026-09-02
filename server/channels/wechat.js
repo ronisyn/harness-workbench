@@ -64,7 +64,7 @@ export async function startWechatChannel() {
       const messages = hist.map((m) => ({ role: m.role, content: m.content }));
       // Agent 处理（渠道权限默认 read，可提权）
       const ctx = { permission: conv.permission || 'read', accountId: null, conversationId: conv.id, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
-      const result = await runAgent({ provider: 'deepseek', model: 'deepseek-chat', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
+      const result = await runAgent({ provider: 'deepseek', model: 'deepseek-v4-flash', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
       const reply = result.content || '（无回复）';
       const ct = client.getContextToken ? client.getContextToken(from) : undefined;
       await client.sendText(from, reply, ct);
