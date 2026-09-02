@@ -13,6 +13,11 @@ export const ENV_MAP = [
   '- 联网搜索：web_search 工具（SearXNG）；网页抓取 fetch_url',
   '- 权限：full=整个服务器文件系统可读写（含平台代码与数据库）；write/read=限于工作区',
   '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
+  '行动原则（务必遵守）：',
+  '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
+  '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
+  '- 某步失败不要放弃：读错误信息→修复→重试；同一工具同参数失败 2 次后换思路（改路径/换命令/查环境）。',
+  '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
   '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
 
@@ -44,12 +49,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
       return { content: res.content || '', toolLog, usage: res.usage };
     }
-    // 循环检测护栏：连续 3 次重复相同 (工具+参数) → 判定卡死
-    const sig = calls.map((c) => c.function.name + ':' + String(c.function.arguments || '').slice(0, 80)).join('|');
+    // 循环检测护栏：连续 4 次 (工具+参数+结果前段相同) 才判定卡死（结果不同=有进展不算循环）
+    const sig = calls.map((c) => {
+      let argsStr = '';
+      try { argsStr = JSON.stringify(JSON.parse(c.function.arguments || '{}')).slice(0, 60); } catch { argsStr = String(c.function.arguments || '').slice(0, 60); }
+      return c.function.name + ':' + argsStr;
+    }).join('|');
     callHistory.push(sig);
-    const tail = callHistory.slice(-3);
-    if (tail.length === 3 && tail[0] === tail[1] && tail[1] === tail[2]) {
-      return { content: '（检测到重复工具调用无进展，已停止。可尝试换一种方式/补充信息）', toolLog, usage: res.usage };
+    const tail = callHistory.slice(-4);
+    if (tail.length === 4 && tail.every((s) => s === tail[0])) {
+      return { content: '（检测到连续 4 次重复工具调用且无进展，已停止。可尝试换一种方式/补充信息）', toolLog, usage: res.usage };
     }
     // 工具调用轮（实时流式：工具开始→执行→完成 均即时上报）
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
