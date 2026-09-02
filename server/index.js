@@ -167,7 +167,8 @@ async function generateSummary(provider, earlyText, conversationId) {
 async function getSetting(key, def) {
   try {
     const r = await db.query('SELECT svalue FROM settings WHERE skey=?', [key]);
-    return r[0] ? r[0].svalue : def;
+    if (!r[0]) return def;
+    try { return JSON.parse(r[0].svalue); } catch { return r[0].svalue; } // 兼容已 JSON 序列化与裸文本
   } catch { return def; }
 }
 async function setSetting(key, val) {
@@ -258,6 +259,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
     }
   } catch { /* 知识表不可用时静默跳过 */ }
+  // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
+  try {
+    const sp = await getSetting('systemPrompt', '');
+    if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
+  } catch { /* 忽略 */ }
 
   // SSE 头
   res.writeHead(200, {
@@ -382,7 +388,7 @@ app.post('/api/approvals/:id', requireAuth, async (req, res) => {
 app.get('/api/settings', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT skey, svalue FROM settings');
   const out = {};
-  for (const r of rows) { try { out[r.skey] = r.svalue; } catch { out[r.skey] = r.svalue; } }
+  for (const r of rows) { try { out[r.skey] = JSON.parse(r.svalue); } catch { out[r.skey] = r.svalue; } }
   res.json({ ok: true, settings: out });
 });
 app.put('/api/settings', requireAuth, async (req, res) => {

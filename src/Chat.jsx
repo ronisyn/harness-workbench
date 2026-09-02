@@ -105,6 +105,7 @@ export default function Chat({ user, onLogout }) {
   const [toast, setToast] = useState('');
   const [toolcalls, setToolcalls] = useState([]);
   const [temperature, setTemperature] = useState(1.0);
+  const [sysPrompt, setSysPrompt] = useState('');
   const [tasks, setTasks] = useState([]);
   const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const abortRef = useRef(null);
@@ -292,7 +293,10 @@ export default function Chat({ user, onLogout }) {
     setDrawer(true); setDrawerTab(tab);
     const d = await api.capabilities();
     setCaps(d.list);
-    api.getSettings().then((s) => { if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0); }).catch(() => {});
+    api.getSettings().then((s) => {
+      if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
+      if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
+    }).catch(() => {});
     if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
     if (tab === 'market') await loadMarket();
     if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
@@ -314,6 +318,11 @@ export default function Chat({ user, onLogout }) {
   const setTemp = async (v) => {
     setTemperature(v);
     try { await api.setSettings({ temperature: v }); } catch { /* ignore */ }
+  };
+
+  const saveSysPrompt = async (v) => {
+    setSysPrompt(v);
+    try { await api.setSettings({ systemPrompt: v }); } catch { /* ignore */ }
   };
 
   const loadMarket = async () => {
@@ -480,6 +489,11 @@ export default function Chat({ user, onLogout }) {
                       onChange={(e) => setTemp(Number(e.target.value))} style={{ flex: 1 }} />
                     <span>{temperature.toFixed(1)}</span>
                   </label>
+                  <div className="rw-cap-item col">
+                    <span style={{ marginBottom: 4 }}>系统提示词（用户自定义指令，注入每轮对话；留空即不注入）</span>
+                    <textarea className="rw-input" rows="3" placeholder="例如：回答保持简短；涉及代码时先给结论…"
+                      value={sysPrompt} onChange={(e) => saveSysPrompt(e.target.value)} />
+                  </div>
                 </div>
               )}
               {drawerTab === 'caps' && ['A', 'B', 'C'].map((g) => (

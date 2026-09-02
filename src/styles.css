@@ -186,6 +186,9 @@ body {
 .rw-cap-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; }
 .rw-cap-item input { accent-color: var(--rw-red); width: 15px; height: 15px; }
 .rw-cap-item:hover { color: var(--rw-red); }
+.rw-cap-item.col { flex-direction: column; align-items: stretch; cursor: default; border-top: 1px dashed var(--rw-border); margin-top: 8px; padding-top: 10px; }
+.rw-cap-item.col:hover { color: inherit; }
+.rw-cap-item.col .rw-input { width: 100%; box-sizing: border-box; font: inherit; }
 
 /* 厂商 */
 .rw-provider { border: 1px solid var(--rw-border); border-radius: 10px; padding: 10px; margin-bottom: 10px; }
