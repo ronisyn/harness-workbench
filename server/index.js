@@ -21,6 +21,8 @@ app.use(express.json({ limit: '2mb' }));
 
 // 运行中 Agent 的中止表（前端"停止生成"→ POST /api/chat/stop 取消当前轮）
 const abortMap = new Map(); // key = accountId:conversationId → AbortController
+// 每账号并发对话计数（能力"并发限制"：默认同账号最多 3 条对话同时在跑）
+const inflight = new Map(); // accountId → count
 
 // ---------- 鉴权 ----------
 app.post('/api/auth/login', async (req, res) => {
@@ -207,8 +209,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   model = route.model;
   // F12 高级参数：读全局温度设置（settings 表，默认 1.0）
   const temperature = await getSetting('temperature', 1.0);
+  // 并发限制：同账号同时在跑的对话超过上限(3)则直接拒绝（先于写库）
+  const curInflight = inflight.get(req.user.id) || 0;
+  if (curInflight >= 3) {
+    return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
+  }
+  inflight.set(req.user.id, curInflight + 1);
   const convs = await db.query('SELECT id, permission FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
-  if (!convs.length) return res.status(404).json({ ok: false, message: '会话不存在' });
+  if (!convs.length) { inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1)); return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const permission = convs[0].permission || 'full';
 
   // 存用户消息
@@ -342,6 +350,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     send({ type: 'error', message: e.message });
   }
   if (abortMap.get(akey) === actrl) abortMap.delete(akey);
+  // 释放并发槽位
+  inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
   res.end();
 });
 
