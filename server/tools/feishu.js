@@ -7,7 +7,7 @@ export function feishuConfigured() {
   return Boolean(process.env.FEISHU_APP_ID && process.env.FEISHU_APP_SECRET);
 }
 
-async function getToken() {
+export async function getToken() {
   if (tokenCache.token && Date.now() < tokenCache.expireAt) return tokenCache.token;
   const res = await fetch(FEISHU_API + '/auth/v3/tenant_access_token/internal', {
     method: 'POST',
