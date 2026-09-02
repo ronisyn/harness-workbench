@@ -82,8 +82,8 @@ export const TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行命令（默认超时 30s；长任务用 run_long_task；必要时传 timeout 秒数 5-300）', permission: 'full',
-    params: { cmd: { type: 'string', required: true, desc: '命令（如 ls -la）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
+  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full',
+    params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
         const allow = ['ls', 'cat', 'node --check', 'git status', 'npm test', 'pwd', 'echo', 'find', 'grep'];
