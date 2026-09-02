@@ -179,6 +179,17 @@ const SCHEMA = [
     last_result TEXT,
     created_at DATETIME DEFAULT NOW()
   )`,
+  // ---- 目标系统（F10） ----
+  `CREATE TABLE IF NOT EXISTS goals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    account_id INT,
+    objective TEXT NOT NULL,
+    progress TEXT,
+    status VARCHAR(16) DEFAULT 'active',
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW()
+  )`,
 ];
 
 export async function initSchema() {

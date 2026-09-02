@@ -216,9 +216,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
   for (const m of hist) messages.push({ role: m.role, content: m.content });
-  // F10 目标注入：会话存在 active 目标时提醒持续推进（目标由 set_goal 工具创建）
-  const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
-  if (gl) messages.push({ role: 'system', content: '【当前会话目标】' + gl.objective + '\n（持续围绕该目标工作直至完成；完成时调用 update_goal 标记为 completed）' });
+  // F10 目标注入：会话存在 active 目标时提醒持续推进（目标由 set_goal 工具创建；表缺失等异常不阻断对话）
+  try {
+    const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
+    if (gl) messages.push({ role: 'system', content: '【当前会话目标】' + gl.objective + '\n（持续围绕该目标工作直至完成；完成时调用 update_goal 标记为 completed）' });
+  } catch { /* goals 表不可用时静默跳过 */ }
 
   // SSE 头
   res.writeHead(200, {
