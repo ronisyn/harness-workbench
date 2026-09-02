@@ -80,7 +80,7 @@ function ToolCard({ t }) {
   );
 }
 
-const PERM_LABEL = { read: '只读', write: '读写', full: '完全' };
+const PERM_LABEL = { read: '只读', write: '读写', full: '完全', guard: '需审批' };
 const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
 export default function Chat({ user, onLogout }) {
@@ -214,13 +214,20 @@ export default function Chat({ user, onLogout }) {
     setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
   };
 
+  // F20 审批裁决：批准/拒绝 guard 会话中挂起的高风险工具
+  const decideApprovalMsg = async (id, decision) => {
+    setMsgs((m) => m.map((x) => ({ ...x, approvals: (x.approvals || []).map((a) => (a.id === id ? { ...a, decision } : a)) })));
+    try { await api.decideApproval(id, decision); setToast(decision === 'approve' ? '✅ 已批准，继续执行' : '已拒绝该操作'); }
+    catch (e) { setToast(e.message); }
+  };
+
   const send = async () => {
     const content = input.trim();
     if (!content || busy || !cur) return;
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [] }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
@@ -250,6 +257,10 @@ export default function Chat({ user, onLogout }) {
           onPlan: (plan) => {
             // 任务清单进度实时更新
             patchLast((x) => ({ ...x, plan }));
+          },
+          onApproval: (ap) => {
+            // 审批请求：追加确认卡（guard 会话高风险工具）
+            patchLast((x) => ({ ...x, approvals: [...(x.approvals || []), { id: ap.id, desc: ap.desc, decision: null }] }));
           },
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
@@ -393,6 +404,17 @@ export default function Chat({ user, onLogout }) {
                   {m.role === 'assistant'
                     ? <>
                         {m.plan && m.plan.length > 0 && <PlanCard plan={m.plan} />}
+                        {m.approvals && m.approvals.length > 0 && m.approvals.map((ap) => (
+                          <div key={ap.id} className="rw-approval">
+                            <div className="rw-approval-desc">{ap.desc}</div>
+                            {ap.decision
+                              ? <div className={'rw-approval-state ' + ap.decision}>{ap.decision === 'approve' ? '✅ 已批准' : ap.decision === 'reject' ? '⛔ 已拒绝' : '⏱ 等待超时，未执行'}</div>
+                              : <div className="rw-approval-btns">
+                                  <button className="rw-btn pri" onClick={() => decideApprovalMsg(ap.id, 'approve')}>批准</button>
+                                  <button className="rw-btn" onClick={() => decideApprovalMsg(ap.id, 'reject')}>拒绝</button>
+                                </div>}
+                          </div>
+                        ))}
                         {m.traces && m.traces.length > 0 && (
                           <div className="rw-msg-traces">
                             {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}

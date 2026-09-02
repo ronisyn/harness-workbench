@@ -6,6 +6,10 @@ import { execFile } from 'node:child_process';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
 import { db } from '../db.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
+import { createApproval } from '../approval.js';
+
+// F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
+const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_push', 'run_command']);
 
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
@@ -357,6 +361,71 @@ export const TOOLS = [
       }
       return { joined: out };
     } },
+  { name: 'subagent_fanout', description: '批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要', permission: 'read',
+    params: {
+      template: { type: 'string', required: true, desc: '子代理任务模板，其中 {{item}} 会被替换为具体条目' },
+      items: { type: 'string', required: true, desc: '条目数组的 JSON，如 ["a.txt","b.txt"]（或逗号分隔字符串）' },
+      name: { type: 'string', desc: '子代理名前缀，默认 批量' },
+    },
+    run: async (a, ctx) => {
+      if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限');
+      let items = [];
+      try { items = Array.isArray(a.items) ? a.items : JSON.parse(a.items); } catch { items = String(a.items || '').split(',').map((s) => s.trim()); }
+      items = items.filter(Boolean).slice(0, 12);
+      if (!items.length) throw new Error('items 为空');
+      const { spawnSubagent, waitSub, subs } = await import('../subagent.js');
+      const results = [];
+      const batchOf = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
+      for (const batch of batchOf(items, 6)) {
+        const spawned = [];
+        for (const item of batch) {
+          const running = [...subs.values()].filter((s) => s.status === 'running').length;
+          if (running >= 8) throw new Error('并发子代理已达上限(8)');
+          const prompt = String(a.template).split('{{item}}').join(item);
+          spawned.push(await spawnSubagent({
+            prompt, name: (a.name || '批量') + '-' + (results.length + spawned.length + 1),
+            provider: ctx.__provider || 'deepseek', model: ctx.__model || 'deepseek-v4-flash',
+            permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+          }));
+        }
+        for (const sp of spawned) {
+          const rec = await waitSub(sp.id);
+          results.push({ status: rec.status, error: rec.error || null, result: rec.status === 'done' ? String(rec.result || '').slice(0, 2500) : null });
+        }
+      }
+      // 条目与结果对齐
+      const aligned = items.map((item, idx) => ({ item, ...(results[idx] || { status: 'missing' }) }));
+      const doneCount = aligned.filter((r) => r.status === 'done').length;
+      return { total: items.length, done: doneCount, results: aligned };
+    } },
+
+  // ---------- 知识库（F19：global 全会话可见 / conv 仅本会话；正文大段用 kb_search 取） ----------
+  { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', desc: 'global|conv(默认)' } },
+    run: async (a, ctx) => {
+      if (!ctx.accountId) throw new Error('缺少账号上下文');
+      const scope = a.scope === 'global' ? 'global' : 'conv';
+      const title = String(a.title || '').trim().slice(0, 200);
+      if (!title) throw new Error('title 必填');
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)',
+        [ctx.accountId, scope, scope === 'conv' ? (ctx.conversationId || null) : null, title, String(a.body || '').slice(0, 8000)]);
+      return { saved: true, id: r.insertId, scope, title };
+    } },
+  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=自己scope=conv + 全部global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
+    params: { q: { type: 'string', required: true, desc: '关键词' } },
+    run: async (a, ctx) => {
+      if (!ctx.accountId) return { items: [] };
+      const like = '%' + String(a.q).split(/\s+/).filter(Boolean).join('%') + '%';
+      const rows = await db.query('SELECT id, scope, title, body, created_at FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="conv" AND conversation_id=?)) AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8',
+        [ctx.accountId, ctx.conversationId || -1, like, like]);
+      return { items: rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title, body: String(r.body || '').slice(0, 1200), createdAt: r.created_at })) };
+    } },
+  { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id）', permission: 'write',
+    params: { id: { type: 'number', required: true } },
+    run: async (a, ctx) => {
+      const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [a.id, ctx.accountId]);
+      return { deleted: r.affectedRows > 0 };
+    } },
 
   // ---------- 技能系统（F15：机制=挂载 SKILL.md；内容由用户/服务器自定，平台不预设） ----------
   { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', permission: 'read',
@@ -418,7 +487,7 @@ export function findTool(name) {
 // 权限检查：工具所需权限 <= 会话权限（global 不受限）
 export function checkPerm(tool, sessionPerm) {
   if (tool.permission === 'global') return true;
-  const order = { read: 1, write: 2, full: 3 };
+  const order = { read: 1, write: 2, full: 3, guard: 3 }; // guard=full 级别操作能力，但受控工具须经审批门禁
   return order[tool.permission] <= order[sessionPerm || 'full'];
 }
 
@@ -444,7 +513,20 @@ export async function execTool(name, args, ctx) {
   // full 权限不限制路径（limitPath=false）；write/read 级才检查工作区边界
   const eff = { ...ctx, limitPath: ctx.permission !== 'full' };
   try {
-    result = await tool.run(args, eff);
+    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准（POST /api/approvals/:id 裁决）
+    if (eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
+      const argsDesc = JSON.stringify(args).slice(0, 300);
+      const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
+      if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
+      const verdict = await ap.promise;
+      if (!verdict || verdict.decision !== 'approve') {
+        result = { error: '用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : '') };
+      } else {
+        result = await tool.run(args, eff);
+      }
+    } else {
+      result = await tool.run(args, eff);
+    }
   } catch (e) {
     result = { error: e.message };
   }

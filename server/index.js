@@ -14,6 +14,7 @@ import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from 
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
+import { decideApproval, listPending } from './approval.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -234,6 +235,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     }
   } catch { /* 技能目录不可用时静默跳过 */ }
+  // F19 知识注入：会话+全局知识条目（前 5 条带 300 字正文摘要；其余仅标题），主题相关可用 kb_search 取全
+  try {
+    const kb = await db.query('SELECT id, scope, title, body FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="conv" AND conversation_id=?)) ORDER BY id DESC LIMIT 12', [req.user.id, conversationId]);
+    if (kb.length) {
+      const lines = kb.map((k, i) => {
+        const tag = k.scope === 'global' ? '全局' : '会话';
+        const snip = i < 5 && k.body ? '\n  ' + String(k.body).replace(/\n+/g, ' ').slice(0, 300) : '';
+        return '- [' + tag + '] ' + k.title + snip;
+      });
+      messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
+    }
+  } catch { /* 知识表不可用时静默跳过 */ }
 
   // SSE 头
   res.writeHead(200, {
@@ -267,6 +280,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             send({ type: 'tool_done', tool: ev.tool });
           } else if (ev.type === 'plan') {
             send({ type: 'plan', plan: ev.plan });
+          } else if (ev.type === 'approval') {
+            send({ type: 'approval', id: ev.id, desc: ev.desc });
           }
         },
       });
@@ -325,6 +340,15 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       cost: Number(u.cost || 0),
     },
   });
+});
+
+// ---------- 审批（F20：guard 会话高风险工具需用户确认） ----------
+app.get('/api/approvals', requireAuth, (req, res) => res.json({ ok: true, pending: listPending() }));
+app.post('/api/approvals/:id', requireAuth, async (req, res) => {
+  const { decision } = req.body || {};
+  if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ ok: false, message: 'decision=approve|reject' });
+  const decided = decideApproval(req.params.id, decision);
+  res.json({ ok: true, decided });
 });
 
 // ---------- 设置 API（F12 温度等高级参数） ----------

@@ -198,6 +198,17 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     UNIQUE KEY uq_conv_skill (conversation_id, skill_name)
   )`,
+  // ---- 知识库（F19：scope=global 全部会话可见；scope=conv 仅本会话；标题索引入提示，正文按需 kb_search） ----
+  `CREATE TABLE IF NOT EXISTS knowledge (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL,
+    scope VARCHAR(8) DEFAULT 'conv',
+    conversation_id INT,
+    title VARCHAR(200) NOT NULL,
+    body TEXT,
+    created_at DATETIME DEFAULT NOW(),
+    KEY idx_kb_scope (account_id, scope)
+  )`,
 ];
 
 export async function initSchema() {

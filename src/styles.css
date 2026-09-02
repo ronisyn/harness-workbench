@@ -122,6 +122,14 @@ body {
 
 /* 对话流轨迹卡片 */
 .rw-msg-traces { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.rw-approval { border: 1px solid var(--rw-red); border-left: 4px solid var(--rw-red); border-radius: 10px;
+  background: #fdf1ec; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
+.rw-approval-desc { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; margin-bottom: 8px; }
+.rw-approval-btns { display: flex; gap: 8px; }
+.rw-approval-state { font-size: 12px; }
+.rw-approval-state.reject { color: #c62828; }
+.rw-approval-state.approve { color: #2e7d32; }
+.rw-approval-state.timeout { color: var(--rw-muted); }
 .rw-trace-card { border: 1px solid var(--rw-border); border-radius: 9px; background: #fdf9f0;
   font-size: 12px; cursor: pointer; overflow: hidden; }
 .rw-trace-card.fail { border-color: #c62828; }
