@@ -4,14 +4,15 @@ import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool } from './tools/index.js';
 
 export const ENV_MAP = [
-  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在）：',
-  '- 平台代码目录：/srv/harness-workbench',
+  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
+  '- 平台代码目录：/srv/harness-workbench（你可以用 write_file/append_file 修改其中代码，用 run_command 执行 node/npm，用 git_commit 提交——你能修改并部署自己的工作台）',
   '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
   '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
   '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / capabilities(能力开关)',
-  '- 联网搜索：web_search 工具（SearXNG）',
-  '- 权限：full=整个服务器文件系统可访问；write/read=限于工作区',
-  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）。',
+  '- 联网搜索：web_search 工具（SearXNG）；网页抓取 fetch_url',
+  '- 权限：full=整个服务器文件系统可读写（含平台代码与数据库）；write/read=限于工作区',
+  '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
+  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, maxRounds = 8, keys }) {
