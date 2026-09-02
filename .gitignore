@@ -23,3 +23,6 @@ Thumbs.db
 data/
 tmp/
 .cache/
+
+# Skills (F15) - runtime-authored skill content
+skills/

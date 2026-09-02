@@ -9,6 +9,21 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+// 技能根目录（F15）：skills/<名称>/SKILL.md
+export const SKILLS_ROOT = process.env.RW_SKILLS || path.join(WORKSPACE, 'skills');
+
+// SKILL.md frontmatter 极简解析（--- 块内 name:/description:/version:）
+function parseSkillFront(full) {
+  const m = String(full).match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  const meta = {};
+  if (m) {
+    for (const line of m[1].split('\n')) {
+      const i = line.indexOf(':');
+      if (i > 0) meta[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  return { meta, body: m ? String(full).slice(m[0].length) : String(full) };
+}
 
 function inside(p, root) {
   const r = path.resolve(root);
@@ -286,6 +301,50 @@ export const TOOLS = [
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error('视觉调用失败: ' + (j.error?.message || res.status));
       return { description: (j.choices?.[0]?.message?.content || '').slice(0, 3000) };
+    } },
+
+  // ---------- 技能系统（F15：机制=挂载 SKILL.md；内容由用户/服务器自定，平台不预设） ----------
+  { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', permission: 'read',
+    params: {},
+    run: async () => {
+      if (!fs.existsSync(SKILLS_ROOT)) return { skills: [], root: SKILLS_ROOT };
+      const out = [];
+      for (const d of fs.readdirSync(SKILLS_ROOT, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        const p = path.join(SKILLS_ROOT, d.name, 'SKILL.md');
+        if (!fs.existsSync(p)) continue;
+        const { meta } = parseSkillFront(fs.readFileSync(p, 'utf8'));
+        out.push({ name: d.name, description: meta.description || '(无简介)', version: meta.version || '1.0.0' });
+      }
+      return { skills: out, root: SKILLS_ROOT };
+    } },
+  { name: 'skill_load', description: '载入技能：该技能 SKILL.md 全文进入系统提示，本会话后续轮次持续生效（跨轮记忆）；重复载入即更新', permission: 'read',
+    params: { name: { type: 'string', required: true, desc: '技能目录名（skills_list 查得）' } },
+    run: async (a, ctx) => {
+      const name = String(a.name).trim();
+      if (!/^[\w-]{1,64}$/.test(name)) throw new Error('技能名非法（仅字母数字-_）');
+      const p = path.join(SKILLS_ROOT, name, 'SKILL.md');
+      if (!fs.existsSync(p)) throw new Error('技能不存在: ' + name + '（可先用 skill_save 创建）');
+      const full = fs.readFileSync(p, 'utf8').slice(0, 16000);
+      const { meta, body } = parseSkillFront(full);
+      ctx.skills = ctx.skills || {};
+      ctx.skills[name] = { name, description: meta.description || '', content: full };
+      if (ctx.conversationId) {
+        await db.query('INSERT INTO conv_skills (conversation_id, skill_name) VALUES (?,?) ON DUPLICATE KEY UPDATE skill_name=VALUES(skill_name)', [ctx.conversationId, name]);
+      }
+      return { loaded: name, description: meta.description || '', bodyLength: body.length, head: body.slice(0, 800) };
+    } },
+  { name: 'skill_save', description: '创建/更新技能：写入 skills/<名称>/SKILL.md（frontmatter: name/description/version，正文为执行指令），之后可用 skill_load 载入', permission: 'write',
+    params: { name: { type: 'string', required: true }, description: { type: 'string', desc: '一句话说明何时用该技能' }, content: { type: 'string', required: true, desc: 'SKILL.md 正文指令' } },
+    run: async (a, ctx) => {
+      const name = String(a.name).trim();
+      if (!/^[\w-]{1,64}$/.test(name)) throw new Error('技能名非法（仅字母数字-_）');
+      if (ctx.limitPath && !inside(SKILLS_ROOT, ctx.root)) throw new Error('技能目录超出当前权限工作区');
+      const fm = ['---', 'name: ' + name, 'description: ' + String(a.description || '').replace(/\n/g, ' '), 'version: 1.0.0', '---', ''].join('\n');
+      const p = path.join(SKILLS_ROOT, name, 'SKILL.md');
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, fm + String(a.content), 'utf8');
+      return { saved: name, path: p };
     } },
 
   // ---------- 飞书文档（F7/F9/F10/F11，v2.0 渠道一期） ----------

@@ -31,6 +31,16 @@ const COMPLETION_HINT = [
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 1.0 }) {
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
+  // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
+  const sysContent = () => {
+    const loaded = ctx.skills ? Object.values(ctx.skills) : [];
+    if (!loaded.length) return ENV_MAP;
+    return [ENV_MAP, ...loaded.map((s) => '【已载入技能: ' + s.name + '】\n' + s.content)].join('\n\n');
+  };
+  const refreshSys = () => {
+    const c = sysContent();
+    if (msgs[0].content !== c) msgs[0] = { role: 'system', content: c };
+  };
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
   const t0 = Date.now();
@@ -38,6 +48,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   const ABSOLUTE_CAP = 200; // 运行时护栏：绝对兜底轮次（非预设限制，仅防失控）
 
   for (let round = 0; round < ABSOLUTE_CAP; round++) {
+    refreshSys();
     // 时间预算护栏
     if (Date.now() - t0 > TIME_BUDGET_MS) {
       return { content: '（达到 10 分钟时间预算，已停止。可让我继续或缩小任务范围）', toolLog, usage: {} };

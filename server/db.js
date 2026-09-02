@@ -190,6 +190,14 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     updated_at DATETIME DEFAULT NOW()
   )`,
+  // ---- 会话已载入技能（F15：技能名持久化，文件内容每次请求实时读取） ----
+  `CREATE TABLE IF NOT EXISTS conv_skills (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    skill_name VARCHAR(64) NOT NULL,
+    created_at DATETIME DEFAULT NOW(),
+    UNIQUE KEY uq_conv_skill (conversation_id, skill_name)
+  )`,
 ];
 
 export async function initSchema() {

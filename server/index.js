@@ -9,6 +9,7 @@ import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
 import { runAgent } from './agent.js';
+import { SKILLS_ROOT } from './tools/index.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -221,6 +222,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
     if (gl) messages.push({ role: 'system', content: '【当前会话目标】' + gl.objective + '\n（持续围绕该目标工作直至完成；完成时调用 update_goal 标记为 completed）' });
   } catch { /* goals 表不可用时静默跳过 */ }
+  // F15 技能注入：会话已载入技能（conv_skills 记录名字，内容每次实时读 SKILL.md → 文件改动即生效）
+  try {
+    const skRows = await db.query('SELECT skill_name FROM conv_skills WHERE conversation_id=?', [conversationId]);
+    for (const sk of skRows) {
+      const sp = path.join(SKILLS_ROOT, sk.skill_name, 'SKILL.md');
+      if (fs.existsSync(sp)) {
+        const sfull = fs.readFileSync(sp, 'utf8').slice(0, 16000);
+        const body = sfull.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+        messages.push({ role: 'system', content: '【已载入技能: ' + sk.skill_name + '】\n' + body });
+      }
+    }
+  } catch { /* 技能目录不可用时静默跳过 */ }
 
   // SSE 头
   res.writeHead(200, {
