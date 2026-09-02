@@ -25,6 +25,9 @@ function runCmd(cmd, args, opts = {}, timeout = 30000) {
 
 const readTxt = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { throw new Error('读取失败: ' + e.message); } };
 
+// 后台任务注册表（run_long_task 写入，job_list/job_output 读取）
+export const jobs = new Map();
+
 export const TOOLS = [
   // ---------- B1-B10 文件 ----------
   { name: 'read_file', description: '读取文本文件内容（max 50KB）', permission: 'read',
@@ -36,6 +39,16 @@ export const TOOLS = [
   { name: 'append_file', description: '追加内容到文件', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
+  { name: 'edit_file', description: '精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）', permission: 'write',
+    params: { path: { type: 'string', required: true, desc: '文件路径' }, old: { type: 'string', required: true, desc: '要替换的原文（必须完全匹配文件内容）' }, new: { type: 'string', desc: '新内容（默认删除 old）' } },
+    run: async (a, ctx) => {
+      if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区');
+      const content = fs.readFileSync(a.path, 'utf8');
+      if (!content.includes(a.old)) throw new Error('未找到要替换的原文（old 须与文件内容完全匹配，可用 read_file 先确认）');
+      const updated = content.split(a.old).join(a.new ?? '');
+      fs.writeFileSync(a.path, updated, 'utf8');
+      return { edited: true, diff: '- ' + String(a.old).slice(0, 500) + '\n+ ' + String(a.new ?? '').slice(0, 500) };
+    } },
   { name: 'list_dir', description: '列出目录内容', permission: 'read',
     params: { path: { type: 'string', required: false, desc: '默认工作区' } },
     run: async (a, ctx) => { const p = a.path || ctx.root; return { entries: fs.readdirSync(p, { withFileTypes: true }).map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' })).slice(0, 200) }; } },
@@ -94,18 +107,35 @@ export const TOOLS = [
       const r = await runCmd(cmd, args, { cwd: ctx.root }, t);
       return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code };
     } },
-  { name: 'run_long_task', description: '后台运行长任务，返回 job id', permission: 'full',
+  { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },
     run: async (a) => {
       const [cmd, ...args] = a.cmd.split(/\s+/);
       const { spawn } = await import('node:child_process');
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const logDir = '/tmp/rw-jobs';
+      fs.mkdirSync(logDir, { recursive: true });
+      const logFile = path.join(logDir, 'job-' + Date.now() + '.log');
+      const fd = fs.openSync(logFile, 'a');
+      const child = spawn(cmd, args, { detached: true, stdio: ['ignore', fd, fd] });
       child.unref();
-      return { jobId: String(child.pid), started: true };
+      jobs.set(String(child.pid), { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' });
+      child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } });
+      return { jobId: String(child.pid), cmd: a.cmd, log: logFile };
     } },
-  { name: 'kill_process', description: '终止进程', permission: 'full',
+  { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
     run: async (a) => { try { process.kill(a.pid, 'SIGTERM'); return { killed: true }; } catch (e) { throw new Error('终止失败: ' + e.message); } } },
+  { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
+    params: {},
+    run: async () => ({ jobs: [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log })) }) },
+  { name: 'job_output', description: '查看后台任务输出日志（最近 8000 字符）', permission: 'full',
+    params: { jobId: { type: 'string', required: true } },
+    run: async (a) => {
+      const j = jobs.get(String(a.jobId));
+      if (!j) throw new Error('job 不存在: ' + a.jobId + '（可用 job_list 查看）');
+      let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
+      return { jobId: a.jobId, status: j.status, output: out.slice(-8000) };
+    } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
   { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read',
@@ -167,6 +197,36 @@ export const TOOLS = [
     run: async (a) => { const r = await runCmd('node', ['--check', a.path]); return { ok: r.ok, err: r.err }; } },
   { name: 'run_test', description: '运行测试（write 级仅工作区内）', permission: 'write', params: { dir: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await runCmd('npm', ['test'], { cwd: a.dir }); return { ok: r.ok, out: r.out, err: r.err }; } },
+
+  // ---------- 图片理解（视觉模型分析图片） ----------
+  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '本地图片路径或 URL' } },
+    run: async (a) => {
+      const key = process.env.DEEPSEEK_API_KEY;
+      if (!key) throw new Error('未配置 DeepSeek key');
+      let dataUrl;
+      if (/^https?:\/\//.test(a.path)) {
+        dataUrl = a.path;
+      } else {
+        const buf = fs.readFileSync(a.path);
+        const ext = path.extname(a.path).toLowerCase().replace('.', '') || 'png';
+        const mime = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', webp: 'webp' }[ext] || 'png';
+        dataUrl = `data:image/${mime};base64,${buf.toString('base64')}`;
+      }
+      const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+        body: JSON.stringify({
+          model: 'deepseek-v4-flash-vision-exp',
+          messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请详细描述这张图片的内容（中文）' }] }],
+          max_tokens: 800,
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error('视觉调用失败: ' + (j.error?.message || res.status));
+      return { description: (j.choices?.[0]?.message?.content || '').slice(0, 3000) };
+    } },
 
   // ---------- 飞书文档（F7/F9/F10/F11，v2.0 渠道一期） ----------
   { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },

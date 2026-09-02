@@ -34,6 +34,7 @@ export const api = {
   marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),
   marketConnect: (source, modelIds) => request('/api/market/connect', { method: 'POST', body: JSON.stringify({ source, modelIds }) }),
   upload: (name, base64) => request('/api/upload', { method: 'POST', body: JSON.stringify({ name, data: base64 }) }),
+  getFile: (path) => request('/api/file?path=' + encodeURIComponent(path)),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

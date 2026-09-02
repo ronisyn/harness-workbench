@@ -129,6 +129,34 @@ function needsTools(content) {
   return TOOL_INTENT_RE.test(content);
 }
 
+// P1-F8 长对话摘要生成（懒加载：后台调 LLM 压缩早期消息）
+async function generateSummary(provider, earlyText, conversationId) {
+  try {
+    const key = config.keys[findProvider(provider)?.keyEnv];
+    const base = findProvider(provider)?.base;
+    if (!key || !base) return;
+    const res = await fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+      body: JSON.stringify({
+        model: findProvider(provider)?.defaultModel,
+        messages: [
+          { role: 'system', content: '请把以下早期对话压缩成简明中文摘要（保留：主题、关键决定、用户需求、文件路径、重要结论；200 字内）' },
+          { role: 'user', content: earlyText.slice(0, 30000) },
+        ],
+        max_tokens: 500,
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const j = await res.json().catch(() => ({}));
+    const summary = j.choices?.[0]?.message?.content || '';
+    if (summary) {
+      await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, summary]);
+      console.log('[summary] 会话 ' + conversationId + ' 摘要已生成');
+    }
+  } catch { /* 摘要失败不影响对话 */ }
+}
+
 app.post('/api/chat', requireAuth, async (req, res) => {
   const { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
@@ -140,9 +168,21 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
   await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conversationId]);
 
-  // 组装历史
-  const hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
-  const messages = hist.map((m) => ({ role: m.role, content: m.content }));
+  // 组装历史（长对话压缩 P1-F8：>40 条用摘要 + 最近 30 条；摘要异步懒生成不阻塞对话）
+  let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
+  let earlySummary = null;
+  if (hist.length > 40) {
+    const s = (await db.query('SELECT summary FROM conv_summaries WHERE conversation_id=?', [conversationId]))[0];
+    earlySummary = s?.summary || null;
+    if (!earlySummary) {
+      const early = hist.slice(0, -30).map((m) => `${m.role}: ${String(m.content || '').slice(0, 400)}`).join('\n---\n');
+      generateSummary(provider, early, conversationId).catch(() => {});
+    }
+    hist = hist.slice(-30);
+  }
+  const messages = [];
+  if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
+  for (const m of hist) messages.push({ role: m.role, content: m.content });
 
   // SSE 头
   res.writeHead(200, {
@@ -229,6 +269,20 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       tokensOut: u.tout || 0,
     },
   });
+});
+
+// ---------- 读文件（轨迹"打开文件"查看内容用） ----------
+app.get('/api/file', requireAuth, async (req, res) => {
+  const p = req.query.path;
+  if (!p) return res.status(400).json({ ok: false, message: '缺 path 参数' });
+  try {
+    const st = fs.statSync(p);
+    if (st.isDirectory()) return res.json({ ok: true, path: p, type: 'dir', entries: fs.readdirSync(p).slice(0, 200) });
+    const isText = /\.(md|txt|js|jsx|ts|tsx|json|yaml|yml|html|css|py|sh|mjs|cjs|xml|sql|env|gitignore|conf)$/i.test(p) || p.includes('package.json');
+    if (!isText) return res.json({ ok: true, path: p, type: 'binary', size: st.size });
+    const content = fs.readFileSync(p, 'utf8');
+    res.json({ ok: true, path: p, type: 'text', size: st.size, content: content.slice(0, 60000) });
+  } catch (e) { res.status(400).json({ ok: false, message: '读取失败: ' + e.message }); }
 });
 
 // ---------- 上传文件（B29） ----------

@@ -157,6 +157,12 @@ const SCHEMA = [
     svalue JSON,
     updated_at DATETIME DEFAULT NOW()
   )`,
+  // ---- 长对话摘要（上下文压缩） ----
+  `CREATE TABLE IF NOT EXISTS conv_summaries (
+    conversation_id INT PRIMARY KEY,
+    summary MEDIUMTEXT,
+    updated_at DATETIME DEFAULT NOW()
+  )`,
 ];
 
 export async function initSchema() {

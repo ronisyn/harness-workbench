@@ -14,11 +14,26 @@ function Md({ text }) {
 }
 
 // 轨迹卡片（对话流内联渲染，对齐 3080 工具调用展示）
+const FILE_TOOLS = ['read_file', 'write_file', 'append_file', 'edit_file', 'extract_pdf', 'extract_docx', 'extract_xlsx', 'extract_pptx', 'syntax_check', 'ocr_image', 'view_image'];
 function ToolCard({ t }) {
   const [open, setOpen] = React.useState(false);
+  const [fileOpen, setFileOpen] = React.useState(false);
+  const [fileData, setFileData] = React.useState(null);
   const st = t.status === 'fail' ? '✕' : t.status === 'running' ? '●' : '✓';
   const argsText = typeof t.args === 'string' ? t.args : JSON.stringify(t.args);
   const resText = typeof t.result === 'string' ? t.result : JSON.stringify(t.result);
+  const filePath = t.args && (typeof t.args === 'object') ? (t.args.path || t.args.file || t.args.src || null) : null;
+  const canOpenFile = FILE_TOOLS.includes(t.name) && filePath && t.status === 'done';
+  const openFile = async (e) => {
+    e.stopPropagation();
+    if (!fileOpen) {
+      try {
+        const d = await api.getFile(filePath);
+        setFileData(d);
+      } catch (ex) { setFileData({ error: ex.message }); }
+    }
+    setFileOpen(!fileOpen);
+  };
   return (
     <div className={'rw-trace-card ' + (t.status === 'fail' ? 'fail' : '')} onClick={() => setOpen(!open)}>
       <div className="rw-trace-card-head">
@@ -26,8 +41,21 @@ function ToolCard({ t }) {
         <span className="rw-trace-tool">🔧 {t.name}</span>
         {t.seq ? <span className="rw-trace-seq">#{t.seq}</span> : null}
         <span className="rw-trace-ms">{(t.duration_ms || 0) / 1000 > 0 ? ((t.duration_ms || 0) / 1000).toFixed(1) + 's' : ''}</span>
+        {canOpenFile && <button className="rw-trace-open" onClick={openFile} title="打开文件查看内容">📂 打开</button>}
         <span className="rw-trace-toggle">{open ? '▾' : '▸'}</span>
       </div>
+      {fileOpen && fileData && (
+        <div className="rw-trace-filedetail" onClick={(e) => e.stopPropagation()}>
+          <div className="rw-trace-filename">{filePath}</div>
+          {fileData.error
+            ? <div className="rw-trace-filerr">{fileData.error}</div>
+            : fileData.type === 'dir'
+              ? <pre>{fileData.entries.join('\n')}</pre>
+              : fileData.type === 'binary'
+                ? <div>二进制文件（{(fileData.size / 1024).toFixed(1)} KB），无法文本预览</div>
+                : <pre>{fileData.content}</pre>}
+        </div>
+      )}
       {open && (
         <div className="rw-trace-card-detail" onClick={(e) => e.stopPropagation()}>
           {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 600)}</pre></div> : null}
@@ -132,6 +160,35 @@ export default function Chat({ user, onLogout }) {
     if (cur === id) { setCur(null); setCurTitle(''); setMsgs([]); setStats({}); }
     loadConvs();
   };
+
+  // P1-F1 对话导出（Markdown）
+  const exportConv = () => {
+    if (!msgs.length) { setToast('当前会话无消息'); return; }
+    const body = msgs.map((m) => {
+      const who = m.role === 'user' ? '**我**' : '**AI**';
+      const t = (m.traces && m.traces.length ? m.traces.map((tr) => `> 🔧 ${tr.name}${tr.status === 'fail' ? ' ✕' : ''}${tr.result ? '\n> ' + String(tr.result).slice(0, 200) : ''}`).join('\n') + '\n\n' : '');
+      return `## ${who}\n\n${t}${m.content || ''}\n`;
+    }).join('\n---\n\n');
+    const blob = new Blob(['# ' + (curTitle || '对话') + '\n\n' + body], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (curTitle || '对话') + '.md';
+    a.click();
+    URL.revokeObjectURL(url);
+    setToast('对话已导出');
+  };
+
+  // P1-F2 快捷键：Ctrl+Enter 发送 / Ctrl+N 新对话 / Ctrl+E 导出
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); send(); }
+      if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newConv(); }
+      if (e.ctrlKey && (e.key === 'e' || e.key === 'E')) { e.preventDefault(); exportConv(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   const stopGen = () => {
     if (abortRef.current) abortRef.current.abort();
@@ -245,6 +302,7 @@ export default function Chat({ user, onLogout }) {
         <div className="rw-logo" onClick={() => { setCur(null); setMsgs([]); }}>Roni Workbench</div>
         <div className="rw-conv-title">{curTitle || 'Roni Workbench'}</div>
         <div className="rw-top-actions">
+          {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}
           {cur && (
             <select className="rw-select" value={curPerm} onChange={(e) => changePermission(e.target.value)} title="会话权限">
               {Object.entries(PERM_LABEL).map(([k, v]) => <option key={k} value={k}>权限：{v}</option>)}

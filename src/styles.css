@@ -144,6 +144,14 @@ body {
 .rw-trace-seq { color: var(--rw-muted); font-size: 10px; }
 .rw-trace-ms { color: var(--rw-muted); font-size: 11px; }
 .rw-trace-toggle { color: var(--rw-muted); font-size: 10px; }
+.rw-trace-open { border: 1px solid var(--rw-border); background: var(--rw-panel); color: var(--rw-red);
+  font-size: 11px; padding: 1px 7px; border-radius: 5px; cursor: pointer; }
+.rw-trace-open:hover { background: var(--rw-red); color: #fff; }
+.rw-trace-filedetail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; }
+.rw-trace-filename { font-size: 11px; color: var(--rw-red); font-weight: 600; margin-bottom: 4px; }
+.rw-trace-filedetail pre { background: #f4e3c4; border-radius: 6px; padding: 6px 8px; margin: 0;
+  font-family: "SF Mono", Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+.rw-trace-filerr { color: var(--rw-red); font-size: 12px; }
 .rw-trace-card-detail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; display: flex; flex-direction: column; gap: 5px; }
 .rw-trace-line b { display: block; color: var(--rw-muted); font-size: 10px; margin-bottom: 2px; }
 .rw-trace-line pre { background: #f4e3c4; border-radius: 6px; padding: 5px 8px; margin: 0;
