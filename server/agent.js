@@ -1,10 +1,22 @@
 // server/agent.js - Agent 执行循环（思考→工具→观察→修正）
-// 用 LLM function calling：模型决定调用工具 → 执行 → 结果回填 → 继续，直到模型给出最终回答
+// 工具路径注入"环境地图"（资源位置说明，非身份设定）——让 AI 访问真实系统而非局限于空工作区
 import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool } from './tools/index.js';
 
+export const ENV_MAP = [
+  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在）：',
+  '- 平台代码目录：/srv/harness-workbench',
+  '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
+  '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
+  '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / capabilities(能力开关)',
+  '- 联网搜索：web_search 工具（SearXNG）',
+  '- 权限：full=整个服务器文件系统可访问；write/read=限于工作区',
+  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）。',
+].join('\n');
+
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, maxRounds = 8, keys }) {
-  const msgs = [...messages];
+  // 工具路径：消息前注入环境地图（普通对话路径不经此函数，保持模型自然认知）
+  const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   const toolLog = [];
   for (let round = 0; round < maxRounds; round++) {
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys);

@@ -159,8 +159,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     let answer = '';
     let usage = {};
     if (useTools) {
-      // Agent 路径：带工具（function calling）
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
+      // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
+      const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws };
       const result = await runAgent({ provider, model, messages, permission, ctx: agentCtx, keys: config.keys });
       answer = result.content || '（无输出）';
       usage = result.usage || {};
