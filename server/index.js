@@ -11,6 +11,7 @@ import { chatStream } from './llm/gateway.js';
 import { runAgent } from './agent.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
+import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -234,6 +235,10 @@ async function main() {
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));
+  }
+  // 飞书 webhook（F1-F5，需公网 HTTPS 回调；PROD 域名阶段启用，TEST 可用隧道）
+  if (process.env.RW_FEISHU_WEBHOOK === '1') {
+    registerFeishuWebhook(app);
   }
   app.listen(config.port, () => {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);
