@@ -1,6 +1,17 @@
 // src/Chat.jsx - 主对话界面：左侧会话列表 + 中间对话区 + 统计条 + 设置抽屉
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api, streamChat, getToken } from './api.js';
+
+// Markdown 渲染（A1-A22 基础：标题/粗体/列表/表格/代码/链接/引用）
+function Md({ text }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>
+      {text || ''}
+    </ReactMarkdown>
+  );
+}
 
 const PROVIDER_LABEL = {
   deepseek: 'DeepSeek', glm: 'GLM', ark: '豆包', moonshot: 'Kimi',
@@ -169,7 +180,13 @@ export default function Chat({ user, onLogout }) {
           {msgs.map((m, i) => (
             <div key={i} className={'rw-msg ' + (m.role === 'user' ? 'me' : 'ai') + (m.streaming ? ' stream' : '')}>
               <div className="rw-msg-role">{m.role === 'user' ? '我' : 'RW'}</div>
-              <div className="rw-msg-c">{m.content || (m.streaming ? '…' : '')}{m.streaming && <span className="rw-caret">▋</span>}</div>
+              <div className="rw-msg-c">
+                {m.role === 'assistant' ? (
+                  <>{m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}{m.streaming && <span className="rw-caret">▋</span>}</>
+                ) : (
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>
+                )}
+              </div>
             </div>
           ))}
           <div ref={bottomRef} />
