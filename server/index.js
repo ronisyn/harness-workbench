@@ -188,6 +188,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     // 存 assistant 消息
     const r = await db.query('INSERT INTO messages (conversation_id, role, content, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?)',
       [conversationId, 'assistant', answer, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
+    // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
+    await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
     // 用量统计
     await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW())',
       [req.user.id, conversationId, r.insertId, provider, model || provider, usage.tokens_in || 0, usage.tokens_out || 0, Date.now() - t0, firstTokenMs]);
