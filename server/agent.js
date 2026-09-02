@@ -82,7 +82,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const seq = toolLog.length + 1;
       if (emit) emit({ type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
       const tStart = Date.now();
-      const result = await execTool(call.function.name, args, ctx);
+      const result = await execTool(call.function.name, args, { ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature });
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
       const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
@@ -93,7 +93,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         const p = plans.get(String(ctx.conversationId || 'g'));
         if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
       }
-      msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 4000) });
+      const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
+      msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, msgCap) });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });

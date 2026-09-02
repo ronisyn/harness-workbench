@@ -303,6 +303,61 @@ export const TOOLS = [
       return { description: (j.choices?.[0]?.message?.content || '').slice(0, 3000) };
     } },
 
+  // ---------- 子代理（F16/F17：主代理派生独立代理执行任务，复用完整 Agent 循环） ----------
+  { name: 'subagent', description: '启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（"子:"前缀）并留痕。', permission: 'read',
+    params: {
+      prompt: { type: 'string', required: true, desc: '给子代理的完整任务指令（自包含，含目标与验收标准）' },
+      name: { type: 'string', desc: '子代理名称（用于展示，默认 子代理）' },
+      model: { type: 'string', desc: '子代理模型，默认与主代理相同' },
+      mode: { type: 'string', desc: 'sync=等结果(默认) | async=立即返回id' },
+    },
+    run: async (a, ctx) => {
+      if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限，请自己直接完成任务');
+      const running = [...subs.values()].filter((s) => s.status === 'running').length;
+      if (running >= 8) throw new Error('当前并发子代理已达上限(8)，稍后再试或减少并行数');
+      const { spawnSubagent, waitSub } = await import('../subagent.js');
+      const prompt = String(a.prompt || '').trim();
+      if (!prompt) throw new Error('prompt 必填');
+      const { id } = await spawnSubagent({
+        prompt, name: String(a.name || '').slice(0, 30) || undefined,
+        provider: ctx.__provider || ctx.provider || 'deepseek',
+        model: a.model || ctx.__model || ctx.model || 'deepseek-v4-flash',
+        permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+      });
+      if (a.mode === 'async') return { sub_id: id, status: 'running', tip: '用 subagent_output 查询结果（id=' + id + '）' };
+      const rec = await waitSub(id);
+      if (rec.status === 'error') throw new Error('子代理失败: ' + rec.error);
+      return {
+        sub_id: id, status: rec.status, durationMs: rec.durationMs,
+        toolSteps: (rec.toolLog || []).length,
+        lastSteps: (rec.toolLog || []).slice(-8),
+        result: String(rec.result || '').slice(0, 6000),
+      };
+    } },
+  { name: 'subagent_output', description: '查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果。未完成就继续查询/等一会。', permission: 'read',
+    params: { id: { type: 'string', required: true, desc: 'sub_id（subagent async 返回）' } },
+    run: async (a) => {
+      const { subs: subMap } = await import('../subagent.js');
+      const rec = subMap.get(String(a.id));
+      if (!rec) throw new Error('子代理不存在: ' + a.id);
+      if (rec.status === 'running') return { sub_id: rec.id, status: 'running', tip: '仍在执行，稍后重试' };
+      if (rec.status === 'error') return { sub_id: rec.id, status: 'error', error: rec.error };
+      return { sub_id: rec.id, status: 'done', durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, lastSteps: (rec.toolLog || []).slice(-8), result: String(rec.result || '').slice(0, 6000) };
+    } },
+  { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）', permission: 'read',
+    params: { ids: { type: 'string', required: true, desc: '逗号分隔的 sub_id 列表' } },
+    run: async (a) => {
+      const { subs: subMap, waitSub } = await import('../subagent.js');
+      const ids = String(a.ids).split(',').map((s) => s.trim()).filter(Boolean);
+      const out = [];
+      for (const id of ids) {
+        if (!subMap.has(id)) { out.push({ sub_id: id, error: '不存在' }); continue; }
+        const rec = await waitSub(id);
+        out.push({ sub_id: id, status: rec.status, durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, result: rec.status === 'done' ? String(rec.result || '').slice(0, 5000) : rec.error });
+      }
+      return { joined: out };
+    } },
+
   // ---------- 技能系统（F15：机制=挂载 SKILL.md；内容由用户/服务器自定，平台不预设） ----------
   { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', permission: 'read',
     params: {},
