@@ -136,7 +136,8 @@ function needsTools(content) {
 }
 
 // P1-F8 长对话摘要生成（懒加载：后台调 LLM 压缩早期消息）
-async function generateSummary(provider, earlyText, conversationId) {  try {
+async function generateSummary(provider, earlyText, conversationId) {
+  try {
     const key = config.keys[findProvider(provider)?.keyEnv];
     const base = findProvider(provider)?.base;
     if (!key || !base) return;
@@ -159,7 +160,7 @@ async function generateSummary(provider, earlyText, conversationId) {  try {
       await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, summary]);
       console.log('[summary] 会话 ' + conversationId + ' 摘要已生成');
     }
-  } catch { /* 摘要失败不影响对话 */ }
+  } catch (e) { console.error('[summary] 会话 ' + conversationId + ' 摘要失败:', e.message); }
 }
 
 // ---------- 设置读写（settings 表） ----------
