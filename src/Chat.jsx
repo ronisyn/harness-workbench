@@ -556,7 +556,7 @@ export default function Chat({ user, onLogout }) {
                   <div className="rw-cap-gtitle">工具调用轨迹</div>
                   {toolcalls.length ? toolcalls.map((t) => (
                     <div key={t.id} className="rw-trace-item">
-                      <div className="rw-trace-head"><b>{t.tool_name}</b> <span className={'rw-trace-status ' + t.status}>{t.status}</span> {(t.duration_ms / 1000).toFixed(1)}s</div>
+                      <div className="rw-trace-head"><b>{t.tool_name}</b> <span className={'rw-trace-status ' + t.status}>{t.status}</span> {t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : ''}</div>
                       <div className="rw-trace-args">参数：{String(t.args || '').slice(0, 150)}</div>
                       <div className="rw-trace-res">结果：{String(t.result_summary || '').slice(0, 200)}</div>
                     </div>

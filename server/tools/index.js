@@ -538,11 +538,13 @@ export async function execTool(name, args, ctx) {
   } catch (e) {
     result = { error: e.message };
   }
-  // 留痕（audit_log + tool_calls）
-  try {
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId, 'tool:' + name, JSON.stringify({ args, result, ms: Date.now() - t0 }).slice(0, 1000)]);
-    await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
-      [ctx.conversationId, ctx.messageId || null, name, JSON.stringify(args).slice(0, 2000), JSON.stringify(result).slice(0, 2000), Date.now() - t0, result.error ? 'fail' : 'done']);
-  } catch { /* 留痕失败不影响 */ }
+  // 留痕（audit_log + tool_calls；用户"停止"中止的不留痕，避免孤儿 fail 行回填到后续消息）
+  if (!eff.__signal || !eff.__signal.aborted) {
+    try {
+      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId, 'tool:' + name, JSON.stringify({ args, result, ms: Date.now() - t0 }).slice(0, 1000)]);
+      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
+        [ctx.conversationId, ctx.messageId || null, name, JSON.stringify(args).slice(0, 2000), JSON.stringify(result).slice(0, 2000), Date.now() - t0, result.error ? 'fail' : 'done']);
+    } catch { /* 留痕失败不影响 */ }
+  }
   return result;
 }
