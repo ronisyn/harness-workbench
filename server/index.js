@@ -114,6 +114,30 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   res.json({ ok: true, messages: rows });
 });
 
+// 对话导出（Markdown，含思考/轨迹；前端亦可用本地 Blob 导出）
+app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
+  try {
+    const conv = (await db.query('SELECT title FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
+    const ms = await db.query('SELECT id, role, content, reasoning, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    const tc = await db.query('SELECT message_id, tool_name, args, result_summary, status FROM tool_calls WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    const byMsg = {};
+    for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
+    const lines = [];
+    for (const m of ms) {
+      lines.push('## ' + (m.role === 'user' ? '我' : 'AI') + '  \n');
+      if (m.role === 'assistant') {
+        if (m.reasoning) lines.push(m.reasoning.split('\n').filter(Boolean).map((l) => '> 🧠 ' + l).join('\n') + '  \n');
+        const ts = byMsg[m.id] || [];
+        for (const t of ts) lines.push(`> 🔧 ${t.tool_name}${t.status === 'fail' ? ' ✕' : ''}${t.result_summary ? '\n> ' + String(t.result_summary).slice(0, 200) : ''}  `);
+        if (ts.length) lines.push('');
+      }
+      lines.push(String(m.content || '') + '\n\n---\n');
+    }
+    res.json({ ok: true, filename: (conv.title || '对话') + '.md', content: '# ' + (conv.title || '对话') + '\n\n' + lines.join('\n') });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
 // 会话轨迹（工具调用记录）
 app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, message_id, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 100', [req.params.id]);
