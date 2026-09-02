@@ -251,7 +251,9 @@ export default function Chat({ user, onLogout }) {
           <div className="rw-inputbar">
             <input className="rw-input" placeholder="输入消息，Enter 发送…" value={input}
               onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(); }} disabled={busy || !cur} />
-            <button className="rw-btn pri" onClick={send} disabled={busy || !cur || !input.trim()}>{busy ? '生成中' : '发送'}</button>
+            {busy
+              ? <button className="rw-btn stop" onClick={stopGen} title="停止生成">■ 停止</button>
+              : <button className="rw-btn pri" onClick={send} disabled={!cur || !input.trim()}>发送</button>}
           </div>
         </main>
       </div>
