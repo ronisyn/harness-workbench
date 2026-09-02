@@ -179,8 +179,15 @@ const VISION_RE = /(图片|看图|照片|截图|识别.*图|vision|image)/i;
 function resolveRoute(content, provider, model) {
   if (provider !== 'auto' && model !== '__auto__') return { provider, model };
   // 自动路由：视觉需求 → 豆包视觉；含工具意图且需要执行 → 默认主力（deepseek 已支持工具）
-  if (VISION_RE.test(content)) return { provider: 'ark', model: 'doubao-seed-2-0-mini-260428', note: '视觉任务→豆包视觉' };
-  return { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→DeepSeek V4 Flash' };
+  let route;
+  if (VISION_RE.test(content)) route = { provider: 'ark', model: 'doubao-seed-2-0-mini-260428', note: '视觉任务→豆包视觉' };
+  else route = { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→DeepSeek V4 Flash' };
+  // 目标厂商未配 Key 时回落主力（防自动路由把对话带到不可用厂商）
+  try {
+    const p = findProvider(route.provider);
+    if (!config.keys[p?.keyEnv]) route = { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→' + route.provider + ' 未配置 Key，回落 DeepSeek' };
+  } catch { /* 保持原路由 */ }
+  return route;
 }
 
 // ---------- 费用单价（元/百万 token，近似；F13 费用统计） ----------
