@@ -7,6 +7,23 @@ import { runAgent } from './agent.js';
 export const subs = new Map(); // id -> { status: running|done|error, prompt, name, result, error, createdAt }
 let subSeq = 0;
 
+// 长期运行护栏：finished 记录保留 2 小时；超过 300 条时淘汰最老的已完成项
+const SUB_TTL_MS = 2 * 60 * 60 * 1000;
+const SUB_MAX = 300;
+export function pruneSubs() {
+  const now = Date.now();
+  let doneCount = 0;
+  for (const [id, s] of subs) {
+    if (s.status !== 'running' && now - new Date(s.createdAt).getTime() > SUB_TTL_MS) subs.delete(id);
+    else if (s.status !== 'running') doneCount++;
+  }
+  if (doneCount > SUB_MAX) {
+    const finished = [...subs.entries()].filter(([, s]) => s.status !== 'running')
+      .sort((a, b) => new Date(a[1].createdAt) - new Date(b[1].createdAt));
+    for (const [id] of finished.slice(0, doneCount - SUB_MAX)) subs.delete(id);
+  }
+}
+
 export function makeSubId() {
   subSeq += 1;
   return 'sub-' + subSeq + '-' + Date.now().toString(36);
@@ -27,6 +44,7 @@ function childEmit(parentEmit, subId, label) {
 }
 
 export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 1.0, depth = 0 }) {
+  pruneSubs();
   const id = makeSubId();
   const record = { id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth };
   subs.set(id, record);

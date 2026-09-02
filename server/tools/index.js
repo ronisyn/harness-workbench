@@ -46,6 +46,22 @@ const readTxt = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { 
 
 // 后台任务注册表（run_long_task 写入，job_list/job_output 读取）
 export const jobs = new Map();
+// 长期运行护栏：已退出任务保留 12 小时；总量超 200 淘汰最老的已完成项
+const JOB_TTL_MS = 12 * 60 * 60 * 1000;
+const JOB_MAX = 200;
+function pruneJobs() {
+  const now = Date.now();
+  let doneCount = 0;
+  for (const [id, j] of jobs) {
+    if (j.status === 'exited' && now - (j.started || 0) > JOB_TTL_MS) jobs.delete(id);
+    else if (j.status === 'exited') doneCount++;
+  }
+  if (doneCount > JOB_MAX) {
+    const finished = [...jobs.entries()].filter(([, j]) => j.status === 'exited')
+      .sort((a, b) => (a[1].started || 0) - (b[1].started || 0));
+    for (const [id] of finished.slice(0, doneCount - JOB_MAX)) jobs.delete(id);
+  }
+}
 // 会话任务清单（F9：plan_tasks/plan_done 使用；key=conversationId）
 export const plans = new Map();
 
@@ -137,6 +153,7 @@ export const TOOLS = [
   { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },
     run: async (a) => {
+      pruneJobs();
       const [cmd, ...args] = a.cmd.split(/\s+/);
       const { spawn } = await import('node:child_process');
       const logDir = '/tmp/rw-jobs';
