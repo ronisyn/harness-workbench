@@ -125,10 +125,14 @@ body {
 .rw-trace-card { border: 1px solid var(--rw-border); border-radius: 9px; background: #fdf9f0;
   font-size: 12px; cursor: pointer; overflow: hidden; }
 .rw-trace-card.fail { border-color: #c62828; }
-.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+.rw-trace-card .running { }
 .rw-trace-badge { font-size: 11px; width: 16px; text-align: center; }
+.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
 .rw-trace-badge.done { color: #2e7d32; }
 .rw-trace-badge.fail { color: #c62828; }
+.rw-trace-badge.running { color: var(--rw-yellow); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.rw-thinking { color: var(--rw-muted); font-size: 13px; font-style: italic; animation: pulse 1.2s infinite; }
 .rw-trace-tool { font-weight: 600; flex: 1; }
 .rw-trace-seq { color: var(--rw-muted); font-size: 10px; }
 .rw-trace-ms { color: var(--rw-muted); font-size: 11px; }

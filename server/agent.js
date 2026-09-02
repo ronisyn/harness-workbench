@@ -23,7 +23,7 @@ const COMPLETION_HINT = [
   '- 若未完成或还需验证（如：写码后未测试、查询后未给结论、任务只做了一部分）：继续调用工具把任务做完，直到目标真正完成再总结。',
 ].join('\n');
 
-export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys }) {
+export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit }) {
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
@@ -36,6 +36,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (Date.now() - t0 > TIME_BUDGET_MS) {
       return { content: '（达到 10 分钟时间预算，已停止。可让我继续或缩小任务范围）', toolLog, usage: {} };
     }
+    // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
+    if (emit) emit({ type: 'agent_thinking', round: round + 1 });
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys);
     const calls = res.toolCalls || [];
     if (!calls.length) {
@@ -49,16 +51,20 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (tail.length === 3 && tail[0] === tail[1] && tail[1] === tail[2]) {
       return { content: '（检测到重复工具调用无进展，已停止。可尝试换一种方式/补充信息）', toolLog, usage: res.usage };
     }
-    // 工具调用轮
+    // 工具调用轮（实时流式：工具开始→执行→完成 均即时上报）
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
     for (const call of calls) {
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
-      const t0 = Date.now();
+      const seq = toolLog.length + 1;
+      if (emit) emit({ type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
+      const tStart = Date.now();
       const result = await execTool(call.function.name, args, ctx);
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
-      toolLog.push({ name: call.function.name, args, result: resultText, status, durationMs: Date.now() - t0, seq: toolLog.length + 1 });
+      const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
+      toolLog.push(toolItem);
+      if (emit) emit({ type: 'tool_done', tool: toolItem });
       msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 4000) });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续

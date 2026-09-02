@@ -145,30 +145,41 @@ export default function Chat({ user, onLogout }) {
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [] }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], thinking: true }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
+      // 轨迹辅助：按 seq 更新 running 卡片（工具完成时替换）
+      const patchLast = (fn) => setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? fn(x) : x)));
       await streamChat({ conversationId: cur, content, provider, model: model || undefined },
-        (delta) => {
-          acc += delta;
-          setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, content: acc } : x)));
+        {
+          onDelta: (delta) => {
+            acc += delta;
+            patchLast((x) => ({ ...x, content: acc, thinking: false }));
+          },
+          onThinking: () => {
+            // AI 处理中（保留 thinking 指示）
+          },
+          onToolStart: (tool) => {
+            // 工具开始：追加"运行中"卡片
+            patchLast((x) => ({ ...x, thinking: false, traces: [...(x.traces || []), { ...tool, status: 'running' }] }));
+          },
+          onToolDone: (tool) => {
+            // 工具完成：按 seq 更新为完成卡片（实时刷新 ✓/结果/耗时）
+            patchLast((x) => ({ ...x, traces: (x.traces || []).map((t) => (t.seq === tool.seq ? { ...tool } : t)) }));
+          },
+          onDone: () => {
+            patchLast((x) => ({ ...x, streaming: false, thinking: false }));
+            setBusy(false);
+            loadStats(cur);
+            api.toolcalls(cur).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
+          },
+          onError: (msg) => { setToast(msg); patchLast((x) => ({ ...x, streaming: false, thinking: false })); setBusy(false); },
         },
-        () => {
-          setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
-          setBusy(false);
-          loadStats(cur);
-          api.toolcalls(cur).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
-        },
-        (msg) => { setToast(msg); setMsgs((m) => m.map((x) => ({ ...x, streaming: false }))); setBusy(false); },
-        ac.signal,
-        (toolObj) => {
-          // 轨迹实时追加到当前 assistant 消息
-          setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, traces: [...(x.traces || []), toolObj] } : x)));
-        });
+        ac.signal);
     } catch (ex) {
       if (ex.name !== 'AbortError') { setToast(ex.message); }
-      setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
+      setMsgs((m) => m.map((x) => ({ ...x, streaming: false, thinking: false })));
       setBusy(false);
     }
   };
@@ -282,8 +293,9 @@ export default function Chat({ user, onLogout }) {
                             {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
                           </div>
                         )}
+                        {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
                         {m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}
-                        {m.streaming && <span className="rw-caret">▋</span>}
+                        {m.streaming && !m.content && !m.thinking && <span className="rw-caret">▋</span>}
                       </>
                     : <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
                 </div>

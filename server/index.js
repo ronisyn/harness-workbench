@@ -160,14 +160,23 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     let usage = {};
     if (useTools) {
       // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
+      // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
       const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
       const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws };
-      const result = await runAgent({ provider, model, messages, permission, ctx: agentCtx, keys: config.keys });
+      const result = await runAgent({
+        provider, model, messages, permission, ctx: agentCtx, keys: config.keys,
+        emit: (ev) => {
+          if (ev.type === 'agent_thinking') {
+            send({ type: 'thinking', round: ev.round });
+          } else if (ev.type === 'tool_start') {
+            send({ type: 'tool_start', tool: ev.tool });
+          } else if (ev.type === 'tool_done') {
+            send({ type: 'tool_done', tool: ev.tool });
+          }
+        },
+      });
       answer = result.content || '（无输出）';
       usage = result.usage || {};
-      for (const tl of result.toolLog) {
-        send({ type: 'tool', tool: { name: tl.name, args: tl.args, result: tl.result, status: tl.status || 'done', duration_ms: tl.durationMs || 0, seq: tl.seq } });
-      }
       // Agent 路径分块模拟流式
       const chunkSize = 8;
       for (let i = 0; i < answer.length; i += chunkSize) {
