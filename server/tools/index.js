@@ -226,6 +226,38 @@ export const TOOLS = [
       return { plan: plan.steps.map((s) => ({ text: s.text, done: s.done })) };
     } },
 
+  // ---------- F10 目标系统（跨轮持续推进的长期目标） ----------
+  { name: 'set_goal', description: '设定本会话的长期目标（用户要求持续推进一件大事时用；目标会跨轮持续注入提醒，直到完成/放弃）', permission: 'read',
+    params: { objective: { type: 'string', required: true, desc: '目标描述' } },
+    run: async (a, ctx) => {
+      const cid = ctx.conversationId;
+      if (!cid) throw new Error('无会话上下文');
+      const obj = String(a.objective).trim().slice(0, 2000);
+      const existing = (await db.query('SELECT id FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [cid]))[0];
+      if (existing) await db.query('UPDATE goals SET objective=?, progress=NULL, status="active", updated_at=NOW() WHERE id=?', [obj, existing.id]);
+      else await db.query('INSERT INTO goals (conversation_id, account_id, objective, status) VALUES (?,?,?,"active")', [cid, ctx.accountId || null, obj]);
+      return { goal: obj, status: 'active' };
+    } },
+  { name: 'update_goal', description: '更新当前活动目标的进度或状态（progress=进展说明；status=done 完成 / abandoned 放弃）', permission: 'read',
+    params: { progress: { type: 'string' }, status: { type: 'string', desc: 'active|done|abandoned' } },
+    run: async (a, ctx) => {
+      const cid = ctx.conversationId;
+      if (!cid) throw new Error('无会话上下文');
+      const g = (await db.query('SELECT id FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [cid]))[0];
+      if (!g) throw new Error('当前无活动目标（先用 set_goal 设定）');
+      await db.query('UPDATE goals SET progress=?, status=?, updated_at=NOW() WHERE id=?', [a.progress !== undefined ? String(a.progress).slice(0, 2000) : null, a.status || 'active', g.id]);
+      const row = (await db.query('SELECT objective, progress, status FROM goals WHERE id=?', [g.id]))[0];
+      return row;
+    } },
+  { name: 'get_goal', description: '查看当前会话的活动目标与进度', permission: 'read',
+    params: {},
+    run: async (a, ctx) => {
+      const cid = ctx.conversationId;
+      if (!cid) return { goal: null };
+      const g = (await db.query('SELECT objective, progress, status FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [cid]))[0];
+      return g || { goal: null };
+    } },
+
   // ---------- 图片理解（视觉模型分析图片） ----------
   { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',
     params: { path: { type: 'string', required: true, desc: '本地图片路径或 URL' } },
