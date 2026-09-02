@@ -1,4 +1,5 @@
-// server/llm/gateway.js - OpenAI 兼容统一网关（流式对话）
+// server/llm/gateway.js - OpenAI 兼容统一网关
+// 护栏标准（参照 3080）：模型 API 调用超时 60-90s；流式连接 60s
 import { findProvider } from './providers.js';
 
 function resolve(providerId, keys) {
@@ -17,6 +18,7 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: false }),
+    signal: AbortSignal.timeout(opts.timeoutMs || 90000),
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
@@ -33,6 +35,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: true, stream_options: { include_usage: true } }),
+    signal: AbortSignal.timeout(60000), // 首次响应 60s；建立后流式读取无超时
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => '');
@@ -83,6 +86,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90000), // 工具模式 LLM 调用 90s
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${p.name} 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);

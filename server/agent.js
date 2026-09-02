@@ -15,15 +15,23 @@ export const ENV_MAP = [
   '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
 
-export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, maxRounds = 8, keys }) {
+export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, maxRounds = 16, keys }) {
   // 工具路径：消息前注入环境地图（普通对话路径不经此函数，保持模型自然认知）
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   const toolLog = [];
+  const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
   for (let round = 0; round < maxRounds; round++) {
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys);
     const calls = res.toolCalls || [];
     if (!calls.length) {
       return { content: res.content || '', toolLog, usage: res.usage };
+    }
+    // 循环检测护栏：连续 3 次重复相同 (工具+参数) → 判定卡死，提前终止
+    const sig = calls.map((c) => c.function.name + ':' + String(c.function.arguments || '').slice(0, 80)).join('|');
+    callHistory.push(sig);
+    const tail = callHistory.slice(-3);
+    if (tail.length === 3 && tail[0] === tail[1] && tail[1] === tail[2]) {
+      return { content: '（检测到重复工具调用无进展，已停止。可尝试换一种方式/补充信息）', toolLog, usage: res.usage };
     }
     // 工具调用轮
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
@@ -35,5 +43,5 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 4000) });
     }
   }
-  return { content: '（达到最大工具调用轮次，任务可能未完成）', toolLog, usage: {} };
+  return { content: `（达到最大工具调用轮次 ${maxRounds}，任务可能未完成）`, toolLog, usage: {} };
 }

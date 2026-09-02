@@ -82,15 +82,16 @@ export const TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行命令（write 级仅工作区内；full 任意）', permission: 'full',
-    params: { cmd: { type: 'string', required: true, desc: '命令（如 ls -la）' } },
+  { name: 'run_command', description: '执行命令（默认超时 30s；长任务用 run_long_task；必要时传 timeout 秒数 5-300）', permission: 'full',
+    params: { cmd: { type: 'string', required: true, desc: '命令（如 ls -la）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
         const allow = ['ls', 'cat', 'node --check', 'git status', 'npm test', 'pwd', 'echo', 'find', 'grep'];
         if (!allow.some((p) => a.cmd.startsWith(p))) throw new Error('write 级仅允许工作区常用命令，此命令需 full 权限');
       }
       const [cmd, ...args] = a.cmd.split(/\s+/);
-      const r = await runCmd(cmd, args, { cwd: ctx.root });
+      const t = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
+      const r = await runCmd(cmd, args, { cwd: ctx.root }, t);
       return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code };
     } },
   { name: 'run_long_task', description: '后台运行长任务，返回 job id', permission: 'full',
