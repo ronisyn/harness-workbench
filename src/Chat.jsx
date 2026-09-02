@@ -145,7 +145,7 @@ export default function Chat({ user, onLogout }) {
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], thinking: true }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', thinking: true }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
@@ -159,6 +159,10 @@ export default function Chat({ user, onLogout }) {
           },
           onThinking: () => {
             // AI 处理中（保留 thinking 指示）
+          },
+          onThink: (text) => {
+            // 思考过程实时累积（灰色斜体区）
+            patchLast((x) => ({ ...x, think: (x.think || '') + text, thinking: false }));
           },
           onToolStart: (tool) => {
             // 工具开始：追加"运行中"卡片
@@ -293,6 +297,12 @@ export default function Chat({ user, onLogout }) {
                             {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
                           </div>
                         )}
+                        {m.think ? (
+                          <details className="rw-think" open={m.streaming}>
+                            <summary>🧠 思考过程</summary>
+                            <div style={{ whiteSpace: 'pre-wrap' }}>{m.think}</div>
+                          </details>
+                        ) : null}
                         {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
                         {m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}
                         {m.streaming && !m.content && !m.thinking && <span className="rw-caret">▋</span>}

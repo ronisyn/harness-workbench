@@ -27,7 +27,7 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
   return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0 };
 }
 
-// 流式调用：async generator，逐个产出 content 增量；ctx 可带回 usage（流式最后一个 chunk 常带）
+// 流式调用：async generator，产出 content 增量；思考内容经 ctx.onThink 回调；ctx.usage 带回用量
 export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {}) {
   const p = resolve(providerId, keys);
   const model = opts.model || p.defaultModel;
@@ -58,6 +58,8 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
       try {
         const j = JSON.parse(data);
         const delta = j.choices?.[0]?.delta?.content;
+        const think = j.choices?.[0]?.delta?.reasoning_content;
+        if (think && ctx.onThink) ctx.onThink(think);
         if (delta) yield delta;
         if (j.usage && !ctx.usage) {
           ctx.usage = {
@@ -94,6 +96,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
   const usage = j.usage || {};
   return {
     content: msg.content || '',
+    reasoning: msg.reasoning_content || '',
     toolCalls: msg.tool_calls || [],
     usage: { tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0 },
   };

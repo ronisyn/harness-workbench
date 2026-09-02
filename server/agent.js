@@ -44,6 +44,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys);
+    // 模型推理过程（reasoning）实时透出 → 前端 think 区
+    if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成

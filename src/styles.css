@@ -133,6 +133,13 @@ body {
 .rw-trace-badge.running { color: var(--rw-yellow); animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 .rw-thinking { color: var(--rw-muted); font-size: 13px; font-style: italic; animation: pulse 1.2s infinite; }
+/* 思考过程区（灰色斜体，可折叠） */
+.rw-think { border-left: 2px solid var(--rw-yellow); background: #fcf6ea; border-radius: 0 8px 8px 0;
+  padding: 6px 12px; margin: 6px 0; font-size: 12.5px; color: var(--rw-muted); }
+.rw-think summary { cursor: pointer; color: var(--rw-yellow); font-size: 12px; font-weight: 600;
+  font-style: normal; letter-spacing: 0.3px; user-select: none; }
+.rw-think summary:hover { color: var(--rw-red); }
+.rw-think > div { margin-top: 6px; font-style: italic; line-height: 1.6; max-height: 160px; overflow-y: auto; }
 .rw-trace-tool { font-weight: 600; flex: 1; }
 .rw-trace-seq { color: var(--rw-muted); font-size: 10px; }
 .rw-trace-ms { color: var(--rw-muted); font-size: 11px; }

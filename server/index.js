@@ -168,6 +168,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         emit: (ev) => {
           if (ev.type === 'agent_thinking') {
             send({ type: 'thinking', round: ev.round });
+          } else if (ev.type === 'think') {
+            send({ type: 'think', text: ev.text });
           } else if (ev.type === 'tool_start') {
             send({ type: 'tool_start', tool: ev.tool });
           } else if (ev.type === 'tool_done') {
@@ -184,8 +186,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
       }
     } else {
-      // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）
-      const ctx = { usage: null };
+      // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）；思考过程实时透出
+      const ctx = { usage: null, onThink: (txt) => send({ type: 'think', text: txt }) };
       for await (const delta of chatStream(provider, messages, { model }, config.keys, ctx)) {
         if (!firstTokenMs) firstTokenMs = Date.now() - t0;
         answer += delta;
