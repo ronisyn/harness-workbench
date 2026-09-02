@@ -124,17 +124,33 @@ export const TOOLS = [
     params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
     run: async (a) => { const c = readTxt(a.path); const off = a.offset || 0; return { content: c.slice(off, off + (a.length || 10000)) }; } },
 
-  // ---------- B20 OCR ----------
-  { name: 'ocr_image', description: '图片 OCR 文字识别（Tesseract.js，中英文）', permission: 'read',
-    params: { path: { type: 'string', required: true, desc: '图片文件路径' } },
+  // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
+  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '图片文件路径或 URL' } },
     run: async (a) => {
-      try {
-        const { createWorker } = await import('tesseract.js');
-        const worker = await createWorker('chi_sim+eng');
-        const { data } = await worker.recognize(a.path);
-        await worker.terminate();
-        return { text: (data.text || '').slice(0, 8000), confidence: Math.round((data.confidence || 0) * 10) / 10 };
-      } catch (e) { throw new Error('OCR 失败: ' + e.message); }
+      const key = process.env.DEEPSEEK_API_KEY;
+      if (!key) throw new Error('未配置 DeepSeek key');
+      let dataUrl;
+      if (/^https?:\/\//.test(a.path)) dataUrl = a.path;
+      else {
+        const buf = fs.readFileSync(a.path);
+        const ext = path.extname(a.path).toLowerCase().replace('.', '') || 'png';
+        const mime = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', webp: 'webp' }[ext] || 'png';
+        dataUrl = `data:image/${mime};base64,${buf.toString('base64')}`;
+      }
+      const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+        body: JSON.stringify({
+          model: 'deepseek-v4-flash-vision-exp',
+          messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请识别这张图片中的所有文字并原样输出（OCR）。如果图中有版式，按从上到下、从左到右排列；没有文字就说没有文字。' }] }],
+          max_tokens: 1200,
+        }),
+        signal: AbortSignal.timeout(90000),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error('OCR 视觉调用失败: ' + (j.error?.message || res.status));
+      return { text: (j.choices?.[0]?.message?.content || '').slice(0, 8000) };
     } },
 
   // ---------- B11-B13 命令 ----------
