@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { config, ROOT } from './config.js';
 import { initSchema, db } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
-import { activeProviders, allProviders } from './llm/providers.js';
+import { activeProviders, allProviders, findProvider } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
 import { runAgent } from './agent.js';
 import { SKILLS_ROOT } from './tools/index.js';
