@@ -261,12 +261,16 @@ app.get(/^(?!\/api).*/, (req, res) => {
 async function main() {
   await initSchema();
   await ensureAdmin();
-  // 初始化 providers 表（同步硬编码 9 家）+ 每日市场刷新
+  // 初始化 providers 表（同步硬编码 9 家）+ 默认模型 + 每日市场刷新
   try {
     const pCount = await db.query('SELECT COUNT(*) c FROM providers');
     if (!pCount[0]?.c) {
       for (const p of allProviders(config.keys)) {
-        await db.query('INSERT INTO providers (provider_key, name, base_url, api_key_env, enabled, sort_order) VALUES (?,?,?,?,1,?)', [p.id, p.name, p.base, p.keyEnv, p.id === 'deepseek' ? 0 : 10]);
+        const r = await db.query('INSERT INTO providers (provider_key, name, base_url, api_key_env, enabled, sort_order) VALUES (?,?,?,?,1,?)', [p.id, p.name, p.base, p.keyEnv, p.id === 'deepseek' ? 0 : 10]);
+        if (p.defaultModel) {
+          await db.query('INSERT INTO models (provider_id, model_id, name, capabilities, enabled, added_at, last_seen_at) VALUES (?,?,?,?,1,NOW(),NOW()) ON DUPLICATE KEY UPDATE enabled=1',
+            [r.insertId, p.defaultModel, p.name + ' 默认模型', JSON.stringify(p.capabilities || ['chat'])]);
+        }
       }
     }
   } catch { /* 初始化失败不阻塞 */ }
