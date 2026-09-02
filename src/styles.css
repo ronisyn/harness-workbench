@@ -208,3 +208,14 @@ body {
 .rw-toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--rw-ink);
   color: #fff; padding: 9px 20px; border-radius: 10px; font-size: 13px; z-index: 200;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); letter-spacing: 0.3px; }
+
+/* 定时任务 */
+.rw-task-new { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; padding: 10px; border: 1px dashed var(--rw-border); border-radius: 10px; }
+.rw-task-item { border: 1px solid var(--rw-border); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
+.rw-task-head { display: flex; justify-content: space-between; align-items: center; }
+.rw-task-cron.on { color: #2e7d32; font-size: 11px; }
+.rw-task-cron { color: var(--rw-muted); font-size: 11px; }
+.rw-task-meta { color: var(--rw-muted); font-size: 11px; margin: 3px 0; }
+.rw-task-prompt { font-size: 12px; }
+.rw-task-last { color: var(--rw-muted); font-size: 11px; margin-top: 4px; }
+.rw-task-ops { display: flex; gap: 6px; margin-top: 8px; }

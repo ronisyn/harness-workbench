@@ -37,6 +37,10 @@ export const api = {
   getFile: (path) => request('/api/file?path=' + encodeURIComponent(path)),
   getSettings: () => request('/api/settings'),
   setSettings: (updates) => request('/api/settings', { method: 'PUT', body: JSON.stringify({ updates }) }),
+  tasks: () => request('/api/tasks'),
+  createTask: (t) => request('/api/tasks', { method: 'POST', body: JSON.stringify(t) }),
+  patchTask: (id, p) => request('/api/tasks/' + id, { method: 'PATCH', body: JSON.stringify(p) }),
+  deleteTask: (id) => request('/api/tasks/' + id, { method: 'DELETE' }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

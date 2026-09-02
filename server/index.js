@@ -12,6 +12,7 @@ import { runAgent } from './agent.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
+import { startScheduler } from './scheduler.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -366,6 +367,43 @@ app.post('/api/market/connect', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
+// ---------- 定时任务 API（F14） ----------
+app.get('/api/tasks', requireAuth, async (req, res) => {
+  const rows = await db.query('SELECT id, name, cron, prompt, provider, model, permission, enabled, last_run, next_run, last_result, created_at FROM scheduled_tasks WHERE account_id=? ORDER BY id DESC', [req.user.id]);
+  res.json({ ok: true, tasks: rows });
+});
+app.post('/api/tasks', requireAuth, async (req, res) => {
+  const { name, cron, prompt, provider, model, permission } = req.body || {};
+  if (!name || !cron || !prompt) return res.status(400).json({ ok: false, message: '名称/cron/指令必填' });
+  const { cronToNext } = await import('./scheduler.js');
+  const next = cronToNext(cron);
+  if (!next) return res.status(400).json({ ok: false, message: 'cron 格式错误（分 时 日 月 周）' });
+  const r = await db.query('INSERT INTO scheduled_tasks (account_id, name, cron, prompt, provider, model, permission, next_run) VALUES (?,?,?,?,?,?,?,?)',
+    [req.user.id, name, cron, prompt, provider || 'deepseek', model || 'deepseek-v4-flash', permission || 'full', next]);
+  res.json({ ok: true, id: r.insertId });
+});
+app.patch('/api/tasks/:id', requireAuth, async (req, res) => {
+  const { enabled, name, cron, prompt } = req.body || {};
+  const sets = [], ps = [];
+  if (enabled !== undefined) { sets.push('enabled=?'); ps.push(enabled ? 1 : 0); if (enabled) sets.push('next_run=NULL'); }
+  if (name) { sets.push('name=?'); ps.push(name); }
+  if (prompt) { sets.push('prompt=?'); ps.push(prompt); }
+  if (cron) { sets.push('cron=?'); ps.push(cron); }
+  if (!sets.length) return res.json({ ok: true });
+  ps.push(req.params.id, req.user.id);
+  await db.query(`UPDATE scheduled_tasks SET ${sets.join(',')} WHERE id=? AND account_id=?`, ps);
+  const { cronToNext } = await import('./scheduler.js');
+  if (cron) {
+    const t = (await db.query('SELECT cron FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (t) await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [cronToNext(t.cron), req.params.id]);
+  }
+  res.json({ ok: true });
+});
+app.delete('/api/tasks/:id', requireAuth, async (req, res) => {
+  await db.query('DELETE FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
+  res.json({ ok: true });
+});
+
 // ---------- 静态前端 ----------
 const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));
@@ -391,6 +429,8 @@ async function main() {
     }
   } catch { /* 初始化失败不阻塞 */ }
   scheduleMarketRefresh();
+  // 定时任务调度器（F14）
+  try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));

@@ -91,6 +91,8 @@ export default function Chat({ user, onLogout }) {
   const [toast, setToast] = useState('');
   const [toolcalls, setToolcalls] = useState([]);
   const [temperature, setTemperature] = useState(1.0);
+  const [tasks, setTasks] = useState([]);
+  const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
 
@@ -261,7 +263,20 @@ export default function Chat({ user, onLogout }) {
     if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
     if (tab === 'market') await loadMarket();
     if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
+    if (tab === 'tasks') { const t = await api.tasks(); setTasks(t.tasks || []); }
   };
+
+  const loadTasks = async () => { try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ } };
+  const createTask = async () => {
+    try {
+      await api.createTask(newTask);
+      setNewTask({ name: '', cron: '30 2 * * *', prompt: '' });
+      setToast('定时任务已创建');
+      loadTasks();
+    } catch (ex) { setToast(ex.message); }
+  };
+  const toggleTask = async (id, enabled) => { await api.patchTask(id, { enabled }); loadTasks(); };
+  const delTask = async (id) => { if (!confirm('删除该定时任务？')) return; await api.deleteTask(id); loadTasks(); };
 
   const setTemp = async (v) => {
     setTemperature(v);
@@ -406,6 +421,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'providers' ? ' sel' : '')} onClick={() => openDrawer('providers')}>厂商</button>
                 <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => openDrawer('market')}>模型市场</button>
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
+                <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
               <button className="rw-btn" onClick={() => setDrawer(false)}>收起</button>
             </div>
@@ -486,6 +502,34 @@ export default function Chat({ user, onLogout }) {
                       <div className="rw-trace-res">结果：{String(t.result_summary || '').slice(0, 200)}</div>
                     </div>
                   )) : <div className="rw-empty">本会话暂无工具调用</div>}
+                </div>
+              )}
+
+              {drawerTab === 'tasks' && (
+                <div className="rw-tasks">
+                  <div className="rw-cap-gtitle">定时任务（cron：分 时 日 月 周）</div>
+                  <div className="rw-task-new">
+                    <input className="rw-input" placeholder="任务名称" value={newTask.name} onChange={(e) => setNewTask({ ...newTask, name: e.target.value })} />
+                    <input className="rw-input" placeholder="cron（如 30 2 * * * 每日2:30）" value={newTask.cron} onChange={(e) => setNewTask({ ...newTask, cron: e.target.value })} />
+                    <textarea className="rw-input" rows="2" placeholder="要 AI 执行的指令…" value={newTask.prompt} onChange={(e) => setNewTask({ ...newTask, prompt: e.target.value })} />
+                    <button className="rw-btn pri" onClick={createTask} disabled={!newTask.name || !newTask.prompt}>＋ 创建</button>
+                  </div>
+                  {tasks.map((t) => (
+                    <div key={t.id} className="rw-task-item">
+                      <div className="rw-task-head">
+                        <b>{t.name}</b>
+                        <span className={'rw-task-cron ' + (t.enabled ? 'on' : '')}>{t.enabled ? '● 运行中' : '○ 已暂停'}</span>
+                      </div>
+                      <div className="rw-task-meta">{t.cron} ｜ {t.provider}/{t.model}</div>
+                      <div className="rw-task-prompt">{String(t.prompt).slice(0, 100)}</div>
+                      {t.last_run && <div className="rw-task-last">上次：{String(t.last_run).slice(0, 16)}｜{String(t.last_result || '').slice(0, 60)}</div>}
+                      <div className="rw-task-ops">
+                        <button className="rw-btn" onClick={() => toggleTask(t.id, !t.enabled)}>{t.enabled ? '暂停' : '启用'}</button>
+                        <button className="rw-btn" onClick={() => delTask(t.id)}>删除</button>
+                      </div>
+                    </div>
+                  ))}
+                  {!tasks.length && <div className="rw-empty">暂无定时任务</div>}
                 </div>
               )}
             </div>

@@ -163,6 +163,22 @@ const SCHEMA = [
     summary MEDIUMTEXT,
     updated_at DATETIME DEFAULT NOW()
   )`,
+  // ---- 定时任务（F14） ----
+  `CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT,
+    name VARCHAR(128) NOT NULL,
+    cron VARCHAR(64) NOT NULL COMMENT 'cron 表达式: 分 时 日 月 周',
+    prompt MEDIUMTEXT NOT NULL,
+    provider VARCHAR(32) DEFAULT 'deepseek',
+    model VARCHAR(128) DEFAULT 'deepseek-v4-flash',
+    permission VARCHAR(8) DEFAULT 'full',
+    enabled TINYINT DEFAULT 1,
+    last_run DATETIME,
+    next_run DATETIME,
+    last_result TEXT,
+    created_at DATETIME DEFAULT NOW()
+  )`,
 ];
 
 export async function initSchema() {
