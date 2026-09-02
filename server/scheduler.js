@@ -65,7 +65,7 @@ export async function executeScheduledTask(task) {
         conv = { id: r.insertId };
       }
       const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (process.env.RW_WORKSPACE || '/srv/rw-workspace') };
-      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt }], permission: task.permission || 'full', ctx, keys: config.keys, maxRounds: 20 });
+      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt }], permission: task.permission || 'full', ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）
       await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', '【定时任务】' + task.name + '\n' + task.prompt]);
