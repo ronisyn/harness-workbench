@@ -10,15 +10,11 @@ export async function extractPdf(file) {
   return data.text || '';
 }
 
-// Word (.docx)：解压 document.xml 提取文本
+// Word (.docx)：mammoth 提取（html→text 简化）
 export async function extractDocx(file) {
-  const { unzipSync } = await import('fflate');
-  const buf = fs.readFileSync(file);
-  const zip = unzipSync(new Uint8Array(buf));
-  const xml = new TextDecoder().decode(zip['word/document.xml']);
-  const text = xml.replace(/<w:tab[^>]*\/>/g, '\t').replace(/<w:br[^>]*\/>/g, '\n')
-    .replace(/<w:p[^>]*>/g, '\n').replace(/<[^>]+>/g, '').replace(/\n{2,}/g, '\n').trim();
-  return text;
+  const mammoth = await import('mammoth');
+  const r = await mammoth.extractRawText({ path: file });
+  return (r.value || '').trim();
 }
 
 // Excel (.xlsx)
@@ -33,7 +29,7 @@ export async function extractXlsx(file) {
   return parts.join('\n\n');
 }
 
-// PPT (.pptx)：解压 ppt/slides/slide*.xml
+// PPT (.pptx)：解压 ppt/slides/slide*.xml（依赖 fflate）
 export async function extractPptx(file) {
   const { unzipSync } = await import('fflate');
   const buf = fs.readFileSync(file);
