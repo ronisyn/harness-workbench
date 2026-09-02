@@ -21,6 +21,7 @@ function childEmit(parentEmit, subId, label) {
     if (ev.type === 'tool_start') parentEmit({ type: 'tool_start', tool: { name: '子:' + ev.tool.name, args: ev.tool.args, seq: ev.tool.seq, status: 'running', sub: subId } });
     else if (ev.type === 'tool_done') parentEmit({ type: 'tool_done', tool: { ...ev.tool, name: '子:' + ev.tool.name, sub: subId } });
     else if (ev.type === 'think') parentEmit({ type: 'think', text: '[' + label + '思考] ' + ev.text });
+    else if (ev.type === 'approval') parentEmit({ type: 'approval', id: ev.id, desc: '[' + label + '] ' + ev.desc });
     else if (ev.type === 'agent_thinking') parentEmit({ type: 'agent_thinking', round: ev.round, sub: subId });
   };
 }

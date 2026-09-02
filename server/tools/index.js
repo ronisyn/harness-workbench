@@ -9,7 +9,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
-const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_push', 'run_command']);
+const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
 
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
