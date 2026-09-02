@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
 import { db } from '../db.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
-import { createApproval } from '../approval.js';
+import { createApproval, cancelApproval } from '../approval.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_push', 'run_command']);
@@ -518,9 +518,17 @@ export async function execTool(name, args, ctx) {
       const argsDesc = JSON.stringify(args).slice(0, 300);
       const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
       if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
-      const verdict = await ap.promise;
+      let verdict = null;
+      while (!verdict) {
+        const race = await Promise.race([
+          ap.promise.then((v) => ({ done: true, v })),
+          new Promise((r) => setTimeout(() => r({ done: false }), 800)),
+        ]);
+        if (race.done) { verdict = race.v; break; }
+        if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
+      }
       if (!verdict || verdict.decision !== 'approve') {
-        result = { error: '用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : '') };
+        result = { error: verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : '')) };
       } else {
         result = await tool.run(args, eff);
       }

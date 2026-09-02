@@ -210,6 +210,7 @@ export default function Chat({ user, onLogout }) {
 
   const stopGen = () => {
     if (abortRef.current) abortRef.current.abort();
+    if (cur) api.stopChat(cur).catch(() => {}); // 服务端中止 Agent 轮（不再落库）
     setBusy(false);
     setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
   };

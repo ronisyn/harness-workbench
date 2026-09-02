@@ -26,6 +26,14 @@ export function decideApproval(id, decision) {
   return true;
 }
 
+export function cancelApproval(id, decision = 'aborted') {
+  const p = pending.get(id);
+  if (!p) return false;
+  pending.delete(id);
+  p.resolve({ decision, desc: p.desc });
+  return true;
+}
+
 export function listPending() {
   return [...pending.entries()].map(([id, p]) => ({ id, desc: p.desc, createdAt: p.createdAt }));
 }

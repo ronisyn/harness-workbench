@@ -43,6 +43,7 @@ export const api = {
   deleteTask: (id) => request('/api/tasks/' + id, { method: 'DELETE' }),
   approvals: () => request('/api/approvals'),
   decideApproval: (id, decision) => request('/api/approvals/' + id, { method: 'POST', body: JSON.stringify({ decision }) }),
+  stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

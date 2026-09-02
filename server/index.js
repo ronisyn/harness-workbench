@@ -19,6 +19,9 @@ import { decideApproval, listPending } from './approval.js';
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+// 运行中 Agent 的中止表（前端"停止生成"→ POST /api/chat/stop 取消当前轮）
+const abortMap = new Map(); // key = accountId:conversationId → AbortController
+
 // ---------- 鉴权 ----------
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -258,6 +261,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
 
   const t0 = Date.now();
   let firstTokenMs = 0;
+  const akey = req.user.id + ':' + conversationId;
+  const actrl = new AbortController();
+  abortMap.set(akey, actrl);
   try {
     const useTools = needsTools(content);
     let answer = '';
@@ -266,7 +272,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
       const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -285,6 +291,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           }
         },
       });
+      if (result.stopped) { send({ type: 'stopped' }); return; } // 用户点击停止：不落 assistant/统计
       answer = result.content || '（无输出）';
       usage = result.usage || {};
       // Agent 路径分块模拟流式
@@ -317,6 +324,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   } catch (e) {
     send({ type: 'error', message: e.message });
   }
+  if (abortMap.get(akey) === actrl) abortMap.delete(akey);
   res.end();
 });
 
@@ -340,6 +348,14 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       cost: Number(u.cost || 0),
     },
   });
+});
+
+// ---------- 停止生成（服务端取消运行中的 Agent 轮） ----------
+app.post('/api/chat/stop', requireAuth, (req, res) => {
+  const { conversationId } = req.body || {};
+  const c = conversationId ? abortMap.get(req.user.id + ':' + conversationId) : null;
+  if (c) c.abort();
+  res.json({ ok: true, stopped: Boolean(c) });
 });
 
 // ---------- 审批（F20：guard 会话高风险工具需用户确认） ----------

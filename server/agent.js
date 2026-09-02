@@ -49,6 +49,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
 
   for (let round = 0; round < ABSOLUTE_CAP; round++) {
     refreshSys();
+    // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
+    if (ctx.__signal && ctx.__signal.aborted) {
+      return { content: '', stopped: true, toolLog, usage: {} };
+    }
     // 时间预算护栏
     if (Date.now() - t0 > TIME_BUDGET_MS) {
       return { content: '（达到 10 分钟时间预算，已停止。可让我继续或缩小任务范围）', toolLog, usage: {} };
