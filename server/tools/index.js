@@ -417,11 +417,14 @@ export const TOOLS = [
       const { spawnSubagent, waitSub } = await import('../subagent.js');
       const prompt = String(a.prompt || '').trim();
       if (!prompt) throw new Error('prompt 必填');
-      // 种子：本会话最近 10 条 用户/AI 消息（含摘要目标等关键上下文），各截断 500 字
+      // 种子：本会话最近历史（排除"触发本次 fork 的最新用户指令"，避免子代理照指令递归套娃），各截断 500 字
       let seed = [];
       try {
-        const rows = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 10', [ctx.conversationId]);
-        seed = rows.reverse().map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 500) }));
+        const rows = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 12', [ctx.conversationId]);
+        let list = rows.reverse();
+        // 丢弃最新一条用户消息（即当前触发指令本身）
+        if (list.length && list[list.length - 1].role === 'user') list = list.slice(0, -1);
+        seed = list.slice(-10).map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 500) }));
       } catch { /* 无种子也可 fork */ }
       const { id } = await spawnSubagent({
         prompt, name: String(a.name || '').slice(0, 30) || undefined,
