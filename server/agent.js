@@ -127,8 +127,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round），子代理/渠道/定时同源覆盖
     try {
       const u = res.usage || {};
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,NOW(),"round")',
-        [ctx.accountId ?? null, ctx.conversationId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,NOW(),"round")',
+        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
     } catch { /* 计量失败不影响执行 */ }
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });

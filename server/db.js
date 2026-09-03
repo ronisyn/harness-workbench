@@ -122,6 +122,7 @@ const SCHEMA = [
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_id INT,
     conversation_id INT,
+    agent_run_id INT,
     message_id INT,
     provider_id VARCHAR(32),
     model_id VARCHAR(128),
@@ -268,6 +269,7 @@ export async function initSchema() {
     'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
     "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
     "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
+    'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
