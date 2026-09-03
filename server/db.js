@@ -286,4 +286,14 @@ export async function initSchema() {
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
   }
+  // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；成本知情阈值默认 20（schema def 同步）
+  const SEEDS = [
+    ['__policy_rev', '1'],
+    ['task_budget_yuan', '20'],
+  ];
+  for (const [k, v] of SEEDS) {
+    try {
+      await pool.query('INSERT IGNORE INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW())', [k, v]);
+    } catch { /* 表不可用则跳过 */ }
+  }
 }
