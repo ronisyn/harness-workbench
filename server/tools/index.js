@@ -562,6 +562,7 @@ export const TOOLS = [
           prompt: childPrompt, name: 'Ralph-第' + i + '轮',
           provider: ctx.__provider || 'deepseek', model: ctx.__model || 'deepseek-v4-flash',
           permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+          noSubagentOverride: true, // ralph 子代禁止再套娃/改码，只做本轮分析与记忆写入
         });
         const rec = await waitSub(id);
         const rep = String(rec.result || rec.error || '').slice(0, 600);
