@@ -1,7 +1,7 @@
 # RW 撑竿跳方案 1.0（唯一总纲 · 活文档）
 
-> 状态：v1.0 全盘 🟢 · 已融合《3080环境教学包与RW起跳设计-v1》(docs/3080环境教学包与RW起跳设计-v1.md 保留为基准源) ·
-> 已过 18 维自审（附录E，含 8 处修正）· 按用户流程进入 **4 执行开发**（§2）。
+> 状态：v1.0 全盘 🟢 → **执行完成**：WS0–WS9 全部 ✅（批1–批7+收尾；本地提交与服务器部署记录见附录C"执行记录"）。
+> 已融合《3080环境教学包与RW起跳设计-v1》(docs/3080环境教学包与RW起跳设计-v1.md 保留为基准源) · 已过 18 维自审（附录E，含 8 处修正）。
 >
 > **目标宣言**：让 RW 成为优秀的 Web 智能体——一名从 1 米起跳的撑竿跳运动员。杆不是任何外部限制，而是
 > 「观察自己→定目标→用方法→验证→复盘→沉淀→下次自动更好」这套循环本身；终局是它能自我成长、不断超越、不断挑战。
@@ -214,7 +214,17 @@
 - 健康度榜 SQL：`SELECT tool_name, COUNT(*) n, SUM(status='fail') fails, ROUND(AVG(duration_ms)) avg_ms FROM tool_calls WHERE created_at > NOW()-INTERVAL 7 DAY GROUP BY tool_name ORDER BY n DESC;`
 
 ## 附录C · 修订记录
-- **v1.0（本版）**：融合教学包 v1（映射见附录F）；新增目标宣言与 L0–L3 路线；新增高跷判定三问与护栏哲学；修正 8 处（附录E）；新增 §1.5 外部借鉴表（X1 采纳/X2 对照/X3 部分采纳/X4-5 观察）；流程改按用户 1→5 定稿（需确认准则两类）；自审 18 维全绿 → 进入执行开发。部署通道确认（git push origin main → 服务器 git pull）。
+- **执行记录（2026-09-04，本地 commit → 服务器验证，全部 ✅）**：
+  - 批1 WS0 度量基线：`44cb947`（+修复 `b048ec1`）——迁移 MIG_OK、列验证、reload、归集闭环 A45→B46；基线 docs/metrics/baseline-2026-09-04.json。
+  - 批2a WS1 施工图：`7a732fa`（docs/tool-contracts-v1.md，62 条）；批2b WS1 代码 `b649cd1`；批2c UI `53cea11`——三档 preset 验证 minimal=21/standard=52/all=61（6/6 断言通过）。
+  - 批3 WS2 运行时快照：`b80868d`——快照六类信息验证 ✅（轮次/用时/护栏现值/累计成本/会话属性/rev）。
+  - 批4 WS3 准则：`d43e067`（docs/RW行为准则-服务器版.md+ENV 引用）。
+  - 批5 WS6：三技能落服务器（explore-discipline/self-audit/task-approach）+docs/复盘模板.md；批7 补 subagent-prompt/acceptance-builder（共 5 技能 ✅）。
+  - 批6 WS4/5/7：`abb8c45`——server/settingsSchema.js、conv_summarize（冒烟 ✅ conv_summaries 有行）、项目 AGENTS.md 注入、docs/记忆架构.md、docs/信任契约-v1.md、task_budget_yuan 先停再问。
+  - 批7 WS8/9：`6538909`——scripts/verify.mjs、driver 验收 DSL（向后兼容）、docs/templates/验收模板.md；selfcheck 12/12 ✅。
+  - 收尾：`a06f907` settings 种子（__policy_rev=1/task_budget_yuan=20，幂等）；服务器 HEAD=a06f907、工作区干净、分叉收敛。
+  - 全程验证方式：HTTP(880) 驱动 RW 在服务器执行（rw-drive.mjs）；无触碰需确认准则事项，均自主执行并记录。
+- **v1.0（融合版）**：融合教学包 v1（映射见附录F）；新增目标宣言与 L0–L3 路线；新增高跷判定三问与护栏哲学；修正 8 处（附录E）；新增 §1.5 外部借鉴表（X1 采纳/X2 对照/X3 部分采纳/X4-5 观察）；流程改按用户 1→5 定稿（需确认准则两类）；自审 18 维全绿 → 进入执行开发。部署通道确认（git push origin main → 服务器 git pull）。
 - v0.3：WS5–WS9 升 🟢；附录B 实测重写（TOOLS=61）。
 - v0.2：WS0–WS4 升 🟢；附录B 实测盘点；侦察事实记录（ENV_MAP 静态/DEFAULT_LIMITS/toolDefs 无参/5s 缓存/无 preset 列/usage_stats 无 run 归属/settings 无 revision）。
 
