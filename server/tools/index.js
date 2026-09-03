@@ -395,6 +395,45 @@ export const TOOLS = [
       }
       return { joined: out };
     } },
+  { name: 'subagent_list', description: '列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时），用于编排与排查', permission: 'read',
+    params: {},
+    run: async () => {
+      const { subs: subMap } = await import('../subagent.js');
+      const arr = [...subMap.values()].slice(-60).map((s) => ({
+        id: s.id, name: s.name, kind: s.kind || 'spawn', status: s.status, depth: s.depth || 0,
+        createdAt: s.createdAt, durationMs: s.durationMs || null,
+        toolSteps: (s.toolLog || []).length,
+      }));
+      return { total: subMap.size, subs: arr };
+    } },
+  { name: 'subagent_fork', description: '派生一个"延续本会话上下文"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）', permission: 'read',
+    params: {
+      prompt: { type: 'string', required: true, desc: '给子代理的独立任务（它会同时看到本会话最近对话）' },
+      name: { type: 'string' },
+      mode: { type: 'string', desc: 'sync(默认)=等结果 | async=立即返回id' },
+    },
+    run: async (a, ctx) => {
+      if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限');
+      const { spawnSubagent, waitSub } = await import('../subagent.js');
+      const prompt = String(a.prompt || '').trim();
+      if (!prompt) throw new Error('prompt 必填');
+      // 种子：本会话最近 10 条 用户/AI 消息（含摘要目标等关键上下文），各截断 500 字
+      let seed = [];
+      try {
+        const rows = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 10', [ctx.conversationId]);
+        seed = rows.reverse().map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 500) }));
+      } catch { /* 无种子也可 fork */ }
+      const { id } = await spawnSubagent({
+        prompt, name: String(a.name || '').slice(0, 30) || undefined,
+        provider: ctx.__provider || 'deepseek', model: a.model || ctx.__model || 'deepseek-v4-flash',
+        permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+        seedMessages: seed,
+      });
+      if (a.mode === 'async') return { sub_id: id, status: 'running', tip: '用 subagent_join/subagent_output 收口' };
+      const rec = await waitSub(id);
+      if (rec.status === 'error') throw new Error('子代理失败: ' + rec.error);
+      return { sub_id: id, status: rec.status, durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, result: String(rec.result || '').slice(0, 6000) };
+    } },
   { name: 'subagent_fanout', description: '批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要', permission: 'read',
     params: {
       template: { type: 'string', required: true, desc: '子代理任务模板，其中 {{item}} 会被替换为具体条目' },

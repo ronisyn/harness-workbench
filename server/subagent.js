@@ -43,10 +43,10 @@ function childEmit(parentEmit, subId, label) {
   };
 }
 
-export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 1.0, depth = 0 }) {
+export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 1.0, depth = 0, seedMessages = [] }) {
   pruneSubs();
   const id = makeSubId();
-  const record = { id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth };
+  const record = { id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth, kind: (seedMessages && seedMessages.length) ? 'fork' : 'spawn' };
   subs.set(id, record);
   // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=3 时子代理不暴露子代理工具）
   const childCtx = {
@@ -59,7 +59,7 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
   const t0 = Date.now();
   const runPromise = runAgent({
     provider, model, permission,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [...(seedMessages || []), { role: 'user', content: prompt }],
     ctx: childCtx, keys, temperature,
     emit: childEmit(parentCtx.__emit, id, record.name),
   });

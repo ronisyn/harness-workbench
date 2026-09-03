@@ -11,6 +11,16 @@ import { checkpoint } from './runtrack.js';
 let limitsCache = null;
 let limitsCacheAt = 0;
 const DEFAULT_LIMITS = { budgetMin: 120, roundCap: 2000, loopGuard: 6 };
+
+// 工具结果入上下文前的修剪策略（对齐 3080 tool-result-pruner：保留头+尾，中段截断并注明）
+function contextResultPrune(text, cap) {
+  const s = String(text ?? '');
+  if (s.length <= cap) return s;
+  const head = Math.floor(cap * 0.6);
+  const tail = Math.floor(cap * 0.3);
+  const cut = s.length - head - tail;
+  return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
+}
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...DEFAULT_LIMITS };
@@ -27,8 +37,7 @@ async function agentLimits() {
   return limitsCache;
 }
 
-export const ENV_MAP = [
-  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
+export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
   '- 平台代码目录：/srv/harness-workbench（你可以用 write_file/append_file 修改其中代码，用 run_command 执行 node/npm，用 git_commit 提交——你能修改并部署自己的工作台）',
   '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
   '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
@@ -162,7 +171,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
       }
       const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
-      msgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, msgCap) });
+      msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(result), msgCap) });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });
