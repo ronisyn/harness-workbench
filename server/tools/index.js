@@ -13,6 +13,13 @@ import { createAsk, cancelAsk } from '../asks.js';
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
 
+// 计划模式（plan_mode）禁用的改动类工具：会话 mode=plan 时直接拒绝（只读）
+const MUTATING_TOOLS = new Set([
+  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move',
+  'run_command', 'run_long_task', 'kill_process', 'db_write',
+  'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
+]);
+
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -504,6 +511,23 @@ export const TOOLS = [
       return { deleted: r.affectedRows > 0 };
     } },
 
+  // ---------- 计划模式（plan_mode / exit_plan_mode，会话级只读规划） ----------
+  { name: 'plan_mode', description: '进入会话级计划模式（只读）：此后所有写/改/执行类工具会被平台拒绝，直到调用 exit_plan_mode 提交计划成功。用于用户要求"先规划、只调研、别动手"的场景', permission: 'read',
+    params: {},
+    run: async (a, ctx) => {
+      if (!ctx.conversationId) throw new Error('无会话上下文');
+      await db.query('UPDATE conversations SET mode="plan" WHERE id=?', [ctx.conversationId]);
+      return { plan_mode: true, tip: '已进入只读规划模式；探索完成后调用 exit_plan_mode 提交计划' };
+    } },
+  { name: 'exit_plan_mode', description: '提交计划并退出计划模式（模式回到普通对话，改动类工具恢复可用）。plan=完整计划 Markdown（目标/步骤/涉及文件/风险/验证）；提交后请把计划原文作为你的最终回答完整展示给用户等待批准', permission: 'read',
+    params: { plan: { type: 'string', required: true, desc: '完整实施计划（Markdown）' } },
+    run: async (a, ctx) => {
+      if (!ctx.conversationId) throw new Error('无会话上下文');
+      await db.query('UPDATE conversations SET mode="chat" WHERE id=?', [ctx.conversationId]);
+      const plan = String(a.plan || '').slice(0, 12000);
+      return { exited: true, tip: '已退出计划模式。请把上面的计划作为最终回答展示给用户；用户批准（说"开始/按计划执行"）后即可实施。', planLength: plan.length };
+    } },
+
   // ---------- 结构化问询（ask_user：需要用户做选择时发选项卡片，等用户点选后继续） ----------
   { name: 'ask_user', description: '向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。', permission: 'read',
     params: {
@@ -648,6 +672,10 @@ export async function execTool(name, args, ctx) {
   // full 权限不限制路径（limitPath=false）；write/read 级才检查工作区边界
   const eff = { ...ctx, limitPath: ctx.permission !== 'full' };
   try {
+    // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝（先于审批门禁）
+    if (eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
+      result = { error: '计划模式（只读）：工具 ' + name + ' 已被禁用。规划完成后请调用 exit_plan_mode 提交计划；用户批准并切回普通模式后再执行。' };
+    } else
     // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准（POST /api/approvals/:id 裁决）
     if (eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
       const argsDesc = JSON.stringify(args).slice(0, 300);

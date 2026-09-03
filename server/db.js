@@ -53,6 +53,7 @@ const SCHEMA = [
     channel VARCHAR(16) DEFAULT 'web',
     external_id VARCHAR(128),
     permission VARCHAR(8) DEFAULT 'write',
+    mode VARCHAR(16) DEFAULT 'chat',
     project VARCHAR(64) DEFAULT 'default',
     title VARCHAR(255) DEFAULT '新对话',
     created_at DATETIME DEFAULT NOW(),
@@ -235,6 +236,7 @@ export async function initSchema() {
   // 存量库迁移（幂等：列已存在时报错被吞掉）
   const MIGRATIONS = [
     'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
+    "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

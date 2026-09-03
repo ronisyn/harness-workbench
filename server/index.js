@@ -176,7 +176,7 @@ app.get('/api/providers', requireAuth, async (req, res) => {
 
 // ---------- 对话（双路径） ----------
 // 普通对话不带 tools（模型自然回答，保持出厂自我认知）；检测到工具意图时走 Agent（function calling）
-const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务)/i;
+const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务|规划|计划模式|规划模式|退出计划|按计划执行|开始实施|进入计划|只读规划)/i;
 
 function needsTools(content) {
   return TOOL_INTENT_RE.test(content);
@@ -260,9 +260,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
   }
   inflight.set(req.user.id, curInflight + 1);
-  const convs = await db.query('SELECT id, permission FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  const convs = await db.query('SELECT id, permission, mode FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1)); return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const permission = convs[0].permission || 'full';
+  const convMode = convs[0].mode || 'chat';
 
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
@@ -322,6 +323,19 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const hint = await resumeHint(conversationId);
     if (hint) messages.push({ role: 'system', content: hint });
   } catch { /* 忽略 */ }
+  // 计划模式（plan_mode）：会话处于只读规划中 → 注入计划模式行为约束
+  if (convMode === 'plan') {
+    messages.push({
+      role: 'system',
+      content: [
+        '【计划模式】你处于只读规划状态（会话级），直到调用 exit_plan_mode 成功为止：',
+        '- 先用只读工具探索（read_file/list_dir/grep/find/web_search/db_query 等），把方案查证清楚；',
+        '- 写类/改动类工具已被平台禁用（write/append/edit/delete/run_command/db_write/git/skill_save 等会返回拒绝），不要反复尝试；',
+        '- 规划完成时调用 exit_plan_mode 提交完整计划（目标、步骤、涉及文件、风险、验证方式），并把它作为你的最终回答展示给用户；',
+        '- 用户批准（如说"开始/按计划执行"）后，在普通模式下再实施。',
+      ].join('\n'),
+    });
+  }
 
   // SSE 头
   res.writeHead(200, {
@@ -351,7 +365,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       let run = null;
       try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
       agentRunId = run ? run.id : null;
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, mode: convMode };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
