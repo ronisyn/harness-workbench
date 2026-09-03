@@ -292,8 +292,12 @@ export default function Chat({ user, onLogout }) {
             patchLast((x) => ({ ...x, thinking: false, traces: [...(x.traces || []), { ...tool, status: 'running' }] }));
           },
           onToolDone: (tool) => {
-            // 工具完成：按 seq 更新为完成卡片（实时刷新 ✓/结果/耗时）
-            patchLast((x) => ({ ...x, traces: (x.traces || []).map((t) => (t.seq === tool.seq ? { ...tool } : t)) }));
+            // 工具完成：按 名字+seq(+子代理) 唯一匹配更新卡片（父/子代理交错不撞号）
+            patchLast((x) => ({
+              ...x,
+              traces: (x.traces || []).map((t) =>
+                (t.name === tool.name && t.seq === tool.seq && (t.sub ?? null) === (tool.sub ?? null)) ? { ...tool } : t),
+            }));
           },
           onPlan: (plan) => {
             // 任务清单进度实时更新

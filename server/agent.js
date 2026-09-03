@@ -98,6 +98,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   };
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
+  let dispSeq = 0;        // 展示序号：全 run 唯一单调递增（子代理/并行不撞号）
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
   const t0 = Date.now();
@@ -187,7 +188,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const execOne = async (call, idx) => {
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
-      const seq = idx + 1; // 展示序号=模型顺序（与最终落序一致）
+      const seq = ++dispSeq; // 全 run 唯一，避免并行/子代理交错时撞号
       if (emit) emit({ type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
       const tStart = Date.now();
       const result = await execTool(call.function.name, args, { ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature });

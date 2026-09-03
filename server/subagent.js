@@ -31,12 +31,16 @@ export function makeSubId() {
 
 function cap(s, n) { return String(s || '').slice(0, n); }
 
+// 子代理序号段：每个子代理独占 1000 个序号，避免与父/兄弟事件撞号
+let seqBaseCursor = 0;
+function nextSeqBase() { seqBaseCursor += 1000; return seqBaseCursor; }
+
 // 转发子代理内部事件给前端（前缀标记，展示为 "子:工具名"，与 3080 子卡等效的直播效果）
-function childEmit(parentEmit, subId, label) {
+function childEmit(parentEmit, subId, label, seqBase) {
   if (!parentEmit) return null;
   return (ev) => {
-    if (ev.type === 'tool_start') parentEmit({ type: 'tool_start', tool: { name: '子:' + ev.tool.name, args: ev.tool.args, seq: ev.tool.seq, status: 'running', sub: subId } });
-    else if (ev.type === 'tool_done') parentEmit({ type: 'tool_done', tool: { ...ev.tool, name: '子:' + ev.tool.name, sub: subId } });
+    if (ev.type === 'tool_start') parentEmit({ type: 'tool_start', tool: { name: '子:' + ev.tool.name, args: ev.tool.args, seq: seqBase + ev.tool.seq, status: 'running', sub: subId } });
+    else if (ev.type === 'tool_done') parentEmit({ type: 'tool_done', tool: { ...ev.tool, name: '子:' + ev.tool.name, seq: seqBase + ev.tool.seq, sub: subId } });
     else if (ev.type === 'think') parentEmit({ type: 'think', text: '[' + label + '思考] ' + ev.text });
     else if (ev.type === 'approval') parentEmit({ type: 'approval', id: ev.id, desc: '[' + label + '] ' + ev.desc });
     else if (ev.type === 'ask') parentEmit({ type: 'ask', id: ev.id, question: '[' + label + '] ' + ev.question, options: ev.options });
@@ -47,6 +51,7 @@ function childEmit(parentEmit, subId, label) {
 export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 1.0, depth = 0, seedMessages = [], noSubagentOverride = false }) {
   pruneSubs();
   const id = makeSubId();
+  const seqBase = nextSeqBase();
   const record = { id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth, kind: (seedMessages && seedMessages.length) ? 'fork' : 'spawn' };
   subs.set(id, record);
   // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=3 或调用方强制 noSubagentOverride）
@@ -62,7 +67,7 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
     provider, model, permission,
     messages: [...(seedMessages || []), { role: 'user', content: prompt }],
     ctx: childCtx, keys, temperature,
-    emit: childEmit(parentCtx.__emit, id, record.name),
+    emit: childEmit(parentCtx.__emit, id, record.name, seqBase),
   });
   const settle = async () => {
     try {
