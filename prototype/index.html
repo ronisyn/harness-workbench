@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RW 首页原型 v1 · 场景 S0/S1</title>
+<style>
+  :root{
+    --red:#e2542b; --red-d:#c23d1a; --yellow:#c98b2e; --cream:#faf3e7; --panel:#fffdf8;
+    --ink:#3a2c1c; --muted:#8a7a60; --line:#e8dcc4; --ok:#2e7d32; --fail:#c62828; --blue:#2f6fb3;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:#efe7d6; color:var(--ink); font-size:14px;}
+  .topbar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:14px;padding:10px 18px;background:var(--panel);border-bottom:1px solid var(--line);}
+  .logo{font-weight:800;color:var(--red);font-size:16px;letter-spacing:.4px}
+  .logo small{color:var(--muted);font-weight:400;margin-left:6px;font-size:11px}
+  .view-switch{display:flex;gap:6px;margin-left:8px}
+  .vs{background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 12px;cursor:pointer;font-size:12px;color:var(--muted)}
+  .vs.on{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}
+  .nav-spacer{flex:1}
+  .nav-item{font-size:12px;color:var(--muted);background:#fff;border:1px solid var(--line);border-radius:7px;padding:5px 10px;cursor:pointer}
+  .wrap{max-width:1180px;margin:16px auto;padding:0 16px}
+
+  /* ---- S0 飞书卡预览（手机框） ---- */
+  #view-card{display:none}
+  #view-card.show{display:flex;justify-content:center;padding:26px 0 60px}
+  .phone{width:380px;background:#111;border-radius:34px;padding:10px;box-shadow:0 18px 46px rgba(0,0,0,.25)}
+  .phone-screen{background:#f4f2ec;border-radius:26px;height:760px;overflow:hidden;position:relative}
+  .phone-head{display:flex;align-items:center;gap:8px;padding:12px 16px;background:#fff;border-bottom:1px solid #eee;font-size:13px;font-weight:600}
+  .msg{display:flex;padding:12px 14px 4px}
+  .msg .avatar{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--red),var(--yellow));color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+  .bubble{background:#fff;border-radius:2px 12px 12px 12px;margin-left:8px;padding:12px 13px;flex:1;box-shadow:0 1px 2px rgba(0,0,0,.05);font-size:13px;line-height:1.55}
+  .bubble .title{font-size:14px;font-weight:700;margin-bottom:6px}
+  .kv{display:flex;justify-content:space-between;border-top:1px dashed #eee;padding:7px 0;font-size:12.5px}
+  .kv .l{color:#666}.kv .r{font-weight:600}
+  .todo-line{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dotted #f0ead8;font-size:12.5px}
+  .badge{display:inline-block;min-width:18px;text-align:center;border-radius:9px;font-size:11px;padding:1px 6px;color:#fff;background:var(--red)}
+  .badge.y{background:var(--yellow)} .badge.g{background:var(--ok)}
+  .card-actions{display:flex;gap:8px;margin-top:10px}
+  .btn{flex:1;text-align:center;background:var(--red);color:#fff;border:none;border-radius:8px;padding:8px 0;font-size:13px;cursor:pointer}
+  .btn.ghost{background:#fff;color:var(--red);border:1px solid var(--red)}
+  .feet{position:absolute;bottom:8px;width:100%;text-align:center;color:#aaa;font-size:11px}
+
+  /* ---- S1 网页首页 ---- */
+  #view-web{display:none}
+  #view-web.show{display:block}
+  .home-head{display:flex;align-items:baseline;gap:10px;margin:4px 2px 12px}
+  .home-head h1{font-size:19px}
+  .home-head .sub{color:var(--muted);font-size:12px}
+  .cols{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.9fr);gap:16px;align-items:start}
+  @media(max-width:900px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;box-shadow:0 2px 8px rgba(60,40,10,.05)}
+  .card h2{font-size:14px;display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .tabs{display:flex;gap:6px;margin-bottom:10px}
+  .tab{flex:1;text-align:center;padding:7px 4px;border:1px solid var(--line);border-radius:9px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--muted)}
+  .tab.on{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}
+  .qitem{border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:8px;overflow:hidden}
+  .qhead{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer}
+  .qhead .dot{width:8px;height:8px;border-radius:50%;background:var(--yellow)}
+  .qhead .dot.f{background:var(--red)} .qhead .dot.r{background:var(--blue)}
+  .qhead b{font-size:13px}
+  .qhead .meta{margin-left:auto;color:var(--muted);font-size:11px}
+  .qbody{display:none;border-top:1px dashed var(--line);padding:10px 12px;background:#fdfbf4}
+  .qitem.open .qbody{display:block}
+  .chip{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0;background:#fff;color:#6b5a41}
+  .acc{list-style:none;margin:8px 0}
+  .acc li{font-size:12.5px;padding:3px 0}
+  .acc li.ok::before{content:"✓ ";color:var(--ok);font-weight:700}
+  .acc li.no::before{content:"✗ ";color:var(--fail)}
+  .q-actions{display:flex;gap:8px;margin-top:8px}
+  .btn.s{flex:none;padding:6px 14px;font-size:12.5px;border-radius:8px;border:none;cursor:pointer}
+  .btn.pass{background:var(--ok);color:#fff}.btn.fail{background:var(--fail);color:#fff}
+  .btn.chat{background:#fff;color:var(--red);border:1px solid var(--red)}
+  .mini{font-size:11.5px;color:var(--muted);margin-top:6px}
+  .empty{color:var(--muted);font-size:12.5px;padding:14px 4px;text-align:center}
+
+  /* 项目脉搏 */
+  .proj-row{border:1px solid var(--line);border-radius:9px;background:#fff;margin-bottom:7px;overflow:hidden}
+  .proj-line{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer}
+  .proj-name{font-weight:600;font-size:12.5px}
+  .pbar{flex:1;height:7px;background:#efe6d2;border-radius:4px;overflow:hidden}
+  .pbar i{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--yellow))}
+  .plabel{font-size:11px;color:var(--muted);white-space:nowrap}
+  .proj-detail{display:none;border-top:1px dashed var(--line);padding:9px 11px;font-size:12px;background:#fdfbf4}
+  .proj-row.open .proj-detail{display:block}
+  .pd-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:4px}
+  .pd-grid span{color:#6b5a41}
+  .fold-row{font-size:12px;color:var(--muted);text-align:center;padding:6px;cursor:pointer;border:1px dashed var(--line);border-radius:9px}
+  .chip2{display:inline-block;font-size:10.5px;border-radius:5px;padding:1px 6px;margin-left:6px}
+  .chip2.hot{background:#fdeee8;color:var(--red)} .chip2.warn{background:#fdf3dd;color:var(--yellow)}
+
+  /* 底部对话 */
+  .chat-strip{position:sticky;bottom:10px;margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:8px;box-shadow:0 6px 20px rgba(60,40,10,.12);display:flex;gap:8px;align-items:center}
+  .chat-strip input{flex:1;border:1px solid var(--line);background:#fff;border-radius:9px;padding:9px 12px;font-size:13px;outline:none}
+  .chat-strip input:focus{border-color:var(--red)}
+  .chat-feed{max-height:150px;overflow:auto;margin-bottom:8px;display:none}
+  .chat-feed .m{font-size:12px;padding:3px 2px}
+  .chat-feed .m b{color:var(--red)}
+  .chat-feed .m.ai b{color:var(--blue)}
+
+  /* toast */
+  .toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:#3a2c1c;color:#fff;padding:9px 18px;border-radius:10px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:99}
+  .toast.show{opacity:1}
+  .tagline{margin:0 2px 14px;color:var(--muted);font-size:12.5px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">Roni Workbench<small>首页原型 v1 · 场景 S0/S1</small></div>
+  <div class="view-switch">
+    <button class="vs on" id="vs-card">① 飞书卡（第0屏）</button>
+    <button class="vs" id="vs-web">② 网页首页（第1屏）</button>
+  </div>
+  <div class="nav-spacer"></div>
+  <button class="nav-item" onclick="toast('原型未包含此页（后续壳内实现）')">项目</button>
+  <button class="nav-item" onclick="toast('原型未包含此页（后续壳内实现）')">会话</button>
+  <button class="nav-item" onclick="toast('原型未包含此页（后续壳内实现）')">知识库</button>
+  <button class="nav-item" onclick="toast('原型未包含此页（后续壳内实现）')">设置</button>
+</div>
+
+<!-- S0 飞书卡 -->
+<div id="view-card" class="show">
+  <div class="phone">
+    <div class="phone-screen">
+      <div class="phone-head">✈️ 飞书 · Roni Workbench</div>
+      <div class="msg">
+        <div class="avatar">RW</div>
+        <div class="bubble">
+          <div class="title">☀️ 早上好，有 <span class="badge">5</span> 件事需要你处理</div>
+          <div class="kv"><span class="l">● 待复测</span><span class="r"><span class="badge">3</span> 项目A #128 · 项目B #131 #132</span></div>
+          <div class="kv"><span class="l">● 待确认</span><span class="r"><span class="badge y">1</span> 需求「数据看板」</span></div>
+          <div class="kv"><span class="l">● 资源支持</span><span class="r"><span class="badge g">1</span> 需要设计稿链接</span></div>
+          <div class="todo-line"><span>昨晚执行</span><span>3 项目 · 完成 7 / 卡住 1</span></div>
+          <div class="todo-line"><span>成本</span><span>¥12.40 · <a style="color:var(--blue)">明细</a></span></div>
+          <div class="card-actions">
+            <button class="btn" onclick="goTodo()">处理待办</button>
+            <button class="btn ghost" onclick="goProjects()">看项目进展</button>
+          </div>
+        </div>
+      </div>
+      <div class="feet">点击卡片按钮 → 跳到网页首页对应位置</div>
+    </div>
+  </div>
+</div>
+
+<!-- S1 网页首页 -->
+<div id="view-web">
+  <div class="wrap">
+    <div class="home-head">
+      <h1>☀️ 早上好</h1><span class="sub">9/4 · 3 项目活跃 · 昨晚完成 7 个任务，成本 ¥12.40</span>
+    </div>
+
+    <div class="cols">
+      <!-- 左：决策队列 -->
+      <div>
+        <div class="card">
+          <h2>📥 需要你处理</h2>
+          <div class="tabs">
+            <button class="tab on" data-tab="retest" onclick="switchTab('retest')">待复测 <b id="n-retest">3</b></button>
+            <button class="tab" data-tab="confirm" onclick="switchTab('confirm')">待确认 <b id="n-confirm">1</b></button>
+            <button class="tab" data-tab="support" onclick="switchTab('support')">资源支持 <b id="n-support">1</b></button>
+          </div>
+
+          <div id="list-retest">
+            <div class="qitem open" data-id="t1">
+              <div class="qhead" onclick="toggleQ(this)">
+                <span class="dot"></span><b>项目A #128 · 数据看板接口</b>
+                <span class="meta">AI 自测通过 · 等待人工复测</span>
+              </div>
+              <div class="qbody">
+                <span class="chip">需求 HH-260901-001</span><span class="chip">工单 docs/任务工单/#128</span><span class="chip">表 tasks/dashboard</span>
+                <ul class="acc">
+                  <li class="ok">验收1：GET /api/dashboard/stats 返回 200 且字段齐全</li>
+                  <li class="ok">验收2：smoke m6-dashboard 全绿</li>
+                </ul>
+                <div class="q-actions">
+                  <button class="btn s pass" onclick="retestPass(event)">✓ 复测通过</button>
+                  <button class="btn s fail" onclick="retestFail(event)">✗ 打回（填原因）</button>
+                  <button class="btn s chat" onclick="toast('进入与该任务绑定的讨论（S2 缺口，后续实现）')">💬 讨论</button>
+                </div>
+              </div>
+            </div>
+            <div class="qitem" data-id="t2">
+              <div class="qhead" onclick="toggleQ(this)">
+                <span class="dot"></span><b>项目B #131 · 登录改造</b>
+                <span class="meta">待复测</span>
+              </div>
+              <div class="qbody">
+                <span class="chip">需求 HH-260901-002</span>
+                <ul class="acc">
+                  <li class="ok">验收：旧 token 5 天内续登不失效</li>
+                  <li class="no">失败用例记录：控制台复核发现一处边界（已修，待你复测）</li>
+                </ul>
+                <div class="q-actions">
+                  <button class="btn s pass" onclick="retestPass(event)">✓ 通过</button>
+                  <button class="btn s fail" onclick="retestFail(event)">✗ 打回</button>
+                  <button class="btn s chat" onclick="toast('进入与该任务绑定的讨论（S2 缺口）')">💬 讨论</button>
+                </div>
+              </div>
+            </div>
+            <div class="qitem" data-id="t3">
+              <div class="qhead" onclick="toggleQ(this)">
+                <span class="dot"></span><b>项目B #132 · 微信消息收口</b><span class="meta">待复测</span>
+              </div>
+              <div class="qbody">
+                <span class="chip">需求 HH-260901-003</span>
+                <ul class="acc"><li class="ok">验收：消息→Idea 落库 source=微信</li></ul>
+                <div class="q-actions">
+                  <button class="btn s pass" onclick="retestPass(event)">✓ 通过</button>
+                  <button class="btn s fail" onclick="retestFail(event)">✗ 打回</button>
+                  <button class="btn s chat" onclick="toast('进入与该任务绑定的讨论（S2 缺口）')">💬 讨论</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="list-confirm" style="display:none">
+            <div class="qitem open">
+              <div class="qhead" onclick="toggleQ(this)">
+                <span class="dot f"></span><b>需求「数据看板」 HH-260901-004</b><span class="meta">AI 已整理，等你确认</span>
+              </div>
+              <div class="qbody">
+                <span class="chip">优先级 P1（AI 定）</span><span class="chip">类型 业务需求（AI 定）</span>
+                <div class="mini">描述：首页增加 3 张统计卡（任务/成本/燃尽）。验收标准：…… 数据契约：涉及 tasks/usage 口径见工单。</div>
+                <div class="q-actions">
+                  <button class="btn s pass" onclick="toast('已确认 → 生成任务并立项（驱动器接手）')">✓ 确认立项</button>
+                  <button class="btn s chat" onclick="toast('进入调整讨论：可质疑/改共识，改完重新确认')">✎ 我要调整</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="list-support" style="display:none">
+            <div class="qitem open">
+              <div class="qhead" onclick="toggleQ(this)">
+                <span class="dot r"></span><b>项目C · 缺设计稿链接</b><span class="meta">AI 卡在资源上，等你提供</span>
+              </div>
+              <div class="qbody">
+                <div class="mini">AI 问：数据看板页面样式需要设计稿（Figma 或图片链接）。提供后它会继续。</div>
+                <div class="q-actions" style="margin-top:6px">
+                  <input id="sup-in" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12px" placeholder="粘贴链接或上传…">
+                  <button class="btn s pass" onclick="supply()">提供资源</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="empty" id="queue-empty" style="display:none">🎉 没有待处理事项，系统在继续跑</div>
+        </div>
+
+        <div class="chat-strip">
+          <div style="flex:1">
+            <div class="chat-feed" id="feed"></div>
+            <input id="chat-in" placeholder="和 RW 说一句 / 丢个新想法（回车发送）…" onkeydown="if(event.key==='Enter')sendChat()">
+          </div>
+          <button class="btn" style="flex:none;padding:9px 16px" onclick="sendChat()">发送</button>
+        </div>
+      </div>
+
+      <!-- 右：项目脉搏 -->
+      <div>
+        <div class="card">
+          <h2>📊 项目脉搏 <span class="chip2" style="margin-left:auto">全部 5 项目</span></h2>
+          <div id="projs"></div>
+          <div class="fold-row" id="fold-more" onclick="toggleFold()">▸ 展开其余项目（2）</div>
+          <div class="q-actions"><button class="btn s chat" style="margin-top:8px" onclick="toast('新建项目（hello 已有流程，原型略）')">＋ 新建项目</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const PROJS=[
+  {name:"项目A · 数据看板",active:true,done:5,total:6,retest:1,stuck:0,cost:"¥6.20",note:"进行中：验收2/2 已过",detail:[["需求","HH-260901-001"],["待复测","#128"],["最近","数据看板接口"]],
+   history:["#128 待复测（等你）","#127 已通过并部署","#126 已完成"]},
+  {name:"项目B · 渠道收口",active:true,done:2,total:3,retest:2,stuck:0,cost:"¥4.10",note:"2 项待复测",detail:[["需求","HH-260901-002/003"],["待复测","#131 #132"],["分支","feat/channel"]],
+   history:["#131 控制台复核通过→待你复测","#130 已完成"]},
+  {name:"项目C · 官网改版",active:true,done:0,total:4,retest:0,stuck:1,cost:"¥2.10",note:"卡住：等你给设计稿",detail:[["阻塞","缺设计稿链接"],["待开发","#133-#136"]],
+   history:["卡住已通知你（资源支持 tab）"]},
+  {name:"项目 222",active:false,done:3,total:3,retest:0,stuck:0,cost:"¥0.8",note:"已完成 3/3"},
+  {name:"项目 333",active:false,done:1,total:8,retest:0,stuck:0,cost:"¥0.2",note:"待开发 7"}
+];
+let counts={retest:3,confirm:1,support:1};
+function $(s){return document.querySelector(s)}
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2200)}
+
+/* 视图切换 */
+$('#vs-card').onclick=()=>{$('#view-card').classList.add('show');$('#view-web').classList.remove('show');$('#vs-card').classList.add('on');$('#vs-web').classList.remove('on')};
+$('#vs-web').onclick=()=>{$('#view-web').classList.add('show');$('#view-card').classList.remove('show');$('#vs-web').classList.add('on');$('#vs-card').classList.remove('on');renderProjs()};
+function goTodo(){ $('#vs-web').click(); $('#view-web').scrollIntoView(); document.querySelector('#list-retest .qitem')?.scrollIntoView({behavior:'smooth'}); toast('已落到第一个待办（深链模拟）') }
+function goProjects(){ $('#vs-web').click(); renderProjs(); toast('已展开项目脉搏') }
+
+/* 队列 */
+function switchTab(t){document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.dataset.tab===t));
+ ['retest','confirm','support'].forEach(k=>$('#list-'+k).style.display=(k===t)?'':'none')}
+function toggleQ(h){h.parentElement.classList.toggle('open')}
+function retestPass(e){e.stopPropagation();const it=e.target.closest('.qitem');it.remove();counts.retest--;$('#n-retest').textContent=counts.retest;
+ if(!counts.retest&&!counts.confirm&&!counts.support){$('#queue-empty').style.display='block'}
+ toast('✓ 复测通过 → 自动进入 等待合并部署（原型演示）')}
+function retestFail(e){e.stopPropagation();const it=e.target.closest('.qitem');it.classList.toggle('open');
+ const b=it.querySelector('.acc');const li=document.createElement('li');li.className='no';li.textContent='（你填的失败原因）→ 已回待开发并追加失败用例留痕';b.appendChild(li);
+ it.querySelector('.qhead .meta').textContent='已打回 · 驱动器将修复重提';counts.retest--;
+ toast('已打回 #任务 → AI 将修复后重新提测')}
+function supply(){const v=$('#sup-in').value.trim();if(!v)return toast('请先粘贴链接');toast('资源已提供 → AI 继续干活');counts.support--;$('#n-support').textContent=counts.support;
+ document.querySelector('#list-support .qitem').remove();if(!counts.retest&&!counts.confirm&&!counts.support)$('#queue-empty').style.display='block'}
+
+/* 对话（模拟） */
+function sendChat(){const v=$('#chat-in').value.trim();if(!v)return;const f=$('#feed');f.style.display='block';
+ f.insertAdjacentHTML('beforeend','<div class="m"><b>我：</b>'+esc(v)+'</div>');$('#chat-in').value='';
+ setTimeout(()=>f.insertAdjacentHTML('beforeend','<div class="m ai"><b>RW：</b>已收到。若是新需求我会先整理成需求要点再请你确认（原型演示）</div>'),400);
+ f.scrollTop=f.scrollHeight}
+function esc(s){return s.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+
+/* 项目脉搏 */
+function renderProjs(){
+ const el=$('#projs');el.innerHTML='';
+ PROJS.forEach((p,i)=>{const show=p.active||window._foldAll;
+  const row=document.createElement('div');row.className='proj-row'+(show?'':'')+(show?'':'');
+  const pct=Math.round(p.done/p.total*100);
+  row.innerHTML=`
+   <div class="proj-line" onclick="toggleP(this)">
+     <span class="proj-name">${p.name}${p.stuck?'<span class="chip2 warn">卡住</span>':''}${p.retest?'<span class="chip2 hot">待复测 '+p.retest+'</span>':''}</span>
+     <span class="pbar"><i style="width:${pct}%"></i></span>
+     <span class="plabel">${p.done}/${p.total} · ${p.cost}</span>
+     <span style="color:var(--muted)">▾</span>
+   </div>
+   <div class="proj-detail">
+     <div class="mini">${p.note||''}</div>
+     <div class="pd-grid">${p.detail.map(d=>`<span><b>${d[0]}</b> ${d[1]}</span>`).join('')}</div>
+     <div class="mini" style="margin-top:6px">${(p.history||[]).map(h=>'· '+h).join('<br>')}</div>
+     <button class="btn s chat" style="margin-top:6px" onclick="event.stopPropagation();toast('进入该项目工作台（hello flow，原型略）')">进入项目工作台 →</button>
+   </div>`;
+  el.appendChild(row);
+  if(!show)row.style.display='none';
+ });
+ const hidden=PROJS.filter(p=>!p.active).length;
+ $('#fold-more').textContent=(window._foldAll?'▾ 收起其余项目':'▸ 展开其余项目（'+hidden+'）');
+}
+function toggleP(h){h.parentElement.classList.toggle('open')}
+function toggleFold(){window._foldAll=!window._foldAll;renderProjs()}
+
+renderProjs();
+</script>
+</body>
+</html>
