@@ -134,6 +134,7 @@ export default function Chat({ user, onLogout }) {
   const [limBudget, setLimBudget] = useState(120);
   const [limRounds, setLimRounds] = useState(2000);
   const [limLoop, setLimLoop] = useState(6);
+  const [limParallel, setLimParallel] = useState(10);
   const [tasks, setTasks] = useState([]);
   const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const abortRef = useRef(null);
@@ -338,6 +339,7 @@ export default function Chat({ user, onLogout }) {
       if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
       if (s.settings?.round_cap !== undefined) setLimRounds(Number(s.settings.round_cap));
       if (s.settings?.loop_guard !== undefined) setLimLoop(Number(s.settings.loop_guard));
+      if (s.settings?.max_parallel_tools !== undefined) setLimParallel(Number(s.settings.max_parallel_tools));
     }).catch(() => {});
     if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
     if (tab === 'market') await loadMarket();
@@ -372,7 +374,8 @@ export default function Chat({ user, onLogout }) {
     const val = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
     if (k === 'time_budget_min') setLimBudget(val);
     else if (k === 'round_cap') setLimRounds(val);
-    else setLimLoop(val);
+    else if (k === 'loop_guard') setLimLoop(val);
+    else setLimParallel(val);
     try { await api.setSettings({ [k]: val }); setToast('护栏已更新（0=不限，下个任务生效）'); } catch { /* ignore */ }
   };
 
@@ -563,6 +566,7 @@ export default function Chat({ user, onLogout }) {
                       <label>时间预算(分) <input className="rw-input" type="number" min="0" value={limBudget} onChange={(e) => saveLim('time_budget_min', e.target.value)} /></label>
                       <label>轮次上限 <input className="rw-input" type="number" min="0" value={limRounds} onChange={(e) => saveLim('round_cap', e.target.value)} /></label>
                       <label>循环检测 <input className="rw-input" type="number" min="0" value={limLoop} onChange={(e) => saveLim('loop_guard', e.target.value)} /></label>
+                      <label>并行工具 <input className="rw-input" type="number" min="0" value={limParallel} onChange={(e) => saveLim('max_parallel_tools', e.target.value)} /></label>
                     </div>
                   </div>
                 </div>
