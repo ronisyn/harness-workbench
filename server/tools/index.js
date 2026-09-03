@@ -669,15 +669,21 @@ export async function execTool(name, args, ctx) {
   if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
   const t0 = Date.now();
   let result;
-  // full 权限不限制路径（limitPath=false）；write/read 级才检查工作区边界
-  const eff = { ...ctx, limitPath: ctx.permission !== 'full' };
+  // full 权限不限制路径（limitPath=false）；read/write 级才检查工作区边界（guard=full 级能力+审批，不受限）
+  const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
-    // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝（先于审批门禁）
-    if (eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
-      result = { error: '计划模式（只读）：工具 ' + name + ' 已被禁用。规划完成后请调用 exit_plan_mode 提交计划；用户批准并切回普通模式后再执行。' };
-    } else
-    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准（POST /api/approvals/:id 裁决）
-    if (eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
+    let blocked = null;
+    // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）
+    if (eff.limitPath && tool.permission === 'read') {
+      const cand = args.path ?? args.file ?? args.dir ?? args.base ?? args.src;
+      if (cand && !inside(cand, eff.root)) blocked = '路径超出工作区（本会话权限只允许访问 ' + eff.root + '）';
+    }
+    // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝
+    if (!blocked && eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
+      blocked = '计划模式（只读）：工具 ' + name + ' 已被禁用。规划完成后请调用 exit_plan_mode 提交计划；用户批准并切回普通模式后再执行。';
+    }
+    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准
+    if (!blocked && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
       const argsDesc = JSON.stringify(args).slice(0, 300);
       const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
       if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
@@ -691,10 +697,11 @@ export async function execTool(name, args, ctx) {
         if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
       }
       if (!verdict || verdict.decision !== 'approve') {
-        result = { error: verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : '')) };
-      } else {
-        result = await tool.run(args, eff);
+        blocked = verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : ''));
       }
+    }
+    if (blocked) {
+      result = { error: blocked };
     } else {
       result = await tool.run(args, eff);
     }

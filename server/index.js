@@ -537,11 +537,15 @@ app.post('/api/upload', requireAuth, async (req, res) => {
   try {
     const { name, data } = req.body || {};
     if (!name || !data) return res.status(400).json({ ok: false, message: '参数缺失' });
+    if (typeof data !== 'string' || !/^[A-Za-z0-9+/=\s]+$/.test(data)) return res.status(400).json({ ok: false, message: 'data 不是合法的 base64' });
+    const buf = Buffer.from(data, 'base64');
+    if (buf.length === 0) return res.status(400).json({ ok: false, message: '空文件' });
+    if (buf.length > 8 * 1024 * 1024) return res.status(400).json({ ok: false, message: '文件超过 8MB 上限' });
     const dir = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'uploads');
     fs.mkdirSync(dir, { recursive: true });
-    const safe = path.basename(String(name).replace(/[\\/]/g, '_'));
+    const safe = path.basename(String(name).replace(/[\\/]/g, '_')).slice(0, 120) || 'file';
     const file = path.join(dir, Date.now() + '-' + safe);
-    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    fs.writeFileSync(file, buf);
     res.json({ ok: true, path: file });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
