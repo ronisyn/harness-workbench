@@ -5,6 +5,7 @@
 import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool, plans } from './tools/index.js';
 import { db } from './db.js';
+import { checkpoint } from './runtrack.js';
 
 // 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)
 let limitsCache = null;
@@ -68,6 +69,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   };
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
+  let noProgressCount = 0; // 连续"相同调用"轮数
+  let loopWarned = false;  // soft 换策略提示只发一次
   const t0 = Date.now();
   // 护栏动态读取（settings，可调可关，0=不限）：默认 120 分钟 / 2000 轮 / 连续 6 次判循环
   const lim = await agentLimits();
@@ -81,9 +84,9 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (ctx.__signal && ctx.__signal.aborted) {
       return { content: '', stopped: true, toolLog, usage: {} };
     }
-    // 时间预算护栏（可关闭/可调）
+    // 时间预算护栏（可关闭/可调；触发时保留现场供恢复）
     if (Date.now() - t0 > budgetMs) {
-      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，已停止。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {} };
+      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget' };
     }
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
@@ -108,18 +111,36 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       }
       return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '' };
     }
-    // 循环检测护栏（可关闭/可调）：连续 N 次 (工具+参数+结果前段相同) 才判定卡死
+    // 长任务现场：每轮工具执行后落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）
+    if (ctx.__runId) {
+      const counts = {};
+      for (const t of toolLog) counts[t.name] = (counts[t.name] || 0) + 1;
+      const last = toolLog[toolLog.length - 1];
+      const step = last ? last.name + (last.status === 'fail' ? '(失败)' : '') + ' → ' + String(last.result || '').replace(/\s+/g, ' ').slice(0, 100) : '';
+      await checkpoint(ctx.__runId, { rounds: callHistory.length, lastStep: step, toolCounts: counts }).catch(() => {});
+    }
+    // 循环处理（可关闭/可调，不再简单杀任务）：
+    // ① soft：连续相同调用且无进展达 softN 次 → 提示"换策略"，继续推进
+    // ② hard：仍无效达 loopGuardN 次 → 挂起任务（paused，现场保留），交还用户决策
     const sig = calls.map((c) => {
       let argsStr = '';
       try { argsStr = JSON.stringify(JSON.parse(c.function.arguments || '{}')).slice(0, 60); } catch { argsStr = String(c.function.arguments || '').slice(0, 60); }
       return c.function.name + ':' + argsStr;
     }).join('|');
+    // 无进展判定：连续轮次工具签名相同（结果会反映在下一轮 sig 里是否变化）
+    const prev = callHistory[callHistory.length - 1];
+    if (sig === prev) noProgressCount += 1; else noProgressCount = 0;
     callHistory.push(sig);
-    if (loopGuardN > 0) {
-      const tail = callHistory.slice(-loopGuardN);
-      if (tail.length === loopGuardN && tail.every((s) => s === tail[0])) {
-        return { content: `（检测到连续 ${loopGuardN} 次重复工具调用且无进展，已停止。可尝试换一种方式，或用 set_limits 调整/关闭循环检测）`, toolLog, usage: res.usage };
-      }
+    const softN = Math.max(1, Math.floor(loopGuardN / 2));
+    if (loopGuardN > 0 && noProgressCount === softN && !loopWarned) {
+      loopWarned = true;
+      msgs.push({ role: 'system', content: '⚠️ 已连续 ' + (softN + 1) + ' 次调用相同的工具与参数且无进展。请【改变策略】：换工具、换参数、先诊断环境或换实现思路，不要再次原样重试。' });
+    }
+    if (loopGuardN > 0 && noProgressCount >= loopGuardN - 1) {
+      return {
+        content: `（任务已挂起：连续 ${loopGuardN} 次重复调用且无进展。现场已保存，回复"继续任务"可恢复，或给我新指令/新思路）`,
+        toolLog, usage: res.usage, paused: true, reason: '连续重复无进展',
+      };
     }
     // 工具调用轮（实时流式：工具开始→执行→完成 均即时上报）
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
@@ -146,5 +167,5 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });
   }
-  return { content: '（达到轮次上限或异常终止。可让用户调大/关闭轮次上限后继续）', toolLog, usage: {} };
+  return { content: '（达到轮次上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）', toolLog, usage: {}, guard: 'cap' };
 }

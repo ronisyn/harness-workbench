@@ -210,6 +210,22 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     KEY idx_kb_scope (account_id, scope)
   )`,
+  // ---- 长任务现场（断点恢复：每会话一条；running→completed|interrupted|paused） ----
+  `CREATE TABLE IF NOT EXISTS agent_runs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    account_id INT,
+    goal VARCHAR(2000),
+    status VARCHAR(20) DEFAULT 'running',
+    reason VARCHAR(300),
+    rounds INT DEFAULT 0,
+    last_step VARCHAR(500),
+    tool_counts TEXT,
+    started_at DATETIME DEFAULT NOW(),
+    heartbeat_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW(),
+    INDEX idx_run_conv (conversation_id)
+  )`,
 ];
 
 export async function initSchema() {

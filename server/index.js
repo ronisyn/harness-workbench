@@ -16,6 +16,7 @@ import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
+import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -174,7 +175,7 @@ app.get('/api/providers', requireAuth, async (req, res) => {
 
 // ---------- 对话（双路径） ----------
 // 普通对话不带 tools（模型自然回答，保持出厂自我认知）；检测到工具意图时走 Agent（function calling）
-const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标)/i;
+const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务)/i;
 
 function needsTools(content) {
   return TOOL_INTENT_RE.test(content);
@@ -315,6 +316,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const sp = await getSetting('systemPrompt', '');
     if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
   } catch { /* 忽略 */ }
+  // 断点恢复：本会话存在 interrupted/paused 的长任务现场 → 注入现场信息，支持"继续任务"
+  try {
+    const hint = await resumeHint(conversationId);
+    if (hint) messages.push({ role: 'system', content: hint });
+  } catch { /* 忽略 */ }
 
   // SSE 头
   res.writeHead(200, {
@@ -330,6 +336,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
+  let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
   try {
     const useTools = needsTools(content);
     let answer = '';
@@ -339,7 +346,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
       const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal };
+      // 长任务现场：登记/复用 run（断点恢复外壳）
+      let run = null;
+      try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
+      agentRunId = run ? run.id : null;
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -359,6 +370,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           }
         },
       });
+      // 收尾：按结果登记现场状态（completed/paused/interrupted+原因）
+      if (run) {
+        try {
+          if (result.stopped) await markRun(run.id, 'interrupted', '用户点击停止');
+          else if (result.guard === 'budget') await markRun(run.id, 'interrupted', '时间预算达到（可 set_limits 调大/关闭）');
+          else if (result.guard === 'cap') await markRun(run.id, 'interrupted', '轮次上限达到（可调大/关闭）');
+          else if (result.paused) await markRun(run.id, 'paused', result.reason || '循环无进展挂起');
+          else await markRun(run.id, 'completed', '');
+        } catch { /* 忽略 */ }
+      }
       if (result.stopped) { send({ type: 'stopped' }); return; } // 用户点击停止：不落 assistant/统计
       answer = result.content || '（无输出）';
       usage = result.usage || {};
@@ -397,6 +418,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
   } catch (e) {
     send({ type: 'error', message: e.message });
+    if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
   }
   if (abortMap.get(akey) === actrl) abortMap.delete(akey);
   // 释放并发槽位
@@ -585,6 +607,8 @@ async function main() {
       await db.query('UPDATE models SET enabled=0 WHERE provider_id=? AND model_id=?', [dpr[0].id, 'deepseek-chat']);
     }
   } catch { /* 修正失败不阻塞 */ }
+  // 重启自检：遗留 running 现场 → interrupted（断点恢复外壳）
+  try { await interruptStaleOnBoot(); } catch (e) { console.error('[runtrack] 重启自检失败:', e.message); }
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
