@@ -121,7 +121,7 @@ body {
 @keyframes blink { 50% { opacity: 0; } }
 
 /* 对话流轨迹卡片 */
-.rw-msg-traces { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.rw-msg-traces { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .rw-approval { border: 1px solid var(--rw-red); border-left: 4px solid var(--rw-red); border-radius: 10px;
   background: #fdf1ec; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
 .rw-approval-desc { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; margin-bottom: 8px; }
@@ -134,11 +134,11 @@ body {
   font-size: 12px; cursor: pointer; overflow: hidden; }
 .rw-trace-card.fail { border-color: #c62828; }
 .rw-trace-card .running { }
-.rw-trace-badge { font-size: 11px; width: 16px; text-align: center; }
-.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+.rw-trace-badge { font-size: 12px; width: 14px; text-align: center; }
+.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; min-height: 26px; }
 .rw-trace-badge.done { color: #2e7d32; }
 .rw-trace-badge.fail { color: #c62828; }
-.rw-trace-badge.running { color: var(--rw-yellow); animation: pulse 1s infinite; }
+.rw-trace-badge.running { color: var(--rw-red); animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 .rw-thinking { color: var(--rw-muted); font-size: 13px; font-style: italic; animation: pulse 1.2s infinite; }
 /* 思考过程区（灰色斜体，可折叠） */
@@ -189,6 +189,9 @@ body {
 .rw-cap-item.col { flex-direction: column; align-items: stretch; cursor: default; border-top: 1px dashed var(--rw-border); margin-top: 8px; padding-top: 10px; }
 .rw-cap-item.col:hover { color: inherit; }
 .rw-cap-item.col .rw-input { width: 100%; box-sizing: border-box; font: inherit; }
+.rw-limrow { display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+.rw-limrow label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--rw-muted); flex: 1; min-width: 90px; }
+.rw-limrow .rw-input { padding: 4px 6px; font-size: 12px; }
 
 /* 厂商 */
 .rw-provider { border: 1px solid var(--rw-border); border-radius: 10px; padding: 10px; margin-bottom: 10px; }

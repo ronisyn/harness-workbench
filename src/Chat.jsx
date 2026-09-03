@@ -106,6 +106,9 @@ export default function Chat({ user, onLogout }) {
   const [toolcalls, setToolcalls] = useState([]);
   const [temperature, setTemperature] = useState(1.0);
   const [sysPrompt, setSysPrompt] = useState('');
+  const [limBudget, setLimBudget] = useState(120);
+  const [limRounds, setLimRounds] = useState(2000);
+  const [limLoop, setLimLoop] = useState(6);
   const [tasks, setTasks] = useState([]);
   const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const abortRef = useRef(null);
@@ -296,6 +299,9 @@ export default function Chat({ user, onLogout }) {
     api.getSettings().then((s) => {
       if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
       if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
+      if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
+      if (s.settings?.round_cap !== undefined) setLimRounds(Number(s.settings.round_cap));
+      if (s.settings?.loop_guard !== undefined) setLimLoop(Number(s.settings.loop_guard));
     }).catch(() => {});
     if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
     if (tab === 'market') await loadMarket();
@@ -323,6 +329,15 @@ export default function Chat({ user, onLogout }) {
   const saveSysPrompt = async (v) => {
     setSysPrompt(v);
     try { await api.setSettings({ systemPrompt: v }); } catch { /* ignore */ }
+  };
+
+  const saveLim = async (k, v) => {
+    const n = Number(v);
+    const val = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+    if (k === 'time_budget_min') setLimBudget(val);
+    else if (k === 'round_cap') setLimRounds(val);
+    else setLimLoop(val);
+    try { await api.setSettings({ [k]: val }); setToast('护栏已更新（0=不限，下个任务生效）'); } catch { /* ignore */ }
   };
 
   const loadMarket = async () => {
@@ -417,6 +432,12 @@ export default function Chat({ user, onLogout }) {
                   {m.role === 'assistant'
                     ? <>
                         {m.plan && m.plan.length > 0 && <PlanCard plan={m.plan} />}
+                        {m.think ? (
+                          <details className="rw-think" open={m.streaming}>
+                            <summary>🧠 思考过程</summary>
+                            <div style={{ whiteSpace: 'pre-wrap' }}>{m.think}</div>
+                          </details>
+                        ) : null}
                         {m.approvals && m.approvals.length > 0 && m.approvals.map((ap) => (
                           <div key={ap.id} className="rw-approval">
                             <div className="rw-approval-desc">{ap.desc}</div>
@@ -433,12 +454,6 @@ export default function Chat({ user, onLogout }) {
                             {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
                           </div>
                         )}
-                        {m.think ? (
-                          <details className="rw-think" open={m.streaming}>
-                            <summary>🧠 思考过程</summary>
-                            <div style={{ whiteSpace: 'pre-wrap' }}>{m.think}</div>
-                          </details>
-                        ) : null}
                         {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
                         {m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}
                         {m.streaming && !m.content && !m.thinking && <span className="rw-caret">▋</span>}
@@ -493,6 +508,14 @@ export default function Chat({ user, onLogout }) {
                     <span style={{ marginBottom: 4 }}>系统提示词（用户自定义指令，注入每轮对话；留空即不注入）</span>
                     <textarea className="rw-input" rows="3" placeholder="例如：回答保持简短；涉及代码时先给结论…"
                       value={sysPrompt} onChange={(e) => saveSysPrompt(e.target.value)} />
+                  </div>
+                  <div className="rw-cap-item col">
+                    <span style={{ marginBottom: 2 }}>运行护栏（0=不限，立即生效；默认 120 分钟 / 2000 轮 / 循环 6 次）</span>
+                    <div className="rw-limrow">
+                      <label>时间预算(分) <input className="rw-input" type="number" min="0" value={limBudget} onChange={(e) => saveLim('time_budget_min', e.target.value)} /></label>
+                      <label>轮次上限 <input className="rw-input" type="number" min="0" value={limRounds} onChange={(e) => saveLim('round_cap', e.target.value)} /></label>
+                      <label>循环检测 <input className="rw-input" type="number" min="0" value={limLoop} onChange={(e) => saveLim('loop_guard', e.target.value)} /></label>
+                    </div>
                   </div>
                 </div>
               )}

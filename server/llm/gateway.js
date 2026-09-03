@@ -17,7 +17,7 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
   const res = await fetch(p.base + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, stream: false }),
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, stream: false }),
     signal: AbortSignal.timeout(opts.timeoutMs || 90000),
   });
   const j = await res.json().catch(() => ({}));
@@ -34,7 +34,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
   const res = await fetch(p.base + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 4000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
+    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
     signal: AbortSignal.timeout(60000), // 首次响应 60s；建立后流式读取无超时
   });
   if (!res.ok || !res.body) {
@@ -81,7 +81,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     messages,
     tools: tools || [],
     tool_choice: 'auto',
-    max_tokens: 4000,
+    max_tokens: 8000,
     temperature,
     stream: false,
   };

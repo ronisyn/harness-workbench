@@ -1,8 +1,30 @@
 // server/agent.js - Agent 执行循环（目标完成度判断：干完就停，没干完继续）
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
-// 保留运行时护栏（非预设轮次）：时间预算 / 循环检测 / 绝对兜底
+// 运行护栏（仅防失控，非预设限制）：时间预算/循环检测/绝对兜底 —— 全部可在 settings 表调整或关闭（0=不限），
+// 用 set_limits 工具或 设置→能力→高级参数 修改即生效（无需重启），默认已大幅放宽以支持长任务
 import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool, plans } from './tools/index.js';
+import { db } from './db.js';
+
+// 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)
+let limitsCache = null;
+let limitsCacheAt = 0;
+const DEFAULT_LIMITS = { budgetMin: 120, roundCap: 2000, loopGuard: 6 };
+async function agentLimits() {
+  if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
+  const def = { ...DEFAULT_LIMITS };
+  try {
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard']);
+    const pick = (k, d) => {
+      const r = rows.find((x) => x.skey === k);
+      if (!r) return d;
+      try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
+    };
+    limitsCache = { budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap), loopGuard: pick('loop_guard', def.loopGuard) };
+  } catch { limitsCache = def; }
+  limitsCacheAt = Date.now();
+  return limitsCache;
+}
 
 export const ENV_MAP = [
   '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
@@ -15,10 +37,13 @@ export const ENV_MAP = [
   '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
   '行动原则（务必遵守）：',
   '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
+  '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
   '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理），避免 shell 引号管道坑。',
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
   '- 某步失败不要放弃：读错误信息→修复→重试；同一工具同参数失败 2 次后换思路（改路径/换命令/查环境）。',
   '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
+  '- 运行护栏（时间预算/轮次上限/循环检测）是可调整可关闭的配置：用户要求取消/放宽时，直接用 set_limits 工具改（0=不限），或说明原因后调大；改完下一轮立即生效，无需改代码。',
+  '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）手动 systemctl restart（那会中断你自己）。',
   '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
 
@@ -44,18 +69,21 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   const toolLog = [];
   const callHistory = []; // 循环检测：记录 (工具名, 参数摘要)
   const t0 = Date.now();
-  const TIME_BUDGET_MS = 10 * 60 * 1000; // 运行时护栏：总时间预算 10 分钟
-  const ABSOLUTE_CAP = 200; // 运行时护栏：绝对兜底轮次（非预设限制，仅防失控）
+  // 护栏动态读取（settings，可调可关，0=不限）：默认 120 分钟 / 2000 轮 / 连续 6 次判循环
+  const lim = await agentLimits();
+  const budgetMs = lim.budgetMin > 0 ? lim.budgetMin * 60000 : Infinity;
+  const roundCap = lim.roundCap > 0 ? lim.roundCap : 1e9;
+  const loopGuardN = lim.loopGuard > 0 ? lim.loopGuard : 0;
 
-  for (let round = 0; round < ABSOLUTE_CAP; round++) {
+  for (let round = 0; round < roundCap; round++) {
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
     if (ctx.__signal && ctx.__signal.aborted) {
       return { content: '', stopped: true, toolLog, usage: {} };
     }
-    // 时间预算护栏
-    if (Date.now() - t0 > TIME_BUDGET_MS) {
-      return { content: '（达到 10 分钟时间预算，已停止。可让我继续或缩小任务范围）', toolLog, usage: {} };
+    // 时间预算护栏（可关闭/可调）
+    if (Date.now() - t0 > budgetMs) {
+      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，已停止。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {} };
     }
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
@@ -67,16 +95,18 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
       return { content: res.content || '', toolLog, usage: res.usage };
     }
-    // 循环检测护栏：连续 4 次 (工具+参数+结果前段相同) 才判定卡死（结果不同=有进展不算循环）
+    // 循环检测护栏（可关闭/可调）：连续 N 次 (工具+参数+结果前段相同) 才判定卡死
     const sig = calls.map((c) => {
       let argsStr = '';
       try { argsStr = JSON.stringify(JSON.parse(c.function.arguments || '{}')).slice(0, 60); } catch { argsStr = String(c.function.arguments || '').slice(0, 60); }
       return c.function.name + ':' + argsStr;
     }).join('|');
     callHistory.push(sig);
-    const tail = callHistory.slice(-4);
-    if (tail.length === 4 && tail.every((s) => s === tail[0])) {
-      return { content: '（检测到连续 4 次重复工具调用且无进展，已停止。可尝试换一种方式/补充信息）', toolLog, usage: res.usage };
+    if (loopGuardN > 0) {
+      const tail = callHistory.slice(-loopGuardN);
+      if (tail.length === loopGuardN && tail.every((s) => s === tail[0])) {
+        return { content: `（检测到连续 ${loopGuardN} 次重复工具调用且无进展，已停止。可尝试换一种方式，或用 set_limits 调整/关闭循环检测）`, toolLog, usage: res.usage };
+      }
     }
     // 工具调用轮（实时流式：工具开始→执行→完成 均即时上报）
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
@@ -103,5 +133,5 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });
   }
-  return { content: '（达到绝对兜底轮次，异常终止）', toolLog, usage: {} };
+  return { content: '（达到轮次上限或异常终止。可让用户调大/关闭轮次上限后继续）', toolLog, usage: {} };
 }

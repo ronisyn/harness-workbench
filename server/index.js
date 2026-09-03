@@ -15,6 +15,7 @@ import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { decideApproval, listPending } from './approval.js';
+import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -23,6 +24,24 @@ app.use(express.json({ limit: '2mb' }));
 const abortMap = new Map(); // key = accountId:conversationId → AbortController
 // 每账号并发对话计数（能力"并发限制"：默认同账号最多 3 条对话同时在跑）
 const inflight = new Map(); // accountId → count
+
+// reload_platform 协作：当前对话回复结束后自动重启服务（Agent 自我开发闭环，避免手动 restart 中断自己）
+async function maybeSelfRestart() {
+  const reason = takeRestart();
+  if (!reason) return;
+  if (isRestartScheduled()) return;
+  markRestartScheduled();
+  console.log('[rw] 自我重启请求:', reason, '—— 2 秒后执行（等当前回复落库）');
+  setTimeout(async () => {
+    try {
+      const { execFile } = await import('node:child_process');
+      const svc = process.env.RW_SERVICE || 'rw-test';
+      const ch = execFile('systemctl', ['restart', svc], { detached: true, stdio: 'ignore' });
+      ch.unref();
+      console.log('[rw] 已触发 systemctl restart ' + svc);
+    } catch (e) { console.error('[rw] 自动重启失败:', e.message); }
+  }, 2000);
+}
 
 // ---------- 鉴权 ----------
 app.post('/api/auth/login', async (req, res) => {
@@ -377,6 +396,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 释放并发槽位
   inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
   res.end();
+  // 自我重启协作：本回复已完整发出/落库，处理 reload_platform 请求
+  maybeSelfRestart().catch(() => {});
 });
 
 // ---------- 用量统计（统计条） ----------
