@@ -105,7 +105,7 @@ export const TOOLS = [
   { name: 'delete_file', description: '删除文件（高危，留痕）', permission: 'full',
     params: { path: { type: 'string', required: true } },
     run: async (a) => { fs.rmSync(a.path, { recursive: true, force: true }); return { deleted: true }; } },
-  { name: 'find_file', description: '按文件名/扩展名查找文件', permission: 'read',
+  { name: 'find_file', description: '按文件名子串查找文件（name 无需通配符，如找 index.html 传 "index.html" 或 "html" 即可；不支持 * 通配）', permission: 'read',
     params: { path: { type: 'string', required: false }, name: { type: 'string', required: true } },
     run: async (a, ctx) => {
       const root = a.path || ctx.root; const out = [];
