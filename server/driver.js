@@ -7,6 +7,8 @@
 //   (c) 直接收尾（未 finish_task）→ 驱动器要求继续（最多 N 次无进展后转 need_input 请你裁决）
 // 用户复测确认后 status=done；该任务才算真正完成。
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
@@ -50,12 +52,52 @@ function runShellCmd(line) {
   });
 }
 
+// WS9 验收行 DSL：无前缀或 cmd:=bash（向后兼容）；file-exists:<path>；grep:<re>|<path>；node:<repo相对脚本>；kpi:<dotpath> <op> <num>
+async function checkLine(line) {
+  const m = /^(cmd|file-exists|grep|node|kpi):(.*)$/s.exec(String(line));
+  if (!m) return runShellCmd(String(line)); // 兼容旧格式
+  const kind = m[1];
+  const rest = String(m[2] || '').trim();
+  const runNode = (script, args = []) => new Promise((resolve) => {
+    execFile('node', [path.join(config.root, script), ...args], { cwd: config.root, timeout: 90000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 2000), err: String(stderr || '').slice(0, 1000) }));
+  });
+  if (kind === 'cmd') return runShellCmd(rest);
+  if (kind === 'file-exists') {
+    const ok = fs.existsSync(rest);
+    return { ok, code: ok ? 0 : 1, out: ok ? '存在: ' + rest : '', err: ok ? '' : '文件/路径不存在: ' + rest };
+  }
+  if (kind === 'grep') {
+    const [re, p] = rest.split('|').map((s) => s.trim());
+    try {
+      const c = fs.readFileSync(p, 'utf8');
+      const ok = new RegExp(re).test(c);
+      return { ok, code: ok ? 0 : 1, out: ok ? '匹配: ' + re + ' in ' + p : '', err: ok ? '' : '未匹配 ' + re + ' in ' + p };
+    } catch (e) { return { ok: false, code: 1, out: '', err: e.message }; }
+  }
+  if (kind === 'node') return runNode(rest);
+  if (kind === 'kpi') {
+    const mm = /^([\w.]+)\s*(<=|>=|<|>|==|!=)\s*([\d.]+)$/.exec(rest);
+    if (!mm) return { ok: false, code: 1, out: '', err: 'kpi DSL 语法: kpi:<指标点路径> <op> <数值>，如 kpi:usage.cost < 5' };
+    const r = await runNode('scripts/kpi.mjs', ['--days', '30', '--json']);
+    if (!r.ok) return { ok: false, code: 1, out: '', err: 'kpi 执行失败: ' + r.err };
+    let data;
+    try { data = JSON.parse(r.out); } catch { return { ok: false, code: 1, out: '', err: 'kpi 输出解析失败' }; }
+    const val = mm[1].split('.').reduce((o, k) => (o == null ? o : o[k]), data);
+    if (typeof val !== 'number') return { ok: false, code: 1, out: '', err: '指标不存在或非数值: ' + mm[1] };
+    const ops = { '<': (a, b) => a < b, '<=': (a, b) => a <= b, '>': (a, b) => a > b, '>=': (a, b) => a >= b, '==': (a, b) => a === b, '!=': (a, b) => a !== b };
+    const ok = ops[mm[2]](val, Number(mm[3]));
+    return { ok, code: ok ? 0 : 1, out: mm[1] + '=' + val + ' ' + mm[2] + ' ' + mm[3], err: ok ? '' : mm[1] + '=' + val + ' 不满足 ' + mm[2] + ' ' + mm[3] };
+  }
+  return runShellCmd(rest);
+}
+
 async function runAcceptance(c) {
   const lines = (() => { try { return JSON.parse(c.acceptance || '[]'); } catch { return []; } })();
   const results = [];
   for (const line of lines) {
-    const r = await runShellCmd(line);
-    results.push({ check: String(line).slice(0, 150), ok: r.ok, detail: r.ok ? (r.out.slice(0, 150)) : (r.err || ('exit ' + r.code)) });
+    const r = await checkLine(line);
+    results.push({ check: String(line).slice(0, 150), ok: r.ok, detail: r.ok ? (String(r.out || '').slice(0, 150)) : (String(r.err || ('exit ' + r.code)).slice(0, 200)) });
     if (!r.ok) break;
   }
   return { pass: lines.length === 0 || results.every((x) => x.ok), results };
