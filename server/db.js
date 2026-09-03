@@ -53,6 +53,7 @@ const SCHEMA = [
     channel VARCHAR(16) DEFAULT 'web',
     external_id VARCHAR(128),
     permission VARCHAR(8) DEFAULT 'write',
+    preset VARCHAR(8) DEFAULT 'all',
     mode VARCHAR(16) DEFAULT 'chat',
     project VARCHAR(64) DEFAULT 'default',
     title VARCHAR(255) DEFAULT '新对话',
@@ -268,6 +269,7 @@ export async function initSchema() {
   const MIGRATIONS = [
     'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
     "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
+    "ALTER TABLE conversations ADD COLUMN preset VARCHAR(8) DEFAULT 'all'",
     "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
     'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
   ];

@@ -112,17 +112,18 @@ app.get('/api/conversations', requireAuth, async (req, res) => {
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
-  const { title, permission } = req.body || {};
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission) VALUES (?,?,?)',
-    [req.user.id, title || '新对话', permission || 'full']);
+  const { title, permission, preset } = req.body || {};
+  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset) VALUES (?,?,?,?)',
+    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all']);
   res.json({ ok: true, id: r.insertId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
-  const { title, permission } = req.body || {};
+  const { title, permission, preset } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
   if (permission !== undefined) { set.push('permission=?'); params.push(permission); }
+  if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
   if (!set.length) return res.json({ ok: true });
   params.push(req.params.id, req.user.id);
   await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
@@ -265,10 +266,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
   }
   inflight.set(req.user.id, curInflight + 1);
-  const convs = await db.query('SELECT id, permission, mode FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  const convs = await db.query('SELECT id, permission, mode, preset FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1)); return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const permission = convs[0].permission || 'full';
   const convMode = convs[0].mode || 'chat';
+  const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
 
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
@@ -375,7 +377,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       let run = null;
       try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
       agentRunId = run ? run.id : null;
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, mode: convMode };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {

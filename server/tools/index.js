@@ -9,6 +9,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
+import { TOOL_META } from './meta.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -108,7 +109,7 @@ export const TOOLS = [
     params: { path: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.mkdirSync(a.path, { recursive: true }); return { created: true }; } },
   { name: 'copy_move', description: '复制或移动文件/目录（mode: copy|move）', permission: 'write',
-    params: { src: { type: 'string', required: true }, dst: { type: 'string', required: true }, mode: { type: 'string' } },
+    params: { src: { type: 'string', required: true }, dst: { type: 'string', required: true }, mode: { type: 'string', enum: ['copy', 'move'], desc: 'copy=复制 | move=移动' } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dst, ctx.root)) throw new Error('目标超出工作区'); if (a.mode === 'move') fs.renameSync(a.src, a.dst); else fs.copyFileSync(a.src, a.dst); return { ok: true }; } },
   { name: 'delete_file', description: '删除文件（高危，留痕）', permission: 'full',
     params: { path: { type: 'string', required: true } },
@@ -252,7 +253,7 @@ export const TOOLS = [
     run: async (a) => { const r = await runCmd('git', ['-C', a.dir, 'status', '--short']); return { status: r.out, ok: r.ok }; } },
   { name: 'git_commit', description: 'git 提交', permission: 'write', params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
     run: async (a) => { await runCmd('git', ['-C', a.dir, 'add', '-A']); const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message]); return { ok: r.ok, out: r.out }; } },
-  { name: 'git_branch', description: 'git 分支操作（list|create|checkout）', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string' }, branch: { type: 'string' } },
+  { name: 'git_branch', description: 'git 分支操作（list|create|checkout）', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string', enum: ['list', 'create', 'checkout'] }, branch: { type: 'string' } },
     run: async (a) => {
       if (a.action === 'create') { const r = await runCmd('git', ['-C', a.dir, 'branch', a.branch]); return { ok: r.ok }; }
       if (a.action === 'checkout') { const r = await runCmd('git', ['-C', a.dir, 'checkout', a.branch]); return { ok: r.ok }; }
@@ -355,7 +356,7 @@ export const TOOLS = [
       prompt: { type: 'string', required: true, desc: '给子代理的完整任务指令（自包含，含目标与验收标准）' },
       name: { type: 'string', desc: '子代理名称（用于展示，默认 子代理）' },
       model: { type: 'string', desc: '子代理模型，默认与主代理相同' },
-      mode: { type: 'string', desc: 'sync=等结果(默认) | async=立即返回id' },
+      mode: { type: 'string', enum: ['sync', 'async'], desc: 'sync=等结果(默认) | async=立即返回id' },
     },
     run: async (a, ctx) => {
       if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限，请自己直接完成任务');
@@ -498,7 +499,7 @@ export const TOOLS = [
 
   // ---------- 知识库（F19：global 全会话可见 / conv 仅本会话；正文大段用 kb_search 取） ----------
   { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
-    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', desc: 'global|conv(默认)' } },
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = a.scope === 'global' ? 'global' : 'conv';
@@ -754,16 +755,33 @@ export function checkPerm(tool, sessionPerm) {
   return order[tool.permission] <= order[sessionPerm || 'full'];
 }
 
-// 工具定义（给 LLM function calling 用）
-export function toolDefs() {
-  return TOOLS.map((t) => ({
-    type: 'function',
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: { type: 'object', properties: Object.fromEntries(Object.entries(t.params).map(([k, v]) => [k, { type: v.type, description: v.desc }])), required: Object.entries(t.params).filter(([, v]) => v.required).map(([k]) => k) },
-    },
-  }));
+// 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行）
+export function toolDefs(expose = 'all') {
+  const allow = expose === 'minimal' ? ['core'] : expose === 'standard' ? ['core', 'pro'] : ['core', 'pro', 'expert'];
+  const PKEYS = ['enum', 'items', 'min', 'max']; // 参数 schema 白名单透传（防任意键注入）
+  return TOOLS.filter((t) => allow.includes(TOOL_META[t.name]?.tier || 'pro')).map((t) => {
+    const meta = TOOL_META[t.name] || {};
+    let description = t.description;
+    if (meta.when) description += '\n何时用：' + meta.when;
+    if (meta.not) description += '\n勿用：' + meta.not;
+    if (meta.ex) description += '\n例：' + meta.ex;
+    return {
+      type: 'function',
+      function: {
+        name: t.name,
+        description,
+        parameters: {
+          type: 'object',
+          properties: Object.fromEntries(Object.entries(t.params).map(([k, v]) => {
+            const p = { type: v.type, description: v.desc };
+            for (const x of PKEYS) if (v[x] !== undefined) p[x] = v[x];
+            return [k, p];
+          })),
+          required: Object.entries(t.params).filter(([, v]) => v.required).map(([k]) => k),
+        },
+      },
+    };
+  });
 }
 
 // 执行工具并留痕
@@ -787,6 +805,20 @@ export async function execTool(name, args, ctx) {
           blocked = '路径超出工作区（本会话权限只允许访问 ' + eff.root + '）';
         } else if (!path.isAbsolute(String(cand))) {
           args[key] = abs; // 相对路径按工作区根解释，避免落到进程 cwd
+        }
+      }
+    }
+    // WS1 preset 暴露面：非 all 会话调用未暴露层级的工具 → 指引性错误（不静默）；run_command 命令纪律软门禁
+    if (!blocked && ctx.preset && ctx.preset !== 'all') {
+      const allowT = ctx.preset === 'minimal' ? new Set(['core']) : ctx.preset === 'standard' ? new Set(['core', 'pro']) : null;
+      const metaTier = TOOL_META[name]?.tier;
+      if (allowT && metaTier && !allowT.has(metaTier)) {
+        blocked = `工具 ${name}（${metaTier} 级）不在当前会话 preset=${ctx.preset} 的暴露范围。可 ask_user 请用户把 preset 切到 standard/all，或改用 core 级工具完成。`;
+      }
+      if (!blocked && name === 'run_command') {
+        const first = String(args.command || '').trim().split(/\s+/)[0];
+        if (/^(cat|ls|grep|sed|head|tail|find|cd|echo)$/.test(first || '')) {
+          blocked = `run_command 软门禁：${first} 有专门工具（read_file/list_dir/grep_search/find_file 等），请改用专门工具（preset=all 会话不受此限）。`;
         }
       }
     }

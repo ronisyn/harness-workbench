@@ -122,7 +122,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
     archiveEarlyContext(msgs); // 运行中压缩：防早期内容导致上下文平方膨胀
     const llmT0 = Date.now();
-    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys, temperature);
+    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset), keys, temperature);
     const llmMs = Date.now() - llmT0;
     // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round），子代理/渠道/定时同源覆盖
     try {
