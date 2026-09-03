@@ -107,7 +107,7 @@ app.put('/api/capabilities', requireAuth, async (req, res) => {
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
   const rows = await db.query(
-    'SELECT id, channel, permission, title, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
+    'SELECT id, channel, permission, preset, title, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
   res.json({ ok: true, conversations: rows });
 });
 

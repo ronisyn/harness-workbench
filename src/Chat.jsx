@@ -106,6 +106,8 @@ function groupTraces(traces) {
 }
 
 const PERM_LABEL = { read: '只读', write: '读写', full: '完全', guard: '需审批' };
+const PRESET_LABEL = { all: '全量', standard: '标准', minimal: '精简' };
+const PRESET_TIP = { all: '暴露全部 61 工具（默认）', standard: 'core+pro 52 个，隐藏 expert 高危/改自身类', minimal: '仅 core 21 个文件/查证/规划类' };
 const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
 export default function Chat({ user, onLogout }) {
@@ -333,6 +335,12 @@ export default function Chat({ user, onLogout }) {
     setToast('权限已切换为 ' + PERM_LABEL[perm]);
   };
 
+  const changePreset = async (preset) => {
+    await api.patchConversation(cur, { preset });
+    setConvs((cs) => cs.map((c) => (c.id === cur ? { ...c, preset } : c)));
+    setToast('工具预设已切换为 ' + PRESET_LABEL[preset] + '（' + PRESET_TIP[preset] + '）');
+  };
+
   const openDrawer = async (tab = 'caps') => {
     setDrawer(true); setDrawerTab(tab);
     const d = await api.capabilities();
@@ -417,6 +425,7 @@ export default function Chat({ user, onLogout }) {
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
 
   const curPerm = convs.find((c) => c.id === cur)?.permission || 'full';
+  const curPreset = convs.find((c) => c.id === cur)?.preset || 'all';
 
   return (
     <div className="rw-shell">
@@ -429,6 +438,11 @@ export default function Chat({ user, onLogout }) {
           {cur && (
             <select className="rw-select" value={curPerm} onChange={(e) => changePermission(e.target.value)} title="会话权限">
               {Object.entries(PERM_LABEL).map(([k, v]) => <option key={k} value={k}>权限：{v}</option>)}
+            </select>
+          )}
+          {cur && (
+            <select className="rw-select" value={curPreset} onChange={(e) => changePreset(e.target.value)} title={'工具预设：' + PRESET_TIP[curPreset]}>
+              {Object.entries(PRESET_LABEL).map(([k, v]) => <option key={k} value={k}>工具：{v}</option>)}
             </select>
           )}
           {busy && <button className="rw-btn stop" onClick={stopGen}>■ 停止</button>}
@@ -453,6 +467,7 @@ export default function Chat({ user, onLogout }) {
               <div key={c.id} className={'rw-conv' + (cur === c.id ? ' sel' : '')} onClick={() => openConv(c.id)}>
                 <span className="rw-conv-t">{c.title}</span>
                 <span className="rw-conv-tag">{c.channel !== 'web' ? c.channel : ''}</span>
+                {c.preset && c.preset !== 'all' && <span className="rw-conv-tag" title={'工具预设：' + PRESET_TIP[c.preset]}>P:{PRESET_LABEL[c.preset] || c.preset}</span>}
                 <button className="rw-conv-del" onClick={(e) => delConv(c.id, e)} title="删除">✕</button>
               </div>
             ))}
