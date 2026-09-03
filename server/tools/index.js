@@ -673,10 +673,18 @@ export async function execTool(name, args, ctx) {
   const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
     let blocked = null;
-    // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）
+    // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
     if (eff.limitPath && tool.permission === 'read') {
-      const cand = args.path ?? args.file ?? args.dir ?? args.base ?? args.src;
-      if (cand && !inside(cand, eff.root)) blocked = '路径超出工作区（本会话权限只允许访问 ' + eff.root + '）';
+      const key = ['path', 'file', 'dir', 'base', 'src'].find((k) => args[k] !== undefined);
+      const cand = key ? args[key] : undefined;
+      if (cand) {
+        const abs = path.isAbsolute(String(cand)) ? String(cand) : path.join(eff.root, String(cand));
+        if (!inside(abs, eff.root)) {
+          blocked = '路径超出工作区（本会话权限只允许访问 ' + eff.root + '）';
+        } else if (!path.isAbsolute(String(cand))) {
+          args[key] = abs; // 相对路径按工作区根解释，避免落到进程 cwd
+        }
+      }
     }
     // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝
     if (!blocked && eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
