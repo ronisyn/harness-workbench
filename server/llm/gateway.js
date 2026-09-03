@@ -31,45 +31,62 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
 export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {}) {
   const p = resolve(providerId, keys);
   const model = opts.model || p.defaultModel;
-  const res = await fetch(p.base + '/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-    body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
-    signal: AbortSignal.timeout(60000), // 首次响应 60s；建立后流式读取无超时
-  });
+  // 首字节等待 60s；一旦开始收到数据，改为"流空闲 120s"护栏 —— 避免长输出（思考+生成 >60s）被整段中止
+  const ac = new AbortController();
+  let idleTimer = setTimeout(() => ac.abort(), 60000);
+  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ac.abort(), 120000); };
+  let res;
+  try {
+    res = await fetch(p.base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
+      body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    clearTimeout(idleTimer);
+    throw new Error(`${p.name}(${model}) 连接失败/超时(60s): ${e.message}`);
+  }
   if (!res.ok || !res.body) {
+    clearTimeout(idleTimer);
     const text = await res.text().catch(() => '');
     throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${text.slice(0, 200)}`);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith('data:')) continue;
-      const data = t.slice(5).trim();
-      if (data === '[DONE]') return;
-      try {
-        const j = JSON.parse(data);
-        const delta = j.choices?.[0]?.delta?.content;
-        const think = j.choices?.[0]?.delta?.reasoning_content;
-        if (think && ctx.onThink) ctx.onThink(think);
-        if (delta) yield delta;
-        if (j.usage && !ctx.usage) {
-          ctx.usage = {
-            tokens_in: j.usage.prompt_tokens || 0,
-            tokens_out: j.usage.completion_tokens || 0,
-            cache_hit: j.usage.prompt_tokens_details?.cached_tokens || 0,
-          };
-        }
-      } catch { /* 忽略不完整帧 */ }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) armIdle(); // 有数据即续命（空闲 120s 才中止）
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const data = t.slice(5).trim();
+        if (data === '[DONE]') return;
+        try {
+          const j = JSON.parse(data);
+          const delta = j.choices?.[0]?.delta?.content;
+          const think = j.choices?.[0]?.delta?.reasoning_content;
+          if (think && ctx.onThink) ctx.onThink(think);
+          if (delta) yield delta;
+          if (j.usage && !ctx.usage) {
+            ctx.usage = {
+              tokens_in: j.usage.prompt_tokens || 0,
+              tokens_out: j.usage.completion_tokens || 0,
+              cache_hit: j.usage.prompt_tokens_details?.cached_tokens || 0,
+            };
+          }
+        } catch { /* 忽略不完整帧 */ }
+      }
     }
+  } finally {
+    clearTimeout(idleTimer);
+    try { reader.cancel().catch(() => {}); } catch { /* ignore */ }
   }
 }
 
