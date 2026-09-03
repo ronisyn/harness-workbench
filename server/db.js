@@ -230,6 +230,33 @@ const SCHEMA = [
     updated_at DATETIME DEFAULT NOW(),
     INDEX idx_run_conv (conversation_id)
   )`,
+  // ---- 任务契约（外部驱动器：白天立项 → 夜间/立即无人值守执行 → 验收 → 用户复测确认） ----
+  `CREATE TABLE IF NOT EXISTS task_contracts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT,
+    title VARCHAR(200),
+    goal TEXT,
+    acceptance TEXT,
+    boundaries TEXT,
+    run_at DATETIME,
+    status VARCHAR(20) DEFAULT 'queued',
+    conv_id INT,
+    model VARCHAR(64),
+    attempts INT DEFAULT 0,
+    last_ask TEXT,
+    last_result TEXT,
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW(),
+    INDEX idx_contract_status (status)
+  )`,
+  `CREATE TABLE IF NOT EXISTS contract_events (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    contract_id INT NOT NULL,
+    kind VARCHAR(24),
+    detail TEXT,
+    created_at DATETIME DEFAULT NOW(),
+    INDEX idx_ce_contract (contract_id)
+  )`,
 ];
 
 export async function initSchema() {

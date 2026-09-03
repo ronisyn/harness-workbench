@@ -524,6 +524,38 @@ export const TOOLS = [
       return { deleted: r.affectedRows > 0 };
     } },
 
+  // ---------- 任务契约（外部驱动器：讨论达成共识后立项 → 无人值守执行） ----------
+  { name: 'create_contract', description: '创建任务契约并立项（讨论达成共识后使用；驱动器会在 run_at 到点后无人值守执行，直到验收通过并等待用户复测）。goal=目标（完整）；acceptance=验收清单 JSON 字符串数组（驱动器逐条跑 shell 命令核验，如 ["grep -q X /path"]）；boundaries=边界约束；runAt=可空 ISO 时间（空=立即排队）。', permission: 'write',
+    params: {
+      goal: { type: 'string', required: true, desc: '任务目标（完整、含交付物）' },
+      title: { type: 'string', desc: '简短标题' },
+      acceptance: { type: 'string', desc: '验收 shell 命令 JSON 数组字符串，如 ["grep -q OK /srv/rw-workspace/a.txt"]；空=仅自检' },
+      boundaries: { type: 'string', desc: '边界/约束（不许动什么、注意什么）' },
+      runAt: { type: 'string', desc: 'ISO 时间；空=立即执行' },
+    },
+    run: async (a, ctx) => {
+      const goal = String(a.goal || '').trim().slice(0, 3000);
+      if (!goal) throw new Error('goal 必填');
+      let acc = [];
+      try { acc = Array.isArray(a.acceptance) ? a.acceptance : JSON.parse(a.acceptance || '[]'); } catch { acc = []; }
+      if (!Array.isArray(acc)) acc = [];
+      let runAt = null;
+      if (a.runAt) { const d = new Date(a.runAt); if (!Number.isNaN(d.getTime())) runAt = d; }
+      const r = await db.query('INSERT INTO task_contracts (account_id, title, goal, acceptance, boundaries, run_at, status) VALUES (?,?,?,?,?,?,"queued")',
+        [ctx.accountId ?? null, String(a.title || goal.slice(0, 40)).slice(0, 200), goal, JSON.stringify(acc.slice(0, 10)), String(a.boundaries || '').slice(0, 1000), runAt]);
+      return { contract_id: r.insertId, status: 'queued', note: (runAt ? ('将于 ' + runAt.toISOString() + ' 执行') : '已排队，驱动器将尽快无人值守执行') + '；完成后会生成你的复测任务等待确认。' };
+    } },
+  { name: 'finish_task', description: '任务完成自检提交：把任务标记为"已完成候选"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入"待用户复测"。', permission: 'read',
+    params: {
+      summary: { type: 'string', required: true, desc: '完成总结（做了什么、结果如何）' },
+      selfCheck: { type: 'string', desc: '对照验收标准的自检说明' },
+    },
+    run: async (a) => ({
+      accepted: true,
+      note: '已登记完成自检。驱动器将运行验收钩子核验；全部通过后任务进入【待复测】等待你确认，未通过会被打回。',
+      summary: String(a.summary || '').slice(0, 2000),
+    }) },
+
   // ---------- 计划模式（plan_mode / exit_plan_mode，会话级只读规划） ----------
   { name: 'plan_mode', description: '进入会话级计划模式（只读）：此后所有写/改/执行类工具会被平台拒绝，直到调用 exit_plan_mode 提交计划成功。用于用户要求"先规划、只调研、别动手"的场景', permission: 'read',
     params: {},
@@ -607,6 +639,12 @@ export const TOOLS = [
         value: String(o.value ?? o.label ?? i).slice(0, 60),
       }));
       const q = String(a.question || '').slice(0, 500);
+      // 无人值守（驱动器）模式：不阻塞等待，把问题排进契约的"待用户"队列
+      if (ctx.__autonomous) {
+        const payload = { kind: 'ask', question: q, options: normalized };
+        if (ctx.__needInput) await ctx.__needInput(payload);
+        throw new Error('【无人值守】需要用户决策，问题已排队（' + q.slice(0, 60) + '…）。请停止当前任务并输出阶段性总结。');
+      }
       const ap = createAsk(q, normalized);
       if (ctx.__emit) ctx.__emit({ type: 'ask', id: ap.id, question: q, options: normalized });
       let verdict = null;
@@ -756,22 +794,28 @@ export async function execTool(name, args, ctx) {
     if (!blocked && eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
       blocked = '计划模式（只读）：工具 ' + name + ' 已被禁用。规划完成后请调用 exit_plan_mode 提交计划；用户批准并切回普通模式后再执行。';
     }
-    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准
+    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队
     if (!blocked && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
-      const argsDesc = JSON.stringify(args).slice(0, 300);
-      const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
-      if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
-      let verdict = null;
-      while (!verdict) {
-        const race = await Promise.race([
-          ap.promise.then((v) => ({ done: true, v })),
-          new Promise((r) => setTimeout(() => r({ done: false }), 800)),
-        ]);
-        if (race.done) { verdict = race.v; break; }
-        if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
-      }
-      if (!verdict || verdict.decision !== 'approve') {
-        blocked = verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : ''));
+      if (eff.__autonomous) {
+        const payload = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
+        if (eff.__needInput) await eff.__needInput(payload);
+        blocked = '【无人值守】该操作需要你授权，已排队（' + name + '）。请停止当前任务并输出阶段性总结。';
+      } else {
+        const argsDesc = JSON.stringify(args).slice(0, 300);
+        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
+        if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
+        let verdict = null;
+        while (!verdict) {
+          const race = await Promise.race([
+            ap.promise.then((v) => ({ done: true, v })),
+            new Promise((r) => setTimeout(() => r({ done: false }), 800)),
+          ]);
+          if (race.done) { verdict = race.v; break; }
+          if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
+        }
+        if (!verdict || verdict.decision !== 'approve') {
+          blocked = verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : ''));
+        }
       }
     }
     if (blocked) {

@@ -14,6 +14,7 @@ import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from 
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
+import { startDriver } from './driver.js';
 import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
@@ -180,7 +181,7 @@ app.get('/api/providers', requireAuth, async (req, res) => {
 
 // ---------- 对话（双路径） ----------
 // 普通对话不带 tools（模型自然回答，保持出厂自我认知）；检测到工具意图时走 Agent（function calling）
-const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务|规划|计划模式|规划模式|退出计划|按计划执行|开始实施|进入计划|只读规划)/i;
+const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务|规划|计划模式|规划模式|退出计划|按计划执行|开始实施|进入计划|只读规划|立项|契约|任务单|验收|复测)/i;
 
 function needsTools(content) {
   return TOOL_INTENT_RE.test(content);
@@ -636,6 +637,65 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'rw', ts: Date.now() });
 });
 
+// ---------- 任务契约（外部驱动器）API ----------
+app.get('/api/contracts', requireAuth, async (req, res) => {
+  try {
+    const rows = await db.query('SELECT id,title,goal,status,attempts,last_ask,last_result,run_at,created_at,updated_at FROM task_contracts WHERE account_id=? OR account_id IS NULL ORDER BY id DESC LIMIT 50', [req.user.id]);
+    res.json({ ok: true, contracts: rows });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.get('/api/contracts/:id/events', requireAuth, async (req, res) => {
+  const rows = await db.query('SELECT kind,detail,created_at FROM contract_events WHERE contract_id=? ORDER BY id DESC LIMIT 50', [req.params.id]);
+  res.json({ ok: true, events: rows });
+});
+app.post('/api/contracts', requireAuth, async (req, res) => {
+  try {
+    const { title, goal, acceptance, boundaries, runAt } = req.body || {};
+    if (!goal) return res.status(400).json({ ok: false, message: 'goal 必填' });
+    let acc = []; try { acc = Array.isArray(acceptance) ? acceptance : JSON.parse(acceptance || '[]'); } catch { acc = []; }
+    let runAtD = null; if (runAt) { const d = new Date(runAt); if (!Number.isNaN(d.getTime())) runAtD = d; }
+    const r = await db.query('INSERT INTO task_contracts (account_id,title,goal,acceptance,boundaries,run_at,status) VALUES (?,?,?,?,?,?,"queued")',
+      [req.user.id, String(title || String(goal).slice(0, 40)).slice(0, 200), String(goal).slice(0, 3000), JSON.stringify(acc.slice(0, 10)), String(boundaries || '').slice(0, 1000), runAtD]);
+    res.json({ ok: true, contract_id: r.insertId });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.post('/api/contracts/:id/confirm', requireAuth, async (req, res) => {
+  // 复测确认（candidate_done）：accept→done；reject→打回修复
+  const { decision } = req.body || {};
+  const c = (await db.query('SELECT * FROM task_contracts WHERE id=?', [req.params.id]))[0];
+  if (!c) return res.status(404).json({ ok: false, message: '契约不存在' });
+  if (decision === 'accept') {
+    await db.query('UPDATE task_contracts SET status="done", last_result=?, updated_at=NOW() WHERE id=?', [String(c.last_result || '用户复测通过').slice(0, 3000), c.id]);
+    if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户复测通过 ✅】任务验收完成。']);
+    res.json({ ok: true, status: 'done' });
+  } else if (decision === 'reject') {
+    await db.query('UPDATE task_contracts SET status="queued", attempts=0, updated_at=NOW() WHERE id=?', [c.id]);
+    if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户复测未通过】请根据反馈继续修复，完成后再次调用 finish_task。']);
+    res.json({ ok: true, status: 'queued' });
+  } else res.status(400).json({ ok: false, message: 'decision=accept|reject' });
+});
+app.post('/api/contracts/:id/answer', requireAuth, async (req, res) => {
+  // 无人值守排队问题答复（need_input）：写入执行会话并恢复 queued；judge 型 accept/continue 特判
+  const { answer } = req.body || {};
+  if (!answer) return res.status(400).json({ ok: false, message: 'answer 必填' });
+  const c = (await db.query('SELECT * FROM task_contracts WHERE id=?', [req.params.id]))[0];
+  if (!c) return res.status(404).json({ ok: false, message: '契约不存在' });
+  let ask = null; try { ask = JSON.parse(c.last_ask || 'null'); } catch { /* ignore */ }
+  if (ask && ask.kind === 'judge') {
+    if (String(answer) === 'continue') {
+      await db.query('UPDATE task_contracts SET status="queued", last_ask=NULL, attempts=0, updated_at=NOW() WHERE id=?', [c.id]);
+      if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户裁决】继续执行该任务，直到调用 finish_task 完成。']);
+      return res.json({ ok: true, status: 'queued' });
+    }
+    // accept → 视同用户接受当前结果（candidate 直达复测）
+    await db.query('UPDATE task_contracts SET status="candidate_done", last_ask=NULL, updated_at=NOW() WHERE id=?', [c.id]);
+    return res.json({ ok: true, status: 'candidate_done' });
+  }
+  await db.query('UPDATE task_contracts SET status="queued", last_ask=NULL, updated_at=NOW() WHERE id=?', [c.id]);
+  if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户答复】' + String(answer).slice(0, 2000)]);
+  res.json({ ok: true, status: 'queued' });
+});
+
 // ---------- 静态前端 ----------
 const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));
@@ -680,6 +740,8 @@ async function main() {
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
+  // 任务契约驱动器（外部驱动：无人值守责任循环）
+  try { startDriver(); } catch (e) { console.error('[driver] 启动失败:', e.message); }
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));
