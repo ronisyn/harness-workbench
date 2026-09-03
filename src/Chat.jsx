@@ -254,13 +254,20 @@ export default function Chat({ user, onLogout }) {
     catch (e) { setToast(e.message); }
   };
 
+  // 结构化问询：Agent 发选项卡片，用户点选后继续
+  const answerAskMsg = async (id, value) => {
+    setMsgs((m) => m.map((x) => ({ ...x, asks: (x.asks || []).map((q) => (q.id === id ? { ...q, chosen: value } : q)) })));
+    try { await api.decideAsk(id, value); setToast('已选择：' + value); }
+    catch (e) { setToast(e.message); }
+  };
+
   const send = async () => {
     const content = input.trim();
     if (!content || busy || !cur) return;
     setInput(''); setBusy(true);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [] }]);
+    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [], asks: [] }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
@@ -294,6 +301,10 @@ export default function Chat({ user, onLogout }) {
           onApproval: (ap) => {
             // 审批请求：追加确认卡（guard 会话高风险工具）
             patchLast((x) => ({ ...x, approvals: [...(x.approvals || []), { id: ap.id, desc: ap.desc, decision: null }] }));
+          },
+          onAsk: (q) => {
+            // 结构化问询：追加选项卡片
+            patchLast((x) => ({ ...x, asks: [...(x.asks || []), { id: q.id, question: q.question, options: q.options || [], chosen: null }] }));
           },
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
@@ -471,6 +482,18 @@ export default function Chat({ user, onLogout }) {
                               : <div className="rw-approval-btns">
                                   <button className="rw-btn pri" onClick={() => decideApprovalMsg(ap.id, 'approve')}>批准</button>
                                   <button className="rw-btn" onClick={() => decideApprovalMsg(ap.id, 'reject')}>拒绝</button>
+                                </div>}
+                          </div>
+                        ))}
+                        {m.asks && m.asks.length > 0 && m.asks.map((q) => (
+                          <div key={q.id} className="rw-ask">
+                            <div className="rw-ask-q">❓ {q.question}</div>
+                            {q.chosen
+                              ? <div className="rw-ask-chosen">已选择：{q.options.find((o) => o.value === q.chosen)?.label || q.chosen}</div>
+                              : <div className="rw-ask-opts">
+                                  {q.options.map((o) => (
+                                    <button key={o.value} className="rw-btn" onClick={() => answerAskMsg(q.id, o.value)}>{o.label}</button>
+                                  ))}
                                 </div>}
                           </div>
                         ))}

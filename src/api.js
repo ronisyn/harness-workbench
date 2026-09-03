@@ -43,13 +43,14 @@ export const api = {
   deleteTask: (id) => request('/api/tasks/' + id, { method: 'DELETE' }),
   approvals: () => request('/api/approvals'),
   decideApproval: (id, decision) => request('/api/approvals/' + id, { method: 'POST', body: JSON.stringify({ decision }) }),
+  decideAsk: (id, option) => request('/api/asks/' + id, { method: 'POST', body: JSON.stringify({ option }) }),
   stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：
 // onDelta / onThinking(round) / onThink(text) / onToolStart / onToolDone / onPlan / onApproval / onDone / onError；signal 可中止
 export async function streamChat({ conversationId, content, provider, model }, handlers, signal) {
-  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onApproval, onDone, onError } = handlers || {};
+  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onApproval, onAsk, onDone, onError } = handlers || {};
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -81,6 +82,7 @@ export async function streamChat({ conversationId, content, provider, model }, h
         else if (j.type === 'tool_done') onToolDone?.(j.tool);
         else if (j.type === 'plan') onPlan?.(j.plan);
         else if (j.type === 'approval') onApproval?.(j);
+        else if (j.type === 'ask') onAsk?.(j);
         else if (j.type === 'done') onDone?.(j.usage || {});
         else if (j.type === 'error') onError?.(j.message);
       } catch { /* ignore */ }

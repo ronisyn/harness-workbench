@@ -8,6 +8,7 @@ import { db } from '../db.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
+import { createAsk, cancelAsk } from '../asks.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -501,6 +502,38 @@ export const TOOLS = [
     run: async (a, ctx) => {
       const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [a.id, ctx.accountId]);
       return { deleted: r.affectedRows > 0 };
+    } },
+
+  // ---------- 结构化问询（ask_user：需要用户做选择时发选项卡片，等用户点选后继续） ----------
+  { name: 'ask_user', description: '向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。', permission: 'read',
+    params: {
+      question: { type: 'string', required: true, desc: '要问用户的问题' },
+      options: { type: 'string', required: true, desc: '选项：JSON 数组字符串，如 [{"label":"方案A","value":"a"},{"label":"方案B","value":"b"}]；value 会作为返回值' },
+    },
+    run: async (a, ctx) => {
+      let options = [];
+      try { options = Array.isArray(a.options) ? a.options : JSON.parse(a.options); } catch { options = []; }
+      if (!Array.isArray(options) || !options.length) throw new Error('options 需要是选项数组');
+      const normalized = options.slice(0, 8).map((o, i) => ({
+        label: String(o.label || o.value || '选项' + (i + 1)).slice(0, 80),
+        value: String(o.value ?? o.label ?? i).slice(0, 60),
+      }));
+      const q = String(a.question || '').slice(0, 500);
+      const ap = createAsk(q, normalized);
+      if (ctx.__emit) ctx.__emit({ type: 'ask', id: ap.id, question: q, options: normalized });
+      let verdict = null;
+      while (!verdict) {
+        const race = await Promise.race([
+          ap.promise.then((v) => ({ done: true, v })),
+          new Promise((r) => setTimeout(() => r({ done: false }), 800)),
+        ]);
+        if (race.done) { verdict = race.v; break; }
+        if (ctx.__signal && ctx.__signal.aborted) { cancelAsk(ap.id); verdict = { option: null, reason: 'aborted' }; break; }
+      }
+      if (!verdict || verdict.option == null) {
+        throw new Error(verdict && verdict.reason === 'aborted' ? '用户停止了操作' : '用户未在时限内选择（可稍后重新问）');
+      }
+      return { chosen: verdict.option, note: '用户已选择。请按该选择继续执行。' };
     } },
 
   // ---------- 运行护栏（set_limits）与平台自重启（reload_platform） ----------

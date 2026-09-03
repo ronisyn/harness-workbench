@@ -129,6 +129,12 @@ body {
 .rw-approval-state.reject { color: #c62828; }
 .rw-approval-state.approve { color: #2e7d32; }
 .rw-approval-state.timeout { color: var(--rw-muted); }
+/* 结构化问询卡片（ask_user） */
+.rw-ask { border: 1px solid var(--rw-yellow); border-left: 4px solid var(--rw-yellow); border-radius: 10px;
+  background: #fdf8ec; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
+.rw-ask-q { margin-bottom: 8px; line-height: 1.5; }
+.rw-ask-opts { display: flex; gap: 8px; flex-wrap: wrap; }
+.rw-ask-chosen { color: #2e7d32; font-size: 12px; }
 .rw-msg-traces { display: flex; flex-direction: column; margin: 4px 0 8px; border: 1px solid var(--rw-border);
   border-radius: 10px; overflow: hidden; background: #fffcf5; }
 .rw-trace-row { border-bottom: 1px dashed var(--rw-border); }

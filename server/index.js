@@ -17,6 +17,7 @@ import { startScheduler } from './scheduler.js';
 import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
+import { decideAsk } from './asks.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -367,6 +368,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             send({ type: 'plan', plan: ev.plan });
           } else if (ev.type === 'approval') {
             send({ type: 'approval', id: ev.id, desc: ev.desc });
+          } else if (ev.type === 'ask') {
+            send({ type: 'ask', id: ev.id, question: ev.question, options: ev.options });
           }
         },
       });
@@ -448,6 +451,22 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       cost: Number(u.cost || 0),
     },
   });
+});
+
+// ---------- 结构化问询裁决（ask_user 卡片） ----------
+app.get('/api/asks', requireAuth, async (req, res) => {
+  const { listPendingAsks } = await import('./asks.js');
+  res.json({ ok: true, pending: listPendingAsks() });
+});
+app.post('/api/asks/:id', requireAuth, async (req, res) => {
+  const { option } = req.body || {};
+  if (option === undefined || option === null || option === '') return res.status(400).json({ ok: false, message: 'option 必填' });
+  const decided = decideAsk(req.params.id, String(option));
+  try {
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'ask:answer', JSON.stringify({ id: req.params.id, option: String(option).slice(0, 60), decided })]);
+  } catch { /* 忽略 */ }
+  res.json({ ok: true, decided });
 });
 
 // ---------- 停止生成（服务端取消运行中的 Agent 轮） ----------
