@@ -21,6 +21,26 @@ function contextResultPrune(text, cap) {
   const cut = s.length - head - tail;
   return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
 }
+
+// 每轮 LLM 用量的费用估算（元，近似；与 usage_stats.cost 口径一致）
+const P_IN = { deepseek: 1, glm: 2, ark: 0.3, moonshot: 4, dashscope: 0.5, tokenhub: 2, qianfan: 8, minimax: 5, siliconflow: 2 };
+const P_OUT = { deepseek: 2, glm: 5, ark: 0.8, moonshot: 16, dashscope: 2, tokenhub: 5, qianfan: 20, minimax: 12, siliconflow: 5 };
+function roundCost(providerId, tin, tout) {
+  return Number(((tin / 1e6) * (P_IN[providerId] ?? 2) + (tout / 1e6) * (P_OUT[providerId] ?? 6)).toFixed(4));
+}
+
+// 单任务运行中压缩：轮次很长时，把早期 tool/assistant 内容归档为极短占位（防上下文 token 平方膨胀；
+// 全量细节始终在 DB tool_calls 可查）
+function archiveEarlyContext(msgs) {
+  if (msgs.length <= 170) return;
+  const keepFrom = msgs.length - 160;
+  for (let i = 1; i < keepFrom; i++) {
+    const m = msgs[i];
+    if (!m) continue;
+    if (m.role === 'tool' && String(m.content || '').length > 200) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
+    else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 600) m.content = '（早期过程说明已压缩归档）';
+  }
+}
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...DEFAULT_LIMITS };
@@ -99,6 +119,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
     if (emit) emit({ type: 'agent_thinking', round: round + 1 });
+    archiveEarlyContext(msgs); // 运行中压缩：防早期内容导致上下文平方膨胀
+    const llmT0 = Date.now();
+    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys, temperature);
+    const llmMs = Date.now() - llmT0;
+    // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round），子代理/渠道/定时同源覆盖
+    try {
+      const u = res.usage || {};
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,NOW(),"round")',
+        [ctx.accountId ?? null, ctx.conversationId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
+    } catch { /* 计量失败不影响执行 */ }
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys, temperature);
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });

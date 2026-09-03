@@ -444,11 +444,19 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
       // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
       await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
-      // 用量统计（含费用估算 F13）
-      const tin = usage.tokens_in || 0;
-      const tout = usage.tokens_out || 0;
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,NOW())',
-        [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
+      // 用量统计：普通对话路径按请求计（kind=request）；Agent 路径已在 agent.js 按每一轮 LLM 调用计量（kind=round）
+      if (!useTools) {
+        const tin = usage.tokens_in || 0;
+        const tout = usage.tokens_out || 0;
+        await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"request")',
+          [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
+      }
+    } else {
+      // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
+      try {
+        await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
+          [conversationId, 'assistant', '（任务已停止 / 会话中断：现场已保存。回复"继续任务"可恢复，或给我新指令。）']);
+      } catch { /* 忽略 */ }
     }
   } catch (e) {
     send({ type: 'error', message: e.message });

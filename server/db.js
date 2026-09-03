@@ -131,7 +131,10 @@ const SCHEMA = [
     duration_ms INT DEFAULT 0,
     first_token_ms INT DEFAULT 0,
     cache_hit_tokens INT DEFAULT 0,
-    created_at DATETIME DEFAULT NOW()
+    kind VARCHAR(16) DEFAULT 'request',
+    created_at DATETIME DEFAULT NOW(),
+    INDEX idx_usage_time (created_at),
+    INDEX idx_usage_conv (conversation_id)
   )`,
   `CREATE TABLE IF NOT EXISTS tool_calls (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -237,6 +240,7 @@ export async function initSchema() {
   const MIGRATIONS = [
     'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
     "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
+    "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
