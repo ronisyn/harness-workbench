@@ -29,10 +29,10 @@ out.usage = { llmRounds: usage[0].c, tokensIn: Number(usage[0].tin), tokensOut: 
 
 // ---------- KPI2 任务级步数/成本（按 agent_runs 归集；WS0 挂 run 后生效） ----------
 const runs = await rows(
-  `SELECT r.id, r.conversation_id, r.status, COALESCE(r.rounds,0) rounds, r.created_at,
+  `SELECT r.id, r.conversation_id, r.status, COALESCE(r.rounds,0) rounds, r.started_at,
           COALESCE(SUM(u.tokens_in),0) tin, COALESCE(SUM(u.tokens_out),0) tout, COALESCE(SUM(u.cost),0) cost
    FROM agent_runs r LEFT JOIN usage_stats u ON u.agent_run_id = r.id
-   WHERE r.created_at > NOW() - INTERVAL ? DAY GROUP BY r.id ORDER BY r.id`, [DAYS]);
+   WHERE r.started_at > NOW() - INTERVAL ? DAY GROUP BY r.id ORDER BY r.id`, [DAYS]);
 const statusDist = {};
 for (const r of runs) statusDist[r.status] = (statusDist[r.status] || 0) + 1;
 out.kpi2 = {
@@ -88,8 +88,8 @@ try {
 out.kpi4 = { kbNew: kbNew[0].c, skillNew, skillAndKbReuse: kbReuse[0].c };
 
 // ---------- KPI5 事故率（口径 §0.2：失控类；guard 挂起单列不计事故） ----------
-const paused = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='paused' AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
-const guard = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='interrupted' AND created_at > NOW() - INTERVAL ? DAY AND (reason LIKE '%预算%' OR reason LIKE '%上限%' OR reason LIKE '%停止%' OR reason LIKE '%重启%')`, [DAYS]);
+const paused = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='paused' AND started_at > NOW() - INTERVAL ? DAY`, [DAYS]);
+const guard = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='interrupted' AND started_at > NOW() - INTERVAL ? DAY AND (reason LIKE '%预算%' OR reason LIKE '%上限%' OR reason LIKE '%停止%' OR reason LIKE '%重启%')`, [DAYS]);
 const silent = await rows(`SELECT COUNT(*) c FROM messages WHERE role='assistant' AND content LIKE '（任务执行完成）本轮共%' AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
 const danger = await rows(`SELECT COUNT(*) c FROM tool_calls WHERE tool_name IN ('db_write','git_pull_push','delete_file') AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
 out.kpi5 = { runawayPaused: paused[0].c, silentWrapup: silent[0].c, guardSuspends_normal: guard[0].c, dangerToolCalls: danger[0].c };

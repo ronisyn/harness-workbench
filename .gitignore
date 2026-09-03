@@ -20,6 +20,7 @@ Thumbs.db
 *.swp
 
 # Runtime
+.runtime/
 data/
 tmp/
 .cache/
