@@ -129,7 +129,6 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,NOW(),"round")',
         [ctx.accountId ?? null, ctx.conversationId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
     } catch { /* 计量失败不影响执行 */ }
-    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(), keys, temperature);
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
     const calls = res.toolCalls || [];
