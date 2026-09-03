@@ -390,6 +390,19 @@ export const TOOLS = [
       if (rec.status === 'error') return { sub_id: rec.id, status: 'error', error: rec.error };
       return { sub_id: rec.id, status: 'done', durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, lastSteps: (rec.toolLog || []).slice(-8), result: String(rec.result || '').slice(0, 6000) };
     } },
+  { name: 'subagent_report', description: '调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论），用于复盘与审计', permission: 'read',
+    params: { id: { type: 'string', required: true, desc: 'sub_id' } },
+    run: async (a) => {
+      const { subs: subMap } = await import('../subagent.js');
+      const rec = subMap.get(String(a.id));
+      if (!rec) throw new Error('子代理不存在: ' + a.id);
+      if (rec.status === 'running') return { sub_id: rec.id, status: 'running', tip: '尚未结束，结束后再取报告' };
+      const steps = (rec.toolLog || []).map((t) => ({ name: t.name, status: t.status, durationMs: t.durationMs, args: t.args, result: String(t.result || '').slice(0, 400) }));
+      return {
+        sub_id: rec.id, name: rec.name, kind: rec.kind || 'spawn', status: rec.status, error: rec.error || null,
+        task: rec.prompt, durationMs: rec.durationMs, toolSteps: steps.length, steps, result: String(rec.result || '').slice(0, 8000),
+      };
+    } },
   { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）', permission: 'read',
     params: { ids: { type: 'string', required: true, desc: '逗号分隔的 sub_id 列表' } },
     run: async (a) => {
