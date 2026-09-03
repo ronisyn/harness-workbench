@@ -528,6 +528,55 @@ export const TOOLS = [
       return { exited: true, tip: '已退出计划模式。请把上面的计划作为最终回答展示给用户；用户批准（说"开始/按计划执行"）后即可实施。', planLength: plan.length };
     } },
 
+  // ---------- ralph 循环（多轮全新 Agent 共享工作区记忆推进同一目标，至完成/阻塞/达轮次上限） ----------
+  { name: 'ralph', description: '对同一目标运行多轮"全新视角"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。', permission: 'read',
+    params: {
+      objective: { type: 'string', required: true, desc: '不可变的目标' },
+      rounds: { type: 'number', desc: '轮次上限（默认 5，最大 10）' },
+    },
+    run: async (a, ctx) => {
+      if (ctx.noSubagent) throw new Error('子代理嵌套已达上限');
+      const { spawnSubagent, waitSub } = await import('../subagent.js');
+      const objective = String(a.objective || '').trim().slice(0, 1000);
+      if (!objective) throw new Error('objective 必填');
+      const maxRounds = Math.min(10, Math.max(1, Math.floor(Number(a.rounds) || 5)));
+      const memRoot = ctx.root && ctx.root !== '/' ? ctx.root : '/srv/rw-workspace';
+      fs.mkdirSync(memRoot, { recursive: true });
+      const mem = path.join(memRoot, '.ralph-' + Date.now().toString(36) + '.md');
+      fs.writeFileSync(mem, '### 任务目标\n' + objective + '\n');
+      const roundLogs = [];
+      let status = 'rounds-exhausted';
+      let lastRoundDone = false;
+      for (let i = 1; i <= maxRounds; i++) {
+        let prior = '';
+        try { prior = fs.readFileSync(mem, 'utf8').slice(-4000); } catch { /* ignore */ }
+        const childPrompt = [
+          '你是一次全新尝试（Ralph 循环第 ' + i + '/' + maxRounds + ' 轮），没有对话历史，但有一份共享工作记忆文件，请先读它：' + mem,
+          '不可变目标：' + objective,
+          '执行规则：以全新视角继续推进；执行完把 本轮进展/新发现/下一步 以追加方式写入 ' + mem + '（用 append_file 工具，UTF-8，不要覆盖历史）；',
+          '若判定目标已达成，请在文件末尾追加一行 STATUS: DONE；若遇到无法逾越的阻塞则追加 STATUS: BLOCKED 并写明原因。',
+          prior ? '【共享工作记忆当前内容（尾段）】\n' + prior : '',
+          '最后用不超过 300 字汇报本轮结果。',
+        ].join('\n');
+        const { id } = await spawnSubagent({
+          prompt: childPrompt, name: 'Ralph-第' + i + '轮',
+          provider: ctx.__provider || 'deepseek', model: ctx.__model || 'deepseek-v4-flash',
+          permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+        });
+        const rec = await waitSub(id);
+        const rep = String(rec.result || rec.error || '').slice(0, 600);
+        roundLogs.push({ round: i, status: rec.status, result: rep, durationMs: rec.durationMs });
+        if (rec.status === 'error') { status = 'blocked'; break; }
+        let memTail = '';
+        try { memTail = fs.readFileSync(mem, 'utf8'); } catch { /* ignore */ }
+        if (/STATUS:\s*DONE/i.test(memTail)) { status = 'done'; break; }
+        if (/STATUS:\s*BLOCKED/i.test(memTail)) { status = 'blocked'; break; }
+      }
+      let memoryTail = '';
+      try { memoryTail = fs.readFileSync(mem, 'utf8').slice(-2500); } catch { /* ignore */ }
+      return { status, roundsRun: roundLogs.length, memoryFile: mem, perRound: roundLogs.map((r) => r.round + ':' + r.status), finalMemoryTail: memoryTail, note: '记忆文件保留在工作区，可 read_file 查看全量；如需继续可再次 ralph 同一目标。' };
+    } },
+
   // ---------- 结构化问询（ask_user：需要用户做选择时发选项卡片，等用户点选后继续） ----------
   { name: 'ask_user', description: '向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。', permission: 'read',
     params: {
