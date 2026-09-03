@@ -93,7 +93,20 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
-      return { content: res.content || '', toolLog, usage: res.usage, finishReason: res.finishReason || '' };
+      let final = res.content || '';
+      // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
+      if (!final.trim() && toolLog.length > 0) {
+        const names = {};
+        for (const t of toolLog) names[t.name] = (names[t.name] || 0) + 1;
+        const listStr = Object.entries(names).map(([k, v]) => k + (v > 1 ? '×' + v : '')).join('、');
+        const last = toolLog[toolLog.length - 1];
+        final = '（任务执行完成）本轮共 ' + toolLog.length + ' 步工具调用：' + listStr + '。';
+        if (last && last.result && last.status !== 'fail') {
+          final += '\n最后一步结果摘要：' + String(last.result).replace(/\s+/g, ' ').slice(0, 250);
+        }
+        final += '\n需要我基于这些结果继续说明或汇总，直接说即可。';
+      }
+      return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '' };
     }
     // 循环检测护栏（可关闭/可调）：连续 N 次 (工具+参数+结果前段相同) 才判定卡死
     const sig = calls.map((c) => {

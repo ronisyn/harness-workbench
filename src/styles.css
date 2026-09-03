@@ -120,8 +120,7 @@ body {
 .rw-caret { animation: blink 1s infinite; color: var(--rw-red); }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* 对话流轨迹卡片 */
-.rw-msg-traces { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+/* 对话流轨迹（3080 式平铺行：状态+名称+×次数+末次关键预览；点击行展开明细） */
 .rw-approval { border: 1px solid var(--rw-red); border-left: 4px solid var(--rw-red); border-radius: 10px;
   background: #fdf1ec; padding: 8px 12px; margin: 6px 0; font-size: 13px; }
 .rw-approval-desc { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; margin-bottom: 8px; }
@@ -130,15 +129,41 @@ body {
 .rw-approval-state.reject { color: #c62828; }
 .rw-approval-state.approve { color: #2e7d32; }
 .rw-approval-state.timeout { color: var(--rw-muted); }
-.rw-trace-card { border: 1px solid var(--rw-border); border-radius: 9px; background: #fdf9f0;
-  font-size: 12px; cursor: pointer; overflow: hidden; }
-.rw-trace-card.fail { border-color: #c62828; }
-.rw-trace-card .running { }
-.rw-trace-badge { font-size: 12px; width: 14px; text-align: center; }
-.rw-trace-card-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; min-height: 26px; }
+.rw-msg-traces { display: flex; flex-direction: column; margin: 4px 0 8px; border: 1px solid var(--rw-border);
+  border-radius: 10px; overflow: hidden; background: #fffcf5; }
+.rw-trace-row { border-bottom: 1px dashed var(--rw-border); }
+.rw-trace-row:last-child { border-bottom: none; }
+.rw-trace-row.fail { background: #fdf1ec; }
+.rw-trace-row-head { display: flex; align-items: center; gap: 7px; padding: 4px 10px; cursor: pointer; min-height: 26px; font-size: 12px; }
+.rw-trace-row-head:hover { background: #f7efdf; }
+.rw-trace-badge { font-size: 12px; width: 14px; text-align: center; font-family: ui-monospace, Consolas, monospace; }
 .rw-trace-badge.done { color: #2e7d32; }
 .rw-trace-badge.fail { color: #c62828; }
 .rw-trace-badge.running { color: var(--rw-red); animation: pulse 1s infinite; }
+.rw-trace-tool { font-weight: 600; font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: nowrap; }
+.rw-trace-count { color: var(--rw-yellow); font-weight: 700; font-size: 11px; }
+.rw-trace-preview { flex: 1; color: var(--rw-muted); font-size: 11px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font-style: italic; }
+.rw-trace-preview:empty { display: none; }
+.rw-trace-ms { color: var(--rw-muted); font-size: 11px; white-space: nowrap; }
+.rw-trace-open { border: 1px solid var(--rw-border); background: #fff; border-radius: 6px; font-size: 11px;
+  cursor: pointer; padding: 0 6px; white-space: nowrap; }
+.rw-trace-open:hover { border-color: var(--rw-red); color: var(--rw-red); }
+.rw-trace-toggle { color: var(--rw-muted); font-size: 11px; }
+.rw-trace-detail { border-top: 1px dashed var(--rw-border); padding: 4px 10px 8px; background: #fffdf8; font-size: 12px; }
+.rw-trace-step { border-top: 1px solid var(--rw-border); margin-top: 6px; padding-top: 6px; }
+.rw-trace-step:first-child { border-top: none; margin-top: 0; padding-top: 4px; }
+.rw-trace-step.fail { color: #c62828; }
+.rw-trace-step-head { font-size: 11px; color: var(--rw-muted); font-family: ui-monospace, Consolas, monospace; margin-bottom: 4px; }
+.rw-trace-line b { display: block; color: var(--rw-muted); font-size: 10px; margin: 4px 0 2px; }
+.rw-trace-line pre { background: #f6efe2; border-radius: 6px; padding: 5px 8px; margin: 0;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+  max-height: 200px; overflow-y: auto; }
+.rw-trace-filedetail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; }
+.rw-trace-filedetail pre { white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto;
+  background: #f6efe2; border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+.rw-trace-filename { font-size: 11px; color: var(--rw-red); margin-bottom: 4px; word-break: break-all; }
+.rw-trace-filerr { color: #c62828; font-size: 12px; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 .rw-thinking { color: var(--rw-muted); font-size: 13px; font-style: italic; animation: pulse 1.2s infinite; }
 /* 思考过程区（灰色斜体，可折叠） */
@@ -148,22 +173,6 @@ body {
   font-style: normal; letter-spacing: 0.3px; user-select: none; }
 .rw-think summary:hover { color: var(--rw-red); }
 .rw-think > div { margin-top: 6px; font-style: italic; line-height: 1.6; max-height: 160px; overflow-y: auto; }
-.rw-trace-tool { font-weight: 600; flex: 1; }
-.rw-trace-seq { color: var(--rw-muted); font-size: 10px; }
-.rw-trace-ms { color: var(--rw-muted); font-size: 11px; }
-.rw-trace-toggle { color: var(--rw-muted); font-size: 10px; }
-.rw-trace-open { border: 1px solid var(--rw-border); background: var(--rw-panel); color: var(--rw-red);
-  font-size: 11px; padding: 1px 7px; border-radius: 5px; cursor: pointer; }
-.rw-trace-open:hover { background: var(--rw-red); color: #fff; }
-.rw-trace-filedetail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; }
-.rw-trace-filename { font-size: 11px; color: var(--rw-red); font-weight: 600; margin-bottom: 4px; }
-.rw-trace-filedetail pre { background: #f4e3c4; border-radius: 6px; padding: 6px 8px; margin: 0;
-  font-family: "SF Mono", Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
-.rw-trace-filerr { color: var(--rw-red); font-size: 12px; }
-.rw-trace-card-detail { border-top: 1px dashed var(--rw-border); padding: 6px 10px; display: flex; flex-direction: column; gap: 5px; }
-.rw-trace-line b { display: block; color: var(--rw-muted); font-size: 10px; margin-bottom: 2px; }
-.rw-trace-line pre { background: #f4e3c4; border-radius: 6px; padding: 5px 8px; margin: 0;
-  font-family: "SF Mono", Consolas, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow-y: auto; }
 
 .rw-stats { border-top: 1px dashed var(--rw-border); padding: 5px 20px; font-size: 11px; color: var(--rw-muted); background: var(--rw-panel); letter-spacing: 0.3px; }
 .rw-inputbar { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--rw-border); background: var(--rw-panel); }

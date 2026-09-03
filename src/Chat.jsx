@@ -27,35 +27,40 @@ function PlanCard({ plan }) {
   );
 }
 
-// 轨迹卡片（对话流内联渲染，对齐 3080 工具调用展示）
+// 轨迹渲染（3080 式）：连续相同的工具合并为一行「name ×N」，行内只给最重要的信息
+// （状态 + 名称 + 次数 + 末次结果一行预览 + 耗时），点击行才展开完整参数/结果；文件工具可打开
 const FILE_TOOLS = ['read_file', 'write_file', 'append_file', 'edit_file', 'extract_pdf', 'extract_docx', 'extract_xlsx', 'extract_pptx', 'syntax_check', 'ocr_image', 'view_image'];
-function ToolCard({ t }) {
+const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+function TraceCard({ items }) {
   const [open, setOpen] = React.useState(false);
   const [fileOpen, setFileOpen] = React.useState(false);
   const [fileData, setFileData] = React.useState(null);
+  const list = Array.isArray(items) ? items : [items];
+  const t = list[list.length - 1]; // 以末次为准（状态/结果/耗时）
   const st = t.status === 'fail' ? '✕' : t.status === 'running' ? '●' : '✓';
-  const argsText = typeof t.args === 'string' ? t.args : JSON.stringify(t.args);
-  const resText = typeof t.result === 'string' ? t.result : JSON.stringify(t.result);
-  const filePath = t.args && (typeof t.args === 'object') ? (t.args.path || t.args.file || t.args.src || null) : null;
-  const canOpenFile = FILE_TOOLS.includes(t.name) && filePath && t.status === 'done';
+  const lastDone = [...list].reverse().find((x) => x.status === 'done');
+  const resText = (lastDone ? (typeof lastDone.result === 'string' ? lastDone.result : JSON.stringify(lastDone.result)) : '');
+  const fileItem = [...list].reverse().find((x) => FILE_TOOLS.includes(x.name) && x.args && (typeof x.args === 'object') && (x.args.path || x.args.file || x.args.src) && x.status === 'done');
+  const filePath = fileItem ? (fileItem.args.path || fileItem.args.file || fileItem.args.src) : null;
+  const totalMs = list.reduce((s, x) => s + (x.duration_ms || 0), 0);
   const openFile = async (e) => {
     e.stopPropagation();
     if (!fileOpen) {
-      try {
-        const d = await api.getFile(filePath);
-        setFileData(d);
-      } catch (ex) { setFileData({ error: ex.message }); }
+      try { const d = await api.getFile(filePath); setFileData(d); }
+      catch (ex) { setFileData({ error: ex.message }); }
     }
     setFileOpen(!fileOpen);
   };
   return (
-    <div className={'rw-trace-card ' + (t.status === 'fail' ? 'fail' : '')} onClick={() => setOpen(!open)}>
-      <div className="rw-trace-card-head">
+    <div className={'rw-trace-row' + (t.status === 'fail' ? ' fail' : '')}>
+      <div className="rw-trace-row-head" onClick={() => setOpen(!open)}>
         <span className={'rw-trace-badge ' + (t.status || 'done')}>{st}</span>
         <span className="rw-trace-tool">🔧 {t.name}</span>
-        {t.seq ? <span className="rw-trace-seq">#{t.seq}</span> : null}
-        <span className="rw-trace-ms">{(t.duration_ms || 0) / 1000 > 0 ? ((t.duration_ms || 0) / 1000).toFixed(1) + 's' : ''}</span>
-        {canOpenFile && <button className="rw-trace-open" onClick={openFile} title="打开文件查看内容">📂 打开</button>}
+        {list.length > 1 && <span className="rw-trace-count">×{list.length}</span>}
+        <span className="rw-trace-preview">{oneLine(resText).slice(0, 90) || (t.status === 'running' ? '运行中…' : t.status === 'fail' ? '失败' : '')}</span>
+        <span className="rw-trace-ms">{totalMs / 1000 > 0 ? ((totalMs / 1000)).toFixed(1) + 's' : ''}</span>
+        {filePath && <button className="rw-trace-open" onClick={openFile} title="打开文件查看内容">📂 打开</button>}
         <span className="rw-trace-toggle">{open ? '▾' : '▸'}</span>
       </div>
       {fileOpen && fileData && (
@@ -71,13 +76,33 @@ function ToolCard({ t }) {
         </div>
       )}
       {open && (
-        <div className="rw-trace-card-detail" onClick={(e) => e.stopPropagation()}>
-          {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 600)}</pre></div> : null}
-          {resText ? <div className="rw-trace-line"><b>结果</b><pre>{resText.slice(0, 1200)}</pre></div> : null}
+        <div className="rw-trace-detail" onClick={(e) => e.stopPropagation()}>
+          {list.map((x, xi) => {
+            const argsText = typeof x.args === 'string' ? x.args : JSON.stringify(x.args);
+            const xres = typeof x.result === 'string' ? x.result : JSON.stringify(x.result);
+            return (
+              <div key={xi} className={'rw-trace-step' + (x.status === 'fail' ? ' fail' : '')}>
+                <div className="rw-trace-step-head">{list.length > 1 ? '#' + (xi + 1) + ' ' : ''}{x.name} · {x.status === 'done' ? '✓' : x.status === 'running' ? '● 运行中' : '✕'} {x.duration_ms ? ((x.duration_ms / 1000).toFixed(1) + 's') : ''}</div>
+                {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 500)}</pre></div> : null}
+                {xres ? <div className="rw-trace-line"><b>结果</b><pre>{xres.slice(0, 1000)}</pre></div> : null}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
+}
+
+// 连续相同工具合并成组（同一行 ×N）；不同工具各自成行
+function groupTraces(traces) {
+  const out = [];
+  for (const t of traces || []) {
+    const last = out[out.length - 1];
+    if (last && last.name === t.name && t.status !== 'running') last.items.push(t);
+    else out.push({ name: t.name, items: [t] });
+  }
+  return out;
 }
 
 const PERM_LABEL = { read: '只读', write: '读写', full: '完全', guard: '需审批' };
@@ -451,7 +476,7 @@ export default function Chat({ user, onLogout }) {
                         ))}
                         {m.traces && m.traces.length > 0 && (
                           <div className="rw-msg-traces">
-                            {m.traces.map((t, ti) => <ToolCard key={ti} t={t} />)}
+                            {groupTraces(m.traces).map((g, gi) => <TraceCard key={gi} items={g.items} />)}
                           </div>
                         )}
                         {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
