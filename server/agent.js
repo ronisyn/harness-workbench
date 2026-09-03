@@ -1,7 +1,7 @@
 // server/agent.js - Agent 执行循环（目标完成度判断：干完就停，没干完继续）
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
-// 运行护栏（仅防失控，非预设限制）：时间预算/循环检测/绝对兜底 —— 全部可在 settings 表调整或关闭（0=不限），
-// 用 set_limits 工具或 设置→能力→高级参数 修改即生效（无需重启），默认已大幅放宽以支持长任务
+// 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
+// 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool, plans } from './tools/index.js';
 import { db } from './db.js';
@@ -45,14 +45,18 @@ async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...DEFAULT_LIMITS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
       try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
     };
-    limitsCache = { budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap), loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT) };
-  } catch { limitsCache = def; }
+    limitsCache = {
+      budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
+      loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
+      rev: pick('__policy_rev', 0),
+    };
+  } catch { limitsCache = { ...def, rev: 0 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
 }
@@ -72,7 +76,8 @@ export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问�
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
   '- 某步失败不要放弃：读错误信息→修复→重试；同一工具同参数失败 2 次后换思路（改路径/换命令/查环境）。',
   '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
-  '- 运行护栏（时间预算/轮次上限/循环检测）是可调整可关闭的配置：用户要求取消/放宽时，直接用 set_limits 工具改（0=不限），或说明原因后调大；改完下一轮立即生效，无需改代码。',
+  '- 运行护栏（时间预算/轮次上限/循环检测）是可调整可关闭的配置（0=不限），是防失控保险丝而非能力上限：用户要求取消/放宽时，直接用 set_limits 工具改（0=不限），或说明原因后调大。',
+  '- 运行时快照：平台每轮自动注入【运行时快照】（轮次/用时/护栏现值/累计 token 与费用/会话属性/政策版本）。以最新快照为准；看到政策版本变化=规则已更新，请丢弃旧理解。',
   '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）手动 systemctl restart（那会中断你自己）。',
   '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
@@ -102,33 +107,52 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
   const t0 = Date.now();
-  // 护栏动态读取（settings，可调可关，0=不限）：默认 120 分钟 / 2000 轮 / 连续 6 次判循环
-  const lim = await agentLimits();
-  const budgetMs = lim.budgetMin > 0 ? lim.budgetMin * 60000 : Infinity;
-  const roundCap = lim.roundCap > 0 ? lim.roundCap : 1e9;
-  const loopGuardN = lim.loopGuard > 0 ? lim.loopGuard : 0;
+  let cumTin = 0, cumTout = 0, cumCost = 0; // WS2 本任务累计钱包（每轮计量后累加）
 
-  for (let round = 0; round < roundCap; round++) {
+  // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
+  const pushSnapshot = async (round, lim) => {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m && m.role === 'system' && String(m.content || '').startsWith('【运行时快照】')) { msgs.splice(i, 1); break; }
+    }
+    const mins = Math.round((Date.now() - t0) / 60000);
+    const resume = ctx.__resumeStats ? ` | 恢复任务（前次已执行 ${ctx.__resumeStats.rounds || 0} 轮，费用自本次起算）` : '';
+    const snap = '【运行时快照】第 ' + (round + 1) + ' 轮 | 已用 ' + mins + ' 分钟 | 护栏现值: 预算 ' + (lim.budgetMin || '不限') + ' 分钟 / 轮次 ' + (lim.roundCap || '不限') + ' / 循环检测 ' + (lim.loopGuard || '关') + ' / 并行 ' + (lim.maxParallelT || '串行')
+      + '（每轮读 settings，变更最快 5s 生效；set_limits 可调，0=不限）'
+      + ' | 本任务累计: token in ' + cumTin + ' / out ' + cumTout + ' ≈ ¥' + cumCost.toFixed(3)
+      + ' | 会话 mode=' + (ctx.mode || 'chat') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
+      + ' | 政策版本 rev ' + lim.rev + resume
+      + '\n以本快照为准；政策版本变化=规则已更新，丢弃旧理解。';
+    msgs.splice(1, 0, { role: 'system', content: snap });
+  };
+
+  for (let round = 0; ; round++) {
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
     if (ctx.__signal && ctx.__signal.aborted) {
       return { content: '', stopped: true, toolLog, usage: {} };
     }
-    // 时间预算护栏（可关闭/可调；触发时保留现场供恢复）
-    if (Date.now() - t0 > budgetMs) {
+    // 护栏每轮读取（5s 缓存防 DB 风暴）：预算/轮次用最新值判定，快照与判定同源
+    const lim = await agentLimits();
+    if (lim.budgetMin > 0 && Date.now() - t0 > lim.budgetMin * 60000) {
       return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget' };
     }
-    // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"
-    if (emit) emit({ type: 'agent_thinking', round: round + 1 });
+    if (lim.roundCap > 0 && round >= lim.roundCap) {
+      return { content: `（达到 ${lim.roundCap} 轮护栏上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）`, toolLog, usage: {}, guard: 'cap' };
+    }
+    await pushSnapshot(round, lim);
+    // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
+    if (emit) emit({ type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
     archiveEarlyContext(msgs); // 运行中压缩：防早期内容导致上下文平方膨胀
     const llmT0 = Date.now();
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset), keys, temperature);
     const llmMs = Date.now() - llmT0;
-    // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round），子代理/渠道/定时同源覆盖
+    // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id），子代理/渠道/定时同源覆盖
     try {
       const u = res.usage || {};
       await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,NOW(),"round")',
         [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
+      cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += roundCost(provider, u.tokens_in || 0, u.tokens_out || 0);
     } catch { /* 计量失败不影响执行 */ }
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
@@ -158,18 +182,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const step = last ? last.name + (last.status === 'fail' ? '(失败)' : '') + ' → ' + String(last.result || '').replace(/\s+/g, ' ').slice(0, 100) : '';
       await checkpoint(ctx.__runId, { rounds: callHistory.length, lastStep: step, toolCounts: counts }).catch(() => {});
     }
-    // 循环处理（可关闭/可调，不再简单杀任务）：
-    // ① soft：连续相同调用且无进展达 softN 次 → 提示"换策略"，继续推进
-    // ② hard：仍无效达 loopGuardN 次 → 挂起任务（paused，现场保留），交还用户决策
+    // 循环处理（护栏现值每轮生效；soft 提示→仍无效则挂起 paused，现场保留）
     const sig = calls.map((c) => {
       let argsStr = '';
       try { argsStr = JSON.stringify(JSON.parse(c.function.arguments || '{}')).slice(0, 60); } catch { argsStr = String(c.function.arguments || '').slice(0, 60); }
       return c.function.name + ':' + argsStr;
     }).join('|');
-    // 无进展判定：连续轮次工具签名相同（结果会反映在下一轮 sig 里是否变化）
     const prev = callHistory[callHistory.length - 1];
     if (sig === prev) noProgressCount += 1; else noProgressCount = 0;
     callHistory.push(sig);
+    const loopGuardN = lim.loopGuard > 0 ? lim.loopGuard : 0;
     const softN = Math.max(1, Math.floor(loopGuardN / 2));
     if (loopGuardN > 0 && noProgressCount === softN && !loopWarned) {
       loopWarned = true;
@@ -219,5 +241,6 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });
   }
-  return { content: '（达到轮次上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）', toolLog, usage: {}, guard: 'cap' };
+  /* 不可达兜底（轮次判定在循环头按护栏现值执行） */
+  // return { content: '（护栏兜底挂起）', toolLog, usage: {}, guard: 'cap' };
 }

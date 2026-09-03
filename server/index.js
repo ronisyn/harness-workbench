@@ -4,7 +4,7 @@ import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { config, ROOT } from './config.js';
-import { initSchema, db } from './db.js';
+import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
@@ -226,6 +226,7 @@ async function getSetting(key, def) {
 }
 async function setSetting(key, val) {
   await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
+  await bumpPolicyRev(); // 政策版本自增：运行时快照据此提示模型"规则已更新"
 }
 
 // ---------- 模型路由（F11 自动路由） ----------
@@ -377,7 +378,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       let run = null;
       try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
       agentRunId = run ? run.id : null;
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, mode: convMode, preset: convPreset };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {

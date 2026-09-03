@@ -24,6 +24,16 @@ export const db = {
   },
 };
 
+// 政策版本（WS2：settings 每次被写时自增；运行时快照显示，模型看到版本变化即丢弃旧规则理解）
+export async function bumpPolicyRev() {
+  try {
+    const r = await pool.query('SELECT svalue FROM settings WHERE skey=?', ['__policy_rev']);
+    const cur = r[0][0] ? (Number(JSON.parse(r[0][0].svalue)) || 0) : 0;
+    await pool.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()',
+      ['__policy_rev', JSON.stringify(cur + 1)]);
+  } catch { /* 版本自增失败不影响主流程 */ }
+}
+
 // 建表（幂等）
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS accounts (

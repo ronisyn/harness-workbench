@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
-import { db } from '../db.js';
+import { db, bumpPolicyRev } from '../db.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
@@ -681,7 +681,8 @@ export const TOOLS = [
       for (const [k, v] of ups) {
         await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [k, JSON.stringify(v)]);
       }
-      return { applied: Object.fromEntries(ups), note: '下一个任务/下一轮立即生效（当前进行中的任务保持启动时的值）。0=不限/串行。默认参考值：120分钟/2000轮/连续6次/并行10。' };
+      await bumpPolicyRev(); // 政策版本自增（WS2：护栏变化须让运行中模型看到）
+      return { applied: Object.fromEntries(ups), note: '已写入 settings 并自增政策版本；进行中任务每轮读取最新护栏（最快 5s 生效）。0=不限/串行。默认参考值：120分钟/2000轮/连续6次/并行10。' };
     } },
   { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
