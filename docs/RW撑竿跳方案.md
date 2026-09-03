@@ -218,10 +218,9 @@
 - v0.3：WS5–WS9 升 🟢；附录B 实测重写（TOOLS=61）。
 - v0.2：WS0–WS4 升 🟢；附录B 实测盘点；侦察事实记录（ENV_MAP 静态/DEFAULT_LIMITS/toolDefs 无参/5s 缓存/无 preset 列/usage_stats 无 run 归属/settings 无 revision）。
 
-## 附录D · when/not/ex 施工图（执行批1 首个子步，61→62 条）
-- 逐工具产出：name / tier / when（给 agent 什么信息或能力，何时用）/ not（何时不用+替代工具）/ ex（一行真实示例）/ 危险或门禁备注。
-- 每条过 X1 评审问：这工具是 agent 的"眼"还是"手"？描述是否让 agent 在正确时刻选它？参数是否足够表达意图（enum/min/max）？
-- 交付后回填本附录（全量表）与附录B 计数核对；评审签名=自审 A 段（场景/逻辑）过一遍。
+## 附录D · 工具契约施工图 ✅（已交付 docs/tool-contracts-v1.md，62 条含 X1 评审）
+- 产出：docs/tool-contracts-v1.md —— 62 工具（61 实测+conv_summarize）逐条 when/not/ex/tier/schema 建议；core 21 全表先行，pro 32、expert 9；含 X1 三问口径与实施检查清单（批2b 用）。
+- 待办：WS1 实施时把 when/not/ex 回填 server/tools/index.js TOOLS 条目 + enum 落地首批（copy_move.mode / git_branch.action / kb_add.scope / subagent.mode）；计数 62 与附录B 同步。
 
 ## 附录E · 自审报告 v1.0（18 维；3.1 结论=全绿后进入执行开发）
 | 维度 | 结论 | 发现与修正 |
