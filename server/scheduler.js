@@ -81,19 +81,24 @@ export async function executeScheduledTask(task) {
   return resultText;
 }
 
-// 主调度循环：每分钟检查
+// 主调度循环：每分钟检查（到期任务并发上限 2，防停机积压并发风暴；未执行的下轮补）
+let schedulerRunning = 0;
 export function startScheduler() {
   setInterval(async () => {
     try {
       await computeNextRuns();
       const due = await db.query('SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run <= NOW()');
       for (const t of due) {
+        if (schedulerRunning >= 2) break;
         // 防重入：先把 next_run 推后，避免并发重复执行
         const next = cronToNext(t.cron) || new Date(Date.now() + 60000);
         await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
-        executeScheduledTask(t).catch((e) => console.error('[scheduler] 执行异常:', e.message));
+        schedulerRunning += 1;
+        executeScheduledTask(t)
+          .catch((e) => console.error('[scheduler] 执行异常:', e.message))
+          .finally(() => { schedulerRunning = Math.max(0, schedulerRunning - 1); });
       }
     } catch (e) { /* 调度循环容错 */ }
   }, 60000);
-  console.log('[scheduler] 定时任务调度器已启动（每分钟检查）');
+  console.log('[scheduler] 定时任务调度器已启动（每分钟检查，并发≤2）');
 }

@@ -22,6 +22,10 @@ import { decideAsk } from './asks.js';
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+// 进程级兜底：DB/异步偶发 rejection 不拖垮整个平台（记录并保活；比 Node 默认崩溃更稳）
+process.on('unhandledRejection', (reason) => console.error('[rw] unhandledRejection:', reason instanceof Error ? (reason.stack || reason.message) : reason));
+process.on('uncaughtException', (err) => console.error('[rw] uncaughtException:', err && (err.stack || err.message)));
+
 // 运行中 Agent 的中止表（前端"停止生成"→ POST /api/chat/stop 取消当前轮）
 const abortMap = new Map(); // key = accountId:conversationId → AbortController
 // 每账号并发对话计数（能力"并发限制"：默认同账号最多 3 条对话同时在跑）
@@ -351,7 +355,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
+  // SSE 断连即中止：客户端关页/断网 → Agent 停止继续（避免无人监听的循环烧 token/改动服务器）
+  const onDisconnect = () => actrl.abort();
+  req.on('close', onDisconnect);
+  res.on('close', onDisconnect);
   let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
+  let skipStore = false; // stopped 时跳过落库/统计（但仍走统一清理）
   try {
     const useTools = needsTools(content);
     let answer = '';
@@ -397,15 +406,21 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           else await markRun(run.id, 'completed', '');
         } catch { /* 忽略 */ }
       }
-      if (result.stopped) { send({ type: 'stopped' }); return; } // 用户点击停止：不落 assistant/统计
-      answer = result.content || '（无输出）';
-      usage = result.usage || {};
-      if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-      // Agent 路径分块模拟流式
-      const chunkSize = 8;
-      for (let i = 0; i < answer.length; i += chunkSize) {
-        if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-        send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+      if (result.stopped) {
+        // 用户点击停止：不落 assistant/统计，但不再提前 return（避免泄漏 inflight/abortMap）
+        send({ type: 'stopped' });
+        skipStore = true;
+      }
+      if (!skipStore) {
+        answer = result.content || '（无输出）';
+        usage = result.usage || {};
+        if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
+        // Agent 路径分块模拟流式
+        const chunkSize = 8;
+        for (let i = 0; i < answer.length; i += chunkSize) {
+          if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+          send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+        }
       }
     } else {
       // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）；思考过程实时透出
@@ -422,17 +437,19 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
       usage = ctx.usage || {};
     }
-    send({ type: 'done', usage });
-    // 存 assistant 消息（reasoning=思考过程，历史回看可见）
-    const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?,?)',
-      [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
-    // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
-    await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
-    // 用量统计（含费用估算 F13）
-    const tin = usage.tokens_in || 0;
-    const tout = usage.tokens_out || 0;
-    await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,NOW())',
-      [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
+    if (!skipStore) {
+      send({ type: 'done', usage });
+      // 存 assistant 消息（reasoning=思考过程，历史回看可见）
+      const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?,?)',
+        [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
+      // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
+      await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
+      // 用量统计（含费用估算 F13）
+      const tin = usage.tokens_in || 0;
+      const tout = usage.tokens_out || 0;
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,NOW())',
+        [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
+    }
   } catch (e) {
     send({ type: 'error', message: e.message });
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
@@ -616,6 +633,12 @@ const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));
 app.get(/^(?!\/api).*/, (req, res) => {
   res.sendFile(path.join(webDist, 'index.html'));
+});
+// Express 错误中间件（须在全部路由之后）：async 路由 rejection → 500 而非进程崩溃
+app.use((err, req, res, next) => {
+  console.error('[rw] 路由错误:', err && (err.stack || err.message));
+  if (res.headersSent) { res.end(); return; }
+  res.status(500).json({ ok: false, message: '服务内部错误: ' + String((err && err.message) || err).slice(0, 200) });
 });
 
 // ---------- 启动 ----------
