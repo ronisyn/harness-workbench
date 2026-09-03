@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RW v3 · 项目文件夹 + 项目内对话（含导读）</title>
+<style>
+  :root{--red:#e2542b;--yellow:#c98b2e;--cream:#faf3e7;--panel:#fffdf8;--ink:#3a2c1c;--muted:#8a7a60;--line:#e8dcc4;--ok:#2e7d32;--fail:#c62828;--blue:#2f6fb3;--note:#fff3c4;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#efe7d6;color:var(--ink);font-size:14px;height:100vh;overflow:hidden}
+  button{font-family:inherit}
+  .app{display:flex;flex-direction:column;height:100vh}
+  .topbar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);flex:none}
+  .logo{font-weight:800;color:var(--red);font-size:15px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-left:10px}
+  .seg button{border:none;background:#fff;padding:6px 16px;font-size:13px;cursor:pointer;color:var(--muted)}
+  .seg button.on{background:var(--red);color:#fff;font-weight:700}
+  .spacer{flex:1}
+  .wdir{font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;background:#f4ecd9;border:1px solid var(--line);border-radius:7px;padding:4px 10px}
+  .toggle-note{background:var(--yellow);border:none;color:#fff;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600}
+  .body{flex:1;display:flex;min-height:0}
+  /* 左树 */
+  .side{width:280px;background:var(--cream);border-right:1px solid var(--line);display:flex;flex-direction:column;flex:none}
+  .side-head{padding:10px 12px;font-size:11px;color:var(--muted)}
+  .side-actions{display:flex;gap:6px;padding:0 10px 8px}
+  .sbtn{flex:1;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px 4px;font-size:12px;cursor:pointer;color:var(--ink)}
+  .sbtn:hover{border-color:var(--red)}
+  .tree{flex:1;overflow-y:auto;padding:0 6px 10px}
+  .fnode{border:1px solid var(--line);background:#fff;border-radius:10px;margin-bottom:7px;overflow:hidden}
+  .fhead{display:flex;align-items:center;gap:7px;padding:8px 10px;cursor:pointer;font-size:13px;font-weight:600}
+  .fhead:hover{background:#f7efdf}
+  .fhead .caret{transition:.15s;color:var(--muted);font-size:10px}
+  .fnode.open .caret{transform:rotate(90deg)}
+  .fhead .dir{font-size:9.5px;color:#c0b297;font-family:ui-monospace,Consolas,monospace;margin-left:2px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fhead .badges{display:flex;gap:3px}
+  .bdg{font-size:10px;border-radius:4px;padding:0 5px;color:#fff}
+  .bdg.r{background:var(--red)}.bdg.y{background:var(--yellow)}.bdg.g{background:var(--ok)}.bdg.b{background:var(--blue)}
+  .chats{display:none;border-top:1px dashed var(--line)}
+  .fnode.open .chats{display:block}
+  .crow{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 16px;font-size:12.5px;color:#5d4e38;cursor:pointer}
+  .crow:hover{background:#f4ecd9}
+  .crow.on{background:#fdeee8;color:var(--red);font-weight:600}
+  .crow .ic{width:15px;text-align:center}
+  .crow .sub{margin-left:auto;font-size:9.5px;color:#c0b297}
+  .side-foot{border-top:1px solid var(--line);padding:8px 10px;font-size:11px;color:var(--muted)}
+  /* 中聊天 */
+  .mid{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel)}
+  .chat-head{padding:8px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .chat-title{font-weight:700}
+  .chip{border:1px solid var(--line);background:#fff;border-radius:6px;font-size:10.5px;padding:1px 7px;color:#6b5a41}
+  .chat{flex:1;overflow-y:auto;padding:14px 18px}
+  .msg{display:flex;gap:8px;margin-bottom:12px}
+  .ava{width:28px;height:28px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:700}
+  .ava.me{background:var(--blue)} .ava.ai{background:linear-gradient(135deg,var(--red),var(--yellow))}
+  .bub{background:#fff;border:1px solid var(--line);border-radius:4px 12px 12px 12px;padding:8px 12px;max-width:700px;font-size:13px;line-height:1.65}
+  .bub.me{background:#eef4fc;border-color:#d5e2f2}
+  .think{border-left:2px solid var(--yellow);background:#fdf6e7;border-radius:0 8px 8px 0;padding:5px 10px;margin:4px 0;color:var(--muted);font-style:italic;font-size:12px}
+  .tool{display:flex;gap:6px;align-items:center;border:1px solid var(--line);background:#fdfaf2;border-radius:8px;padding:3px 10px;margin:4px 0;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+  .chatfoot{border-top:1px solid var(--line);padding:8px 12px;display:flex;gap:8px;background:var(--panel)}
+  .chatfoot input{flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 12px;font-size:13px;outline:none}
+  .btn{background:var(--red);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12px}
+  .btn.gray{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .btn.sm{padding:3px 10px;font-size:11px}
+  .btn.okb{background:var(--ok)} .btn.fb{background:var(--fail)}
+  /* 待办页 */
+  .todopage{display:none;flex:1;overflow-y:auto;padding:16px 20px}
+  .todopage.show{display:block}
+  .wrap{max-width:900px;margin:0 auto}
+  .h1{font-size:18px;margin-bottom:4px}
+  .sub{font-size:12px;color:var(--muted);margin-bottom:14px}
+  .tabs2{display:flex;gap:6px;margin-bottom:12px}
+  .tab2{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 16px;cursor:pointer;font-size:13px;color:var(--muted)}
+  .tab2.on{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}
+  .qi{border:1px solid var(--line);background:#fff;border-radius:10px;margin-bottom:8px;padding:9px 12px}
+  .qi .t{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .qi .m{font-size:11.5px;color:var(--muted);margin:4px 0 8px}
+  .qi .act{display:flex;gap:6px;flex-wrap:wrap}
+  .qi .act .btn{font-size:11.5px;padding:5px 11px}
+  .prow2{border:1px solid var(--line);background:#fff;border-radius:11px;padding:10px 13px;margin-bottom:9px}
+  .prow2 .pn{font-weight:700;display:flex;align-items:center;gap:8px}
+  .pcard-body{margin-top:7px;font-size:12.5px;line-height:1.9}
+  .scope-closed{background:#f0f8f0;border:1px solid #cde5cd;border-radius:9px;padding:8px 12px;margin-top:6px}
+  .pct{font-size:20px;font-weight:800;color:var(--ok)}
+  .pbar{height:8px;background:#e8dfc9;border-radius:4px;overflow:hidden;margin:5px 0 2px}
+  .pbar i{display:block;height:100%;background:var(--red)}
+  /* 注释 */
+  .note{display:inline-flex;align-items:center;background:var(--note);border:1px dashed #d8b45a;color:#8a6d1f;font-size:10.5px;border-radius:6px;padding:0 7px;cursor:help;position:relative;font-style:normal;vertical-align:1px}
+  .note .tt{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:99;width:250px;background:#3a2c1c;color:#fff;border-radius:9px;padding:9px 11px;font-size:11.5px;line-height:1.6;box-shadow:0 8px 22px rgba(0,0,0,.25);font-weight:400}
+  .note:hover .tt{display:block}
+  .note .tt b{color:#ffd98a}
+  body.no-notes .note{display:none}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#3a2c1c;color:#fff;padding:9px 18px;border-radius:10px;font-size:13px;opacity:0;transition:.25s;z-index:999;pointer-events:none}
+  .toast.show{opacity:1}
+  .empty{color:var(--muted);padding:14px 4px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="logo">Roni Workbench</div>
+    <div class="seg">
+      <button class="on" id="segChat" onclick="goChat()">💬 对话</button>
+      <button id="segTodo" onclick="goTodo()">☀ 待办 <span id="todoN">5</span></button>
+    </div>
+    <div class="spacer"></div>
+    <span class="wdir" id="wdirChip"></span>
+    <button class="toggle-note" id="noteBtn" onclick="toggleNotes()">✏️ 注释：开</button>
+  </div>
+
+  <div class="body" id="bodyChat">
+    <!-- 左：项目文件夹树 -->
+    <div class="side">
+      <div class="side-head">项目文件夹 = 工作目录
+        <span class="note">为什么是文件夹？
+          <span class="tt"><b>一个文件夹=一个项目=Agent 的工作目录</b><br>对话建在文件夹内，当前对话就在该目录里读写文件。文件夹是"容器"，不再到处重复出现。</span></span></div>
+      <div class="side-actions">
+        <button class="sbtn" onclick="newConv()">＋ 新建对话（当前文件夹）</button>
+      </div>
+      <div class="tree" id="tree"></div>
+      <div class="side-foot">
+        <span class="note">任务 vs 对话？
+          <span class="tt"><b>对话=过程（想/做）；任务=状态（在待办页）</b><br>文件夹里只放对话；任务的"待复测"等状态不会混进来，它们在 ☀ 待办页。红色徽标只提示"该文件夹下有待办"，不展开任务。</span></span>
+        徽标=该文件夹的待办数 · 点击进入 ☀ 待办页处理
+      </div>
+    </div>
+
+    <!-- 中：对话 -->
+    <div class="mid">
+      <div class="chat-head">
+        <span class="chat-title" id="chatTitle">—</span>
+        <span class="chip" id="chatCtx"></span>
+        <span class="chip" id="chatType"></span>
+        <div class="spacer"></div>
+        <span class="wdir" id="wdirInHead"></span>
+      </div>
+      <div class="chat" id="chatBox"><div class="empty" id="chatEmpty">← 选择一个对话（左侧文件夹里），或新建对话</div></div>
+      <div class="chatfoot">
+        <input id="chatIn" placeholder="在当前文件夹的工作目录内和 RW 对话…" onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn" onclick="sendChat()">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 待办页 -->
+  <div class="todopage" id="todoPage">
+    <div class="wrap">
+      <div class="h1">☀ 待办：只有你能做的事</div>
+      <div class="sub">处理完一项，系统就继续一步。任务与对话已分开：这里只有"状态"，去 💬 才看得到"过程"。</div>
+      <div class="tabs2">
+        <button class="tab2 on" onclick="todoTab('q')">需要你处理（5）</button>
+        <button class="tab2" onclick="todoTab('p')">项目进度</button>
+      </div>
+      <div id="tabQ">
+        <div class="qi"><div class="t">#128 数据看板接口 <span class="bdg r">项目A</span></div>
+          <div class="m">验收 2 条全过 · 等你复测</div>
+          <div class="act"><button class="btn okb" onclick="qDone(this)">✓ 复测通过</button><button class="btn fb" onclick="qFail(this)">✗ 打回</button><button class="btn gray" onclick="openConvById('conv-a128')">💬 打开绑定对话</button></div></div>
+        <div class="qi"><div class="t">#131 登录改造 <span class="bdg r">项目B</span></div>
+          <div class="m">控制台复核边界已修 · 等你复测</div>
+          <div class="act"><button class="btn okb" onclick="qDone(this)">✓ 通过</button><button class="btn gray" onclick="openConvById('conv-b131')">💬 绑定对话</button></div></div>
+        <div class="qi"><div class="t">#132 微信收口 <span class="bdg r">项目B</span></div>
+          <div class="m">等你复测</div>
+          <div class="act"><button class="btn okb" onclick="qDone(this)">✓ 通过</button><button class="btn gray" onclick="openConvById('conv-b132')">💬 绑定对话</button></div></div>
+        <div class="qi"><div class="t">需求「数据看板」确认 <span class="bdg y">项目A</span></div>
+          <div class="m">AI 已整理需求要点（优先级/类型已定）· 等你拍板立项</div>
+          <div class="act"><button class="btn okb" onclick="qDone(this)">✓ 确认立项</button><button class="btn gray" onclick="openConvById('conv-idea')">💬 先讨论</button></div></div>
+        <div class="qi"><div class="t">提供：官网设计稿 <span class="bdg g">项目C</span></div>
+          <div class="m">AI 卡在资源 · 给 Figma/图片链接即可继续</div>
+          <div class="act"><button class="btn" onclick="qDone(this)">我提供了（模拟）</button></div></div>
+        <div class="sub" style="margin-top:6px">
+          <span class="note">处理完去哪？
+            <span class="tt"><b>点💬=跳到"产生这件事的对话"</b><br>复测通过→任务进入等待部署；确认→立项生成任务并进项目文件夹；资源→AI 继续。队列清空=系统继续跑。</span></span>
+        </div>
+      </div>
+
+      <div id="tabP" style="display:none">
+        <div class="prow2">
+          <div class="pn">项目A · 数据看板 <span class="bdg b">范围已闭合</span> <span class="note">何时给总%？
+            <span class="tt"><b>范围闭合才显示总百分比</b><br>需求 3/3 确认 且 任务 8/8 拆完 = 分母可信 → 才显示 62%。否则只给文字口径，不给假数字。</span></span></div>
+          <div class="pcard-body">
+            需求：3/3 已确认 · 任务：8/8 已拆
+            <div class="scope-closed"><span class="pct">62%</span> 完成（5/8，范围内）<div class="pbar"><i style="width:62%"></i></div></div>
+          </div>
+        </div>
+        <div class="prow2">
+          <div class="pn">项目B · 渠道收口 <span class="bdg y">范围未闭合</span></div>
+          <div class="pcard-body">
+            需求：2/3 已确认（1 个待讨论）· 任务：已拆 5
+            <div style="color:#6b5a41">完成 2/5（仅"已拆范围内"口径；范围未闭合，暂不显示总百分比）</div>
+          </div>
+        </div>
+        <div class="prow2">
+          <div class="pn">项目C · 官网 <span class="bdg y">范围未闭合</span></div>
+          <div class="pcard-body">需求：1/2 已确认 · 任务：已拆 2 · 卡住 1（缺设计稿）</div>
+        </div>
+        <div class="sub" style="margin-top:6px">
+          <span class="note">为什么有的没百分比？
+            <span class="tt"><b>分母没定就没有完成度</b><br>需求没确认完→任务没拆完→总任务数未知→80% 是假精度。项目B/C 当前只显示"已拆范围内完成数"；需求全部确认、任务拆完的瞬间，总 % 才会出现。</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* 数据：文件夹=项目；对话挂在文件夹下 */
+const FOLDERS=[
+ {id:'inbox',name:'未归属想法',icon:'💡',dir:'（尚无工作目录）',badges:[],chats:[
+   {id:'conv-g',title:'新想法：RW 能不能自己接单？',ic:'💡',type:'想法 · 未立项',ctx:'未归属想法',dir:'（未绑定项目）',msgs:[
+     {who:'me',text:'先记个想法：以后 RW 能不能自己找活干？'}, {who:'ai',think:'未立项的想法不进任务体系，先落想法。',text:'收到，先记在未归属想法里。等你想清楚了再说"立项"，它会变成需求并归入某个项目文件夹。'}]}]},
+ {id:'fA',name:'项目A · 数据看板',icon:'📁',dir:'/srv/projects/project-a',badges:['r2','y1'],chats:[
+   {id:'conv-idea',title:'讨论：数据看板需求',ic:'📋',type:'需求讨论',ctx:'项目A · 需求 HH-260901-004',dir:'/srv/projects/project-a',msgs:[
+     {who:'me',text:'想在首页加个数据看板：任务统计+成本+燃尽。'},
+     {who:'ai',think:'先看现有数据源再给方案选项。',tools:[{n:'read_file · 项目基线与元信息.md',s:1},{n:'db_query · tasks/usage',s:1}],text:'看了现有数据，给你三版：A 简洁卡 / B 看板+燃尽 / C 完整报表。推荐 B。'},
+     {who:'me',text:'B。成本区折叠。'},
+     {who:'ai',text:'共识=B。我整理成需求要点，等你在 ☀ 待办里确认立项。'}]},
+   {id:'conv-a128',title:'#128 数据看板接口（执行报告）',ic:'🛠',type:'任务执行报告',ctx:'项目A · 任务 #128',dir:'/srv/projects/project-a',msgs:[
+     {who:'ai',tools:[{n:'read_file · 工单#128',s:1},{n:'write_file · api/stats.js',s:1},{n:'run_test · smoke m6',s:1}],text:'#128 完成并自测通过：GET /api/stats 200 · 冒烟绿。已 finish_task，等你在 ☀ 待办复测。'}]},
+   {id:'conv-aUI',title:'页面样式讨论（看板UI）',ic:'🗂',type:'项目杂谈',dir:'/srv/projects/project-a',ctx:'项目A',msgs:[{who:'me',text:'卡片间距想再松一点。'},{who:'ai',text:'好，记到看板 UI 讨论里，随需求一起走。'}]}]},
+ {id:'fB',name:'项目B · 渠道收口',icon:'📁',dir:'/srv/projects/project-b',badges:['r2'],chats:[
+   {id:'conv-b131',title:'#131 登录改造（执行报告）',ic:'🛠',type:'任务执行报告',dir:'/srv/projects/project-b',ctx:'项目B · #131',msgs:[{who:'ai',text:'#131 首轮边界失败→已修复重提，等你复测。'}]},
+   {id:'conv-b132',title:'#132 微信收口（执行报告）',ic:'🛠',type:'任务执行报告',dir:'/srv/projects/project-b',ctx:'项目B · #132',msgs:[{who:'ai',text:'#132 完成：消息→Idea 落库。等你复测。'}]}]},
+ {id:'fC',name:'项目C · 官网',icon:'📁',dir:'/srv/projects/project-c',badges:['g1'],chats:[
+   {id:'conv-c133',title:'#133 官网首页（执行报告·卡住）',ic:'🛠',type:'任务执行报告',dir:'/srv/projects/project-c',ctx:'项目C · #133',msgs:[{who:'ai',text:'做到样式阶段，需要设计稿。已推飞书问你（资源支持）。'}]}]},
+ {id:'fFold',name:'其余项目（222 / 333 …）',icon:'🗃',dir:'…',badges:[],chats:[
+   {id:'conv-x',title:'项目 222 · 讨论',ic:'🗂',type:'项目杂谈',dir:'/srv/projects/222',ctx:'项目222',msgs:[{who:'me',text:'222 在干嘛？'},{who:'ai',text:'3/3 已完成（范围闭合 100%）。'}]}]},
+];
+let curFolder='fA', curConv=null, todoN=5;
+
+function esc(s){return String(s).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+function renderTree(){
+ const el=document.getElementById('tree');el.innerHTML='';
+ FOLDERS.forEach(f=>{
+  const node=document.createElement('div');node.className='fnode'+(curFolder===f.id?' open':' open');
+  const badges=f.badges.map(b=>`<span class="bdg ${b[0]}">${b[0]==='r'?'待复测':b[0]==='y'?'待确认':'资源'}${b[1]}</span>`).join('');
+  node.innerHTML=`
+   <div class="fhead" onclick="toggleFolder('${f.id}')"><span class="caret">▶</span><span>${f.icon}</span>${f.name}<span class="dir">${f.dir}</span><span class="badges">${badges}</span></div>
+   <div class="chats"></div>`;
+  const cbox=node.querySelector('.chats');
+  f.chats.forEach(c=>{const d=document.createElement('div');d.className='crow'+(curConv===c.id?' on':'');
+   d.innerHTML=`<span class="ic">${c.ic}</span>${c.title}<span class="sub">${c.type}</span>`;
+   d.onclick=()=>openConv(c.id);cbox.appendChild(d);});
+  el.appendChild(node);
+ });
+}
+function toggleFolder(id){curFolder=id;renderTree()}
+function findConv(id){for(const f of FOLDERS){const c=f.chats.find(x=>x.id===id);if(c)return {c,f};}return null}
+function openConv(id){const hit=findConv(id);if(!hit)return;curConv=id;curFolder=hit.f.id;
+ const c=hit.c;document.getElementById('chatTitle').textContent=c.title;
+ document.getElementById('chatCtx').textContent=c.ctx||'';
+ document.getElementById('chatType').textContent=c.type;
+ document.getElementById('wdirChip').textContent='📂 '+c.dir;
+ document.getElementById('wdirInHead').textContent=c.dir;
+ const box=document.getElementById('chatBox');document.getElementById('chatEmpty').style.display='none';
+ box.innerHTML=c.msgs.map(m=>{
+  if(m.who==='me')return `<div class="msg"><div class="ava me">我</div><div class="bub me">${esc(m.text)}</div></div>`;
+  let h=`<div class="msg"><div class="ava ai">RW</div><div class="bub">`;
+  if(m.think)h+=`<div class="think">🧠 ${esc(m.think)}</div>`;
+  if(m.tools)h+=m.tools.map(t=>`<div class="tool">${t.s?'✓':'●'} ${esc(t.n)}</div>`).join('');
+  if(m.text)h+=`<div class="md">${esc(m.text).replace(/\n/g,'<br>')}</div>`;
+  return h+'</div></div>';
+ }).join('');
+ renderTree();goChat();}
+function openConvById(id){openConv(id);toast('已打开绑定对话（任务↔对话的桥）')}
+function newConv(){const f=FOLDERS.find(x=>x.id===curFolder)||FOLDERS[0];
+ const id='new-'+Date.now();f.chats.unshift({id,title:'新对话',ic:'💬',type:'对话 · 在项目内',dir:f.dir,ctx:f.name,msgs:[]});
+ curConv=id;curFolder=f.id;
+ document.getElementById('chatTitle').textContent='新对话（'+f.name+'）';
+ document.getElementById('chatCtx').textContent=f.name;
+ document.getElementById('chatType').textContent='对话 · 工作目录='+f.dir;
+ document.getElementById('wdirChip').textContent='📂 '+f.dir;
+ document.getElementById('wdirInHead').textContent=f.dir;
+ document.getElementById('chatEmpty').style.display='block';
+ renderTree();goChat();toast('新对话已建在「'+f.name+'」，RW 将在此目录内工作')}
+function sendChat(){const v=document.getElementById('chatIn').value.trim();if(!v)return;
+ const box=document.getElementById('chatBox');box.insertAdjacentHTML('beforeend',`<div class="msg"><div class="ava me">我</div><div class="bub me">${esc(v)}</div></div>`);
+ document.getElementById('chatIn').value='';
+ setTimeout(()=>{const dir=document.getElementById('wdirInHead').textContent;box.insertAdjacentHTML('beforeend',`<div class="msg"><div class="ava ai">RW</div><div class="bub"><div class="think">🧠 原型演示</div><div>收到（工作目录：${esc(dir)}）。真实环境：流式回复+工具轨迹。</div></div></div>`);box.scrollTop=box.scrollHeight;},400);}
+/* 视图 */
+function goChat(){document.getElementById('bodyChat').style.display='flex';document.getElementById('todoPage').classList.remove('show');
+ document.getElementById('segChat').classList.add('on');document.getElementById('segTodo').classList.remove('on')}
+function goTodo(){document.getElementById('bodyChat').style.display='none';document.getElementById('todoPage').classList.add('show');
+ document.getElementById('segTodo').classList.add('on');document.getElementById('segChat').classList.remove('on')}
+function todoTab(t){document.querySelectorAll('.tab2').forEach((x,i)=>x.classList.toggle('on',(t==='q')===(i===0)));
+ document.getElementById('tabQ').style.display=t==='q'?'':'none';document.getElementById('tabP').style.display=t==='p'?'':'none'}
+function qDone(btn){todoN--;document.getElementById('todoN').textContent=todoN;btn.closest('.qi').style.opacity=.4;
+ toast('已处理 ✅ 剩余 '+todoN+' 项（真实系统：数字同步到左栏文件夹徽标）');setTimeout(()=>btn.closest('.qi').remove(),500)}
+function qFail(btn){toast('已打回 → 驱动器自动修复重提（原型）');btn.closest('.qi').querySelector('.m').textContent='状态：已打回 · 驱动器修复中'}
+function toggleNotes(){document.body.classList.toggle('no-notes');
+ const on=!document.body.classList.contains('no-notes');
+ document.getElementById('noteBtn').textContent=on?'✏️ 注释：开':'✏️ 注释：关';}
+function toast(t){const e=document.getElementById('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2500)}
+renderTree();
+</script>
+</body>
+</html>
