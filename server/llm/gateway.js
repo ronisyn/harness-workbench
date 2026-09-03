@@ -72,6 +72,8 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
           const j = JSON.parse(data);
           const delta = j.choices?.[0]?.delta?.content;
           const think = j.choices?.[0]?.delta?.reasoning_content;
+          const fr = j.choices?.[0]?.finish_reason;
+          if (fr) ctx.finishReason = fr; // stop|length|…
           if (think && ctx.onThink) ctx.onThink(think);
           if (delta) yield delta;
           if (j.usage && !ctx.usage) {
@@ -115,6 +117,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
   return {
     content: msg.content || '',
     reasoning: msg.reasoning_content || '',
+    finishReason: j.choices?.[0]?.finish_reason || '',
     toolCalls: msg.tool_calls || [],
     usage: { tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0 },
   };

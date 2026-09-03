@@ -326,6 +326,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
 
   const t0 = Date.now();
   let firstTokenMs = 0;
+  const TRUNC_NOTE = '\n\n> ⚠️ 本段输出达到模型单次长度上限（已截断）。需要完整内容的话，告诉我"继续"，我会接着分段输出。';
   const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
@@ -361,6 +362,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       if (result.stopped) { send({ type: 'stopped' }); return; } // 用户点击停止：不落 assistant/统计
       answer = result.content || '（无输出）';
       usage = result.usage || {};
+      if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
       // Agent 路径分块模拟流式
       const chunkSize = 8;
       for (let i = 0; i < answer.length; i += chunkSize) {
@@ -375,6 +377,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         if (!firstTokenMs) firstTokenMs = Date.now() - t0;
         answer += delta;
         send({ type: 'delta', delta });
+      }
+      if (ctx.finishReason === 'length' && answer) {
+        answer += TRUNC_NOTE;
+        for (let i = 0; i < TRUNC_NOTE.length; i += 16) send({ type: 'delta', delta: TRUNC_NOTE.slice(i, i + 16) }); // 标注也实时送达
       }
       usage = ctx.usage || {};
     }

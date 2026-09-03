@@ -93,7 +93,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
-      return { content: res.content || '', toolLog, usage: res.usage };
+      return { content: res.content || '', toolLog, usage: res.usage, finishReason: res.finishReason || '' };
     }
     // 循环检测护栏（可关闭/可调）：连续 N 次 (工具+参数+结果前段相同) 才判定卡死
     const sig = calls.map((c) => {
