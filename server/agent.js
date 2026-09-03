@@ -10,7 +10,7 @@ import { checkpoint } from './runtrack.js';
 // 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)
 let limitsCache = null;
 let limitsCacheAt = 0;
-const DEFAULT_LIMITS = { budgetMin: 120, roundCap: 2000, loopGuard: 6 };
+const DEFAULT_LIMITS = { budgetMin: 120, roundCap: 2000, loopGuard: 6, maxParallelT: 10 };
 
 // 工具结果入上下文前的修剪策略（对齐 3080 tool-result-pruner：保留头+尾，中段截断并注明）
 function contextResultPrune(text, cap) {
@@ -25,13 +25,13 @@ async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...DEFAULT_LIMITS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
       try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
     };
-    limitsCache = { budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap), loopGuard: pick('loop_guard', def.loopGuard) };
+    limitsCache = { budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap), loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT) };
   } catch { limitsCache = def; }
   limitsCacheAt = Date.now();
   return limitsCache;
@@ -151,27 +151,40 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         toolLog, usage: res.usage, paused: true, reason: '连续重复无进展',
       };
     }
-    // 工具调用轮（实时流式：工具开始→执行→完成 均即时上报）
+    // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
     msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
-    for (const call of calls) {
+    const maxPar = lim.maxParallelT > 0 ? lim.maxParallelT : 1; // 0=关闭并行（串行）
+    const results = new Array(calls.length);
+    const execOne = async (call, idx) => {
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
-      const seq = toolLog.length + 1;
+      const seq = idx + 1; // 展示序号=模型顺序（与最终落序一致）
       if (emit) emit({ type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
       const tStart = Date.now();
       const result = await execTool(call.function.name, args, { ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature });
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
       const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
-      toolLog.push(toolItem);
+      results[idx] = toolItem;
       if (emit) emit({ type: 'tool_done', tool: toolItem });
-      // F9：任务清单工具调用后实时同步进度
-      if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
-        const p = plans.get(String(ctx.conversationId || 'g'));
-        if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
-      }
-      const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
-      msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(result), msgCap) });
+      return result;
+    };
+    for (let start = 0; start < calls.length; start += maxPar) {
+      const chunk = calls.slice(start, start + maxPar);
+      const chunkIdx = chunk.map((c) => calls.indexOf(c)); // 原始下标
+      const rawResults = await Promise.all(chunk.map((c, k) => execOne(c, chunkIdx[k])));
+      // 提交顺序 = 模型顺序（顺序化 toolLog/计划事件/tool 消息）
+      chunk.forEach((call, k) => {
+        const idx = chunkIdx[k];
+        const toolItem = results[idx];
+        toolLog.push(toolItem);
+        if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
+          const p = plans.get(String(ctx.conversationId || 'g'));
+          if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
+        }
+        const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
+        msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(rawResults[k]), msgCap) });
+      });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     msgs.push({ role: 'system', content: COMPLETION_HINT });

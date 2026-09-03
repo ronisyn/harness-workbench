@@ -625,22 +625,24 @@ export const TOOLS = [
     } },
 
   // ---------- 运行护栏（set_limits）与平台自重启（reload_platform） ----------
-  { name: 'set_limits', description: '调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）。用户要求"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务"时用它，并汇报调整后的值。', permission: 'write',
+  { name: 'set_limits', description: '调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）；parallel=同一步内并行工具数（0=串行，默认10）。用户要求"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务"时用它，并汇报调整后的值。', permission: 'write',
     params: {
       minutes: { type: 'number', desc: '时间预算(分钟)，0=不限' },
       rounds: { type: 'number', desc: '轮次上限，0=不限' },
       loop: { type: 'number', desc: '循环检测连续次数，0=关闭' },
+      parallel: { type: 'number', desc: '并行工具数，0=串行' },
     },
     run: async (a) => {
       const ups = [];
       if (a.minutes !== undefined) ups.push(['time_budget_min', Math.max(0, Math.floor(Number(a.minutes) || 0))]);
       if (a.rounds !== undefined) ups.push(['round_cap', Math.max(0, Math.floor(Number(a.rounds) || 0))]);
       if (a.loop !== undefined) ups.push(['loop_guard', Math.max(0, Math.floor(Number(a.loop) || 0))]);
-      if (!ups.length) throw new Error('至少提供 minutes/rounds/loop 之一');
+      if (a.parallel !== undefined) ups.push(['max_parallel_tools', Math.max(0, Math.floor(Number(a.parallel) || 0))]);
+      if (!ups.length) throw new Error('至少提供 minutes/rounds/loop/parallel 之一');
       for (const [k, v] of ups) {
         await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [k, JSON.stringify(v)]);
       }
-      return { applied: Object.fromEntries(ups), note: '下一个任务/下一轮立即生效（当前进行中的任务保持启动时的值）。0=不限。默认参考值：120分钟/2000轮/连续6次。' };
+      return { applied: Object.fromEntries(ups), note: '下一个任务/下一轮立即生效（当前进行中的任务保持启动时的值）。0=不限/串行。默认参考值：120分钟/2000轮/连续6次/并行10。' };
     } },
   { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
