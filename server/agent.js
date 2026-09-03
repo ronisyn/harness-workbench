@@ -6,11 +6,11 @@ import { chatOnceWithTools } from './llm/gateway.js';
 import { toolDefs, execTool, plans } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
+import { LIMIT_DEFAULTS } from './settingsSchema.js';
 
-// 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)
+// 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)/task_budget_yuan(成本知情阈值,0=关)
 let limitsCache = null;
 let limitsCacheAt = 0;
-const DEFAULT_LIMITS = { budgetMin: 120, roundCap: 2000, loopGuard: 6, maxParallelT: 10 };
 
 // 工具结果入上下文前的修剪策略（对齐 3080 tool-result-pruner：保留头+尾，中段截断并注明）
 function contextResultPrune(text, cap) {
@@ -43,9 +43,9 @@ function archiveEarlyContext(msgs) {
 }
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
-  const def = { ...DEFAULT_LIMITS };
+  const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -54,9 +54,10 @@ async function agentLimits() {
     limitsCache = {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
+      budgetYuan: pick('task_budget_yuan', 20),
       rev: pick('__policy_rev', 0),
     };
-  } catch { limitsCache = { ...def, rev: 0 }; }
+  } catch { limitsCache = { ...def, budgetYuan: 20, rev: 0 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
 }
@@ -155,6 +156,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += roundCost(provider, u.tokens_in || 0, u.tokens_out || 0);
     } catch { /* 计量失败不影响执行 */ }
+    // WS7.4 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
+    if (lim.budgetYuan > 0 && cumCost > lim.budgetYuan) {
+      return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超知情阈值 ¥${lim.budgetYuan}（设置 task_budget_yuan，可调/0=关）。先停再问：回复"继续"放行下一段，或调高阈值后续跑）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
+    }
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
     const calls = res.toolCalls || [];

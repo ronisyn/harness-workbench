@@ -743,6 +743,29 @@ export const TOOLS = [
     run: async (a) => feishuConfigured() ? await readFeishuSheet(a.url, a.range) : { error: '未配置飞书凭证' } },
   { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
     run: async (a) => feishuConfigured() ? await readFeishuBitable(a.appToken, a.tableId) : { error: '未配置飞书凭证' } },
+
+  // ---------- 会话归档（WS5e：conv_summarize → conv_summaries；结构化存档 v1，后续可接 LLM 语义摘要） ----------
+  { name: 'conv_summarize', description: '归档本/指定会话：把会话要点写入 conv_summaries（统计+首主题+尾部近况），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求"总结这个对话"时用', permission: 'read',
+    params: { conversationId: { type: 'number', desc: '目标会话 id，缺省=当前会话' } },
+    run: async (a, ctx) => {
+      const cid = a.conversationId || ctx.conversationId;
+      if (!cid) throw new Error('缺少会话 id');
+      const ms = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 200', [cid]);
+      if (!ms.length) throw new Error('会话无消息');
+      const total = await db.query('SELECT COUNT(*) c FROM messages WHERE conversation_id=?', [cid]);
+      const first = ms[ms.length - 1]; // 最旧
+      const recent = ms.slice(0, 3).reverse(); // 最近 3 条（时间序）
+      const theme = String(first.content || '').replace(/\s+/g, ' ').slice(0, 120);
+      const tail = recent.map((m) => (m.role === 'user' ? '我: ' : 'AI: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 400)).join('\n');
+      const summary = [
+        '【会话归档 v1】消息总数 ' + total[0].c + '（本次取样后 200 条）',
+        '主题(首条用户): ' + theme,
+        '最近动态:\n' + tail,
+        '（需要完整历史用 db_query 查 messages/tool_calls；语义级摘要为 P2）',
+      ].join('\n');
+      await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [cid, String(summary).slice(0, 6000)]);
+      return { archived: true, conversationId: cid, summaryHead: summary.slice(0, 200) };
+    } },
 ];
 
 export function findTool(name) {

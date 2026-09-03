@@ -19,6 +19,7 @@ import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
+import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -267,11 +268,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
   }
   inflight.set(req.user.id, curInflight + 1);
-  const convs = await db.query('SELECT id, permission, mode, preset FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  const convs = await db.query('SELECT id, permission, mode, preset, project FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1)); return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const permission = convs[0].permission || 'full';
   const convMode = convs[0].mode || 'chat';
   const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
+  const convProject = convs[0].project || 'default';
 
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
@@ -326,6 +328,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const sp = await getSetting('systemPrompt', '');
     if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
   } catch { /* 忽略 */ }
+  // WS5c 项目自我说明（类 AGENTS.md）：projects/<project>/AGENTS.md 存在则注入（每任务必带的项目级事实）
+  try {
+    if (convProject && convProject !== 'default') {
+      const agp = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'projects', convProject, 'AGENTS.md');
+      if (fs.existsSync(agp)) {
+        const ag = fs.readFileSync(agp, 'utf8').slice(0, 16000);
+        messages.push({ role: 'system', content: '【项目 ' + convProject + ' 说明（AGENTS.md）】\n' + ag });
+      }
+    }
+  } catch { /* 项目说明不可用时静默跳过 */ }
   // 断点恢复：本会话存在 interrupted/paused 的长任务现场 → 注入现场信息，支持"继续任务"
   try {
     const hint = await resumeHint(conversationId);
@@ -539,11 +551,15 @@ app.get('/api/settings', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT skey, svalue FROM settings');
   const out = {};
   for (const r of rows) { try { out[r.skey] = JSON.parse(r.svalue); } catch { out[r.skey] = r.svalue; } }
-  res.json({ ok: true, settings: out });
+  res.json({ ok: true, settings: out, schema: SETTINGS_SCHEMA });
 });
 app.put('/api/settings', requireAuth, async (req, res) => {
   const { updates } = req.body || {};
-  for (const [k, v] of Object.entries(updates || {})) await setSetting(k, v);
+  for (const [k, v] of Object.entries(updates || {})) {
+    const chk = validateSetting(k, v);
+    if (!chk.ok) return res.status(400).json({ ok: false, message: chk.error });
+    await setSetting(k, chk.value);
+  }
   res.json({ ok: true });
 });
 
