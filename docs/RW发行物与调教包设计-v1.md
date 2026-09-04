@@ -39,7 +39,7 @@ server/（agent 循环/工具 62/驱动器/调度/渠道/网关）· src+web/（
 | 技能（SKILL.md×5） | packs/rw-core/skills/{explore-discipline,self-audit,task-approach,subagent-prompt,acceptance-builder}/SKILL.md | 实例 $RW_SKILLS/（运行时技能目录） |
 | 护栏/预算默认 | server/settingsSchema.js（代码内 def）+ db.js SEEDS | 自动（initSchema） |
 | 工具启用集默认 25 | server/tools/meta.js DEFAULT_TOOLSET（代码内） | 自动 |
-| 政策版本/阈值种子 | db.js SEEDS：__policy_rev=1、task_budget_yuan=0（单段提醒默认关）、task_budget_total=30 | 自动（initSchema） |
+| 政策版本/阈值种子 | db.js SEEDS：__policy_rev=1、task_budget_yuan=0（单段提醒默认关）、task_budget_total=100 | 自动（initSchema） |
 
 ### 2.3 环境差异位（实例化必填，不随调教包）
 | 位 | 说明 |
