@@ -22,16 +22,19 @@ npm run dev            # localhost:3000
 
 ```
 server/         后端（Node + Express）
-  index.js      入口
-  config.js     配置加载
-  db.js         MySQL 连接
+  index.js      入口：API 路由 + 静态托管 web/dist
+  agent.js      Agent 主循环（工具执行/护栏/子代理编排）
   auth.js       登录/会话/邀请码
-  llm/          多模型网关（OpenAI 兼容）
-    gateway.js  统一调用
-    providers.js 厂商配置
-  routes/       API 路由
-web/            前端（太阳大地色对话界面）
-docs/           需求与文档
+  scheduler.js  定时任务调度 + 空闲长会话自动归档
+  autotitle.js  LLM 会话智能起名
+  llm/          多模型网关（gateway.js 统一调用 / providers.js / market.js）
+  tools/        工具注册表与实现（index.js + checkpoint/hooks/repomap/extract/…）
+  channels/     外部渠道接入（wechat / feishu-webhook）
+src/            前端源码（React + Vite 太阳大地色对话界面）
+web/dist        前端构建产物（vite build 输出，服务端静态托管）
+docs/           需求规格与演进文档
+scripts/        运维脚本（selfcheck.mjs 自检 / kpi.mjs 周报 / verify.mjs）
+prototype/      早期 UI 原型（参考，非运行代码）
 ```
 
 ## 凭据安全
