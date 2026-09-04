@@ -286,10 +286,11 @@ export async function initSchema() {
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
   }
-  // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；成本知情阈值默认 20（schema def 同步）
+  // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；单段成本提醒默认关（0）；
+  // 任务总账默认 30（会话 24h 真上限）；存量旧值 20 由部署时一次性 UPDATE 校正
   const SEEDS = [
     ['__policy_rev', '1'],
-    ['task_budget_yuan', '20'],
+    ['task_budget_yuan', '0'],
     ['task_budget_total', '30'],
   ];
   for (const [k, v] of SEEDS) {

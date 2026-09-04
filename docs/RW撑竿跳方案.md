@@ -136,7 +136,7 @@
   1. 产出 docs/信任契约-v1.md（教学包杆5 定稿）：承诺表——RW：卡住就说原因/不假装完成/不自改需求/超界先问/打回不辩解只修复/动自身代码先申报；你：验收标准开工前成文（create_contract 化）/打回给具体证据（文件+期望-实际）；双向：RW 有权质疑与建议，你确认后才进执行人格，契约不可随意改。
   2. 授权边界表（契约附录三档）：自主=读/查/工作区文件/git_commit(本仓)/测试/技能与知识沉淀；晨间确认（或先问）=reload_platform/db_write/git_pull_push/set_limits 改护栏/delete_file 越工作区；禁止（默认）=删库重置/动工作区外用户文件/外网发布/改用户其他服务。**明示：默认状态=现状全开（cap 全 enable），本表是"可收不可放"的开关位与承诺基线，不是已生效的强制禁止**——收紧只在你显式关 cap 后生效，防"文档承诺与运行时行为落差"的误导。
   3. cap_key 三枚 `rw_autonomy/rw_confirm/rw_forbidden` 说明进契约，UI=设置→能力（已有）。
-  4. 成本知情：`task_budget_yuan`（走 WS4 schema，默认宽 ¥20，0=关）超阈值→运行中 ask_user 确认继续（先停再问；复用 approval/ask 机制）。
+  4. 成本预算：**总账上限** `task_budget_total`（默认 ¥30/会话 24h，跨继续累计，含子代理；超限停止并提示调大，0=不限）；单段节奏提醒 `task_budget_yuan` **默认 0=关**（用户明确不需要中途暂停打扰；需要时自行开启）。
 - 验收：① 契约落库 docs/ ② 边界表每行有 cap_key/工具集合/UI 入口 ③ 设 task_budget_yuan=0.01 跑任务→出现 need_input/approval 事件证据。
 - P1 · 依赖：WS0/WS2/WS4 · 风险：低。
 
