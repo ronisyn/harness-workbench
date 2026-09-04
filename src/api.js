@@ -24,6 +24,7 @@ export const api = {
   conversations: () => request('/api/conversations'),
   createConversation: (title, permission) => request('/api/conversations', { method: 'POST', body: JSON.stringify({ title, permission }) }),
   patchConversation: (id, patch) => request('/api/conversations/' + id, { method: 'PATCH', body: JSON.stringify(patch) }),
+  autoTitle: (id, force) => request('/api/conversations/' + id + '/autotitle', { method: 'POST', body: JSON.stringify({ force: !!force }) }),
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
   messages: (id) => request('/api/conversations/' + id + '/messages'),
   toolcalls: (id) => request('/api/conversations/' + id + '/toolcalls'),

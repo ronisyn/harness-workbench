@@ -138,6 +138,8 @@ export default function Chat({ user, onLogout }) {
   const [model, setModel] = useState('');
   const [modelList, setModelList] = useState([]);
   const [input, setInput] = useState('');
+  const inputRef = useRef('');      // 输入框最新值同步 ref（切换会话存档草稿用，防闭包读到旧值）
+  const draftsRef = useRef({});     // 草稿按会话隔离：draftsRef[convId]=该会话未发送文字
   const [busy, setBusy] = useState(false);
   // WS4：设置 schema（GET /api/settings 返回）驱动渲染非 runtime 键（budget 等）
   const [settingsSchema, setSettingsSchema] = useState([]);
@@ -249,6 +251,11 @@ export default function Chat({ user, onLogout }) {
   };
 
   const openConv = async (id) => {
+    // 草稿按会话隔离：切走前保存当前会话未发送文字，切回时恢复（避免"输入的文字跨会话残留"）
+    if (cur && cur !== id && inputRef.current) draftsRef.current[cur] = inputRef.current;
+    const savedDraft = draftsRef.current[id] || '';
+    setInput(savedDraft);
+    inputRef.current = savedDraft;
     setCur(id);
     setStickBottom(true); // 切换会话：回到贴底跟随（避免停留在上一会话的滚动位置）
     actSeqRef.current = 0;
@@ -275,14 +282,17 @@ export default function Chat({ user, onLogout }) {
     // 会话级模型：新会话继承当前选中的厂商/模型（打开即恢复）
     try { await api.patchConversation(d.id, { provider, model: model || null }); } catch { /* ignore */ }
     await loadConvs();
+    if (cur && inputRef.current) draftsRef.current[cur] = inputRef.current; // 离开当前会话：保留其草稿
     setCur(d.id); setCurTitle('新对话'); setMsgs([]); setToolcalls([]); setStats({}); setStickBottom(true);
+    setInput(''); inputRef.current = ''; // 新会话不继承任何会话的草稿
   };
 
   const delConv = async (id, e) => {
     e.stopPropagation();
     if (!confirm('删除该会话及其消息？')) return;
     await api.deleteConversation(id);
-    if (cur === id) { setCur(null); setCurTitle(''); setMsgs([]); setStats({}); }
+    delete draftsRef.current[id]; // 删除会话同时清除其草稿
+    if (cur === id) { setCur(null); setCurTitle(''); setMsgs([]); setStats({}); setInput(''); inputRef.current = ''; }
     loadConvs();
   };
 
@@ -372,6 +382,7 @@ export default function Chat({ user, onLogout }) {
     if (!text || busyRef.current) return;
     busyRef.current = true; setBusy(true); busyConvRef.current = convId;
     setInput('');
+    inputRef.current = ''; delete draftsRef.current[convId]; // 内容已发出：清空输入框与该会话草稿
     const tmpId = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     setMsgs((m) => [...m, { role: 'user', content: text }]);
     let acc = '';
@@ -427,6 +438,8 @@ export default function Chat({ user, onLogout }) {
               loadStats(convId);
               api.toolcalls(convId).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
             }
+            // 智能起名：回复完成后若标题仍为默认，用 LLM 生成精髓标题（服务端仅默认名才更新，保护手动重命名）
+            api.autoTitle(convId).then((d) => { if (d && d.ok && d.title) { setConvs((cs) => cs.map((x) => (x.id === convId ? { ...x, title: d.title } : x))); if (curRef.current === convId) setCurTitle(d.title); } }).catch(() => {});
             flushQueue(); // 本轮回合结束：如有排队消息自动发送下一条
           },
           onError: (msg) => {
@@ -442,7 +455,7 @@ export default function Chat({ user, onLogout }) {
       setBusy(false); busyConvRef.current = null;
       // 只收尾本次流消息（_tmpId 锚定，不污染其它会话）；发送失败时提示并恢复输入内容
       setMsgs((prev) => prev.map((x) => (x._tmpId === tmpId ? { ...x, streaming: false, thinking: false, error: isStop ? undefined : String(ex.message || '发送失败') } : x)));
-      if (!isStop && curRef.current === convId && !acc) setInput(text);
+      if (!isStop && curRef.current === convId && !acc) { setInput(text); inputRef.current = text; draftsRef.current[convId] = text; } // 发送失败：恢复输入并保留草稿
       if (!isStop) flushQueue(); // 用户主动停止：队列保留（停止后仍可手动发/点停止仅中止当前轮）；异常结束：继续队列
     }
   };
@@ -453,7 +466,7 @@ export default function Chat({ user, onLogout }) {
     if (!content || !cur) return;
     if (busyRef.current) {
       queueRef.current = [...queueRef.current, content];
-      setQueue(queueRef.current); setInput('');
+      setQueue(queueRef.current); setInput(''); inputRef.current = ''; delete draftsRef.current[cur]; // 已入队将发送：不留草稿
       setToast('⏳ 任务执行中：已排队 ' + queueRef.current.length + ' 条，结束后自动发送');
       return;
     }
@@ -667,15 +680,6 @@ export default function Chat({ user, onLogout }) {
       <div className="rw-body">
         {/* 左栏 */}
         <aside className="rw-side">
-          <div className="rw-side-model">
-            <select className="rw-select" value={provider} onChange={(e) => switchProvider(e.target.value)}>
-              <option value="auto">🤖 自动路由</option>
-              {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <select className="rw-select rw-model-sel" value={model} onChange={(e) => { const mv = e.target.value; setModel(mv); saveModelSel(provider, mv); }} title="选择模型（跟随当前会话，切换即保存）">
-              {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : <option value="">默认</option>}
-            </select>
-          </div>
           <button className="rw-btn pri rw-newbtn" onClick={newConv}>＋ 新建对话</button>
           <div className="rw-side-list">
             {convs.map((c) => (
@@ -703,6 +707,16 @@ export default function Chat({ user, onLogout }) {
 
         {/* 对话区 */}
         <main className="rw-main">
+          <div className="rw-chat-modelbar">
+            <span className="rw-chat-model-lb" title="模型跟随当前对话，切换只影响本对话">🤖 本对话模型</span>
+            <select className="rw-select" value={provider} onChange={(e) => switchProvider(e.target.value)} title="厂商：切厂商后选模型">
+              <option value="auto">自动路由</option>
+              {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <select className="rw-select rw-model-sel" value={model} onChange={(e) => { const mv = e.target.value; setModel(mv); saveModelSel(provider, mv); }} title="模型（豆包/DeepSeek 等，随本对话保存）">
+              {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : <option value="">默认</option>}
+            </select>
+          </div>
           {pends && pends.items && pends.items.length > 0 && (
             <div className="rw-pendbar">
               <b className="rw-pend-title">⚠ 待处理请求（断连/刷新后可在此补答）</b>
@@ -777,7 +791,7 @@ export default function Chat({ user, onLogout }) {
               )}
               <div className="rw-inputrow">
                 <textarea className="rw-input" rows="2" placeholder="输入消息：Enter 发送，Shift+Enter 换行；任务执行中也可输入，会自动排队…" value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={(e) => { setInput(e.target.value); inputRef.current = e.target.value; }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); send(); }
                   }} disabled={!cur} />
