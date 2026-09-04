@@ -147,6 +147,8 @@ export default function Chat({ user, onLogout }) {
   const actSeqRef = useRef(0);
   const lastActRef = useRef(0);
   const busyRef = useRef(false);
+  const curRef = useRef(null);      // 当前正在查看的会话 id（流式回调据此判断是否已切走，防跨会话污染）
+  const busyConvRef = useRef(null); // 正在生成中的会话 id（发送时锁定，停止/结束时清空）
   const [stats, setStats] = useState({});
   const [drawer, setDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState('caps');
@@ -280,10 +282,15 @@ export default function Chat({ user, onLogout }) {
   });
 
   const stopGen = () => {
-    if (abortRef.current) abortRef.current.abort();
-    if (cur) api.stopChat(cur).catch(() => {}); // 服务端中止 Agent 轮（不再落库）
-    setBusy(false);
+    const convId = busyConvRef.current || curRef.current;
+    // 先通知服务端（abort 'user'：占位消息标记为"用户点击停止"而非"连接断开"），
+    // 稍后本地断流；兜底 4s 强制断，避免 stopChat 未达时流一直挂着
+    if (convId) api.stopChat(convId).catch(() => {});
+    if (abortRef.current) { const ac = abortRef.current; setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, 300); }
+    setBusy(false); busyConvRef.current = null;
     setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
+    // 停止后拉库对齐（服务端占位消息带中断原因+已执行进度），避免本地半截流内容与库不一致
+    setTimeout(() => { if (curRef.current === convId) { loadMessages(convId).catch(() => {}); } }, 800);
   };
 
   // F20 审批裁决：批准/拒绝 guard 会话中挂起的高风险工具
@@ -303,15 +310,17 @@ export default function Chat({ user, onLogout }) {
   const send = async () => {
     const content = input.trim();
     if (!content || busy || !cur) return;
-    setInput(''); setBusy(true);
+    setInput(''); setBusy(true); busyConvRef.current = cur;
+    const convId = cur; // 本次发送锁定的会话：所有流式回调只更新该会话内由本次生成的消息
+    const tmpId = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     setMsgs((m) => [...m, { role: 'user', content }]);
     let acc = '';
-    setMsgs((m) => [...m, { role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [], asks: [] }]);
+    setMsgs((m) => [...m, { _tmpId: tmpId, role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [], asks: [] }]);
     const ac = new AbortController();
     abortRef.current = ac;
     try {
-      // 轨迹辅助：按 seq 更新 running 卡片（工具完成时替换）
-      const patchLast = (fn) => setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? fn(x) : x)));
+      // 轨迹辅助：按 _tmpId 锚定本次流式消息（会话中途切换后不污染其它会话的消息/历史加载结果）
+      const patchLast = (fn) => setMsgs((prev) => (curRef.current === convId ? prev.map((x) => (x._tmpId === tmpId ? fn(x) : x)) : prev));
       await streamChat({ conversationId: cur, content, provider, model: model || undefined },
         {
           onDelta: (delta) => {
@@ -319,7 +328,8 @@ export default function Chat({ user, onLogout }) {
             patchLast((x) => ({ ...x, content: acc, thinking: false }));
           },
           onThinking: () => {
-            // AI 处理中（保留 thinking 指示）
+            // 新一轮 LLM 调用开始：恢复“思考中”指示（工具完成后→下一轮输出间的空白期有反馈）
+            patchLast((x) => ({ ...x, thinking: true }));
           },
           onThink: (text) => {
             // 思考过程实时累积（灰色斜体区）
@@ -351,23 +361,33 @@ export default function Chat({ user, onLogout }) {
           },
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
-            setBusy(false);
-            loadStats(cur);
-            api.toolcalls(cur).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
+            setBusy(false); busyConvRef.current = null;
+            // 仍在看本会话才刷新统计/抽屉（防覆盖已切走会话的显示）
+            if (curRef.current === convId) {
+              loadStats(convId);
+              api.toolcalls(convId).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
+            }
           },
-          onError: (msg) => { setToast(msg); patchLast((x) => ({ ...x, streaming: false, thinking: false })); setBusy(false); },
+          onError: (msg) => {
+            setToast(msg); setBusy(false); busyConvRef.current = null;
+            patchLast((x) => ({ ...x, streaming: false, thinking: false, error: msg }));
+          },
         },
         ac.signal);
     } catch (ex) {
-      if (ex.name !== 'AbortError') { setToast(ex.message); }
-      setMsgs((m) => m.map((x) => ({ ...x, streaming: false, thinking: false })));
-      setBusy(false);
+      const isStop = ex.name === 'AbortError';
+      if (!isStop) setToast(ex.message);
+      setBusy(false); busyConvRef.current = null;
+      // 只收尾本次流消息（_tmpId 锚定，不污染其它会话）；发送失败时提示并恢复输入内容
+      setMsgs((prev) => prev.map((x) => (x._tmpId === tmpId ? { ...x, streaming: false, thinking: false, error: isStop ? undefined : String(ex.message || '发送失败') } : x)));
+      if (!isStop && curRef.current === convId && !acc) setInput(content);
     }
   };
 
   // 活动轮询（旁观/断连兜底）：当前会话每 2.5s 拉事件环增量；
   // 本页 busy（SSE 直连渲染中）只推进 seq 不重复渲染；静默>6s 视为本轮结束→自动刷新最新结果
   React.useEffect(() => { busyRef.current = busy; }, [busy]);
+  React.useEffect(() => { curRef.current = cur; }, [cur]); // 会话切换即时同步（流式回调守卫用）
   React.useEffect(() => {
     if (!cur) return;
     const t = setInterval(async () => {
@@ -449,14 +469,20 @@ export default function Chat({ user, onLogout }) {
   const toggleTask = async (id, enabled) => { await api.patchTask(id, { enabled }); loadTasks(); };
   const delTask = async (id) => { if (!confirm('删除该定时任务？')) return; await api.deleteTask(id); loadTasks(); };
 
+  const saveTimer = useRef({});
+  const debounced = (key, ms, fn) => {
+    clearTimeout(saveTimer.current[key]);
+    saveTimer.current[key] = setTimeout(fn, ms);
+  };
+
   const setTemp = async (v) => {
     setTemperature(v);
-    try { await api.setSettings({ temperature: v }); } catch { /* ignore */ }
+    debounced('temp', 500, () => { try { api.setSettings({ temperature: v }).catch(() => {}); } catch { /* ignore */ } });
   };
 
   const saveSysPrompt = async (v) => {
     setSysPrompt(v);
-    try { await api.setSettings({ systemPrompt: v }); } catch { /* ignore */ }
+    debounced('sys', 800, () => { try { api.setSettings({ systemPrompt: v }).catch(() => {}); } catch { /* ignore */ } });
   };
 
   const saveLim = async (k, v) => {
@@ -465,8 +491,14 @@ export default function Chat({ user, onLogout }) {
     if (k === 'time_budget_min') setLimBudget(val);
     else if (k === 'round_cap') setLimRounds(val);
     else if (k === 'loop_guard') setLimLoop(val);
-    else setLimParallel(val);
-    try { await api.setSettings({ [k]: val }); setToast('护栏已更新（0=不限，下个任务生效）'); } catch { /* ignore */ }
+    else if (k === 'max_parallel_tools') setLimParallel(val);
+    debounced('lim-' + k, 600, () => {
+      try {
+        api.setSettings({ [k]: val }).then(() => {
+          if (k === 'time_budget_min' || k === 'round_cap' || k === 'loop_guard' || k === 'max_parallel_tools') setToast('护栏已更新（0=不限，立即生效）');
+        }).catch(() => {});
+      } catch { /* ignore */ }
+    });
   };
 
   const loadMarket = async () => {
@@ -609,8 +641,10 @@ export default function Chat({ user, onLogout }) {
                           </div>
                         )}
                         {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
-                        {m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />}
-                        {m.streaming && !m.content && !m.thinking && <span className="rw-caret">▋</span>}
+                        {m.error ? <div className="rw-err">⚠️ {m.error}</div> : null}
+                        {!m.error && m.content && (m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />)}
+                        {!m.error && !m.content && !m.thinking && m.streaming && <span className="rw-caret">▋</span>}
+                        {!m.error && !m.content && !m.streaming && <div className="rw-emptynote">（本轮未产生文本输出——结果见上方工具轨迹）</div>}
                       </>
                     : <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
                 </div>

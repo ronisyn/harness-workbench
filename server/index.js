@@ -265,9 +265,9 @@ async function getSetting(key, def) {
     try { return JSON.parse(r[0].svalue); } catch { return r[0].svalue; } // 兼容已 JSON 序列化与裸文本
   } catch { return def; }
 }
-async function setSetting(key, val) {
+async function setSetting(key, val, noBump) {
   await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
-  await bumpPolicyRev(); // 政策版本自增：运行时快照据此提示模型"规则已更新"
+  if (!noBump) await bumpPolicyRev(); // 政策版本自增：仅护栏/政策类键（运行时快照提示模型"规则已更新"）；普通参数高频调整不应使版本抖动
 }
 
 // ---------- 模型路由（F11 自动路由） ----------
@@ -657,10 +657,11 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 });
 app.put('/api/settings', requireAuth, async (req, res) => {
   const { updates } = req.body || {};
+  const GUARD_KEYS = new Set(SETTINGS_SCHEMA.filter((s) => s.group === 'runtime').map((s) => s.key));
   for (const [k, v] of Object.entries(updates || {})) {
     const chk = validateSetting(k, v);
     if (!chk.ok) return res.status(400).json({ ok: false, message: chk.error });
-    await setSetting(k, chk.value);
+    await setSetting(k, chk.value, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
   }
   res.json({ ok: true });
 });

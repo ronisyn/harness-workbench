@@ -272,3 +272,6 @@ body {
 .rw-toolgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 8px; max-height: 46vh; overflow: auto; padding: 4px 2px; }
 .rw-toolgrid .rw-cap-item { font-size: 12px; gap: 4px; }
 .rw-tool-tier { font-style: normal; opacity: 0.45; font-size: 10px; margin-left: auto; }
+
+.rw-err { color: #c0392b; background: rgba(192,57,43,.08); border: 1px solid rgba(192,57,43,.25); border-radius: 8px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; }
+.rw-emptynote { color: var(--rw-muted); font-size: 13px; font-style: italic; }
