@@ -870,7 +870,7 @@ export async function execTool(name, args, ctx) {
     // 有专门工具却以 cat/ls/grep/find/sed(-i 除外)/head/cd/echo 开头 → 拦截+指引。
     // 放行：tail（日志跟随）、sed -i（批量编辑无工具等价）、git/npm/node/curl/ps/awk 管道等系统操作（B 桶）。
     if (!blocked && name === 'run_command') {
-      const cmdline = String(args.command || '').trim();
+      const cmdline = String(args.cmd ?? args.command ?? '').trim();
       const first = cmdline.split(/\s+/)[0];
       const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
       if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
