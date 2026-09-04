@@ -70,6 +70,15 @@ function contextResultPrune(text, cap) {
   return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
 }
 
+// B6 假完成检测辅助：取最近一条用户消息文本（用于判断是否"任务语境"）
+function lastUserTextOf(msgs) {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m && m.role === 'user') return String(m.content || '');
+  }
+  return '';
+}
+
 // 每轮费用=真实三档计费（calcCost：hit/miss/out，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
 // 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
@@ -89,7 +98,7 @@ async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -99,6 +108,7 @@ async function agentLimits() {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
       budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 100),
+      fakeContinueWarn: pick('fake_continue_warn', def.fakeContinueWarn),
       rev: pick('__policy_rev', 0),
     };
   } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0 }; }
@@ -116,6 +126,7 @@ export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问�
   '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
   '行动原则（务必遵守）：',
   '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
+  '- **假完成会被平台打回**：任务语境下若你直接回复"已执行/已完成/已提交"等完成声称但本轮无任何工具调用记录，平台会自动打回要求补真实执行；连续不改则你的回复会被强制加注"未经工具验证"。诚实路径：真做→展示结果；或明确声明"本轮未执行工具操作"。',
   '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
   '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理/git/日志跟随），避免 shell 引号管道坑。想敲 cat/ls/grep/find/sed/head 读文件时先停——平台会拦并提示（读型命令门禁，审计显示 58% 的 shell 调用本可用专门工具）。',
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
@@ -152,6 +163,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let dispSeq = 0;        // 展示序号：全 run 唯一单调递增（子代理/并行不撞号）
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
+  let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
   const t0 = Date.now();
   let cumTin = 0, cumTout = 0, cumCost = 0; // WS2 本任务累计钱包（每轮计量后累加）
 
@@ -289,6 +301,24 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
       let final = res.content || '';
+      // B6 假完成检测（平台强制，非提示词）：声称"已执行/已完成"但本轮 toolLog 为空（未调用任何工具）→ 打回
+      // 适用：任务语境（用户下达了执行类指令/恢复了挂起任务），模型却直接输出"完成了/提交了/改好了"等完成声称。
+      // 语义：纯问答（知识性/闲聊）不带执行声称词 → 不触发；空答兜底 final 自动生成摘要 → 不触发（final 非模型声称）。
+      if (lim.fakeContinueWarn > 0 && toolLog.length === 0) {
+        const claimRe = /(已(完成|实现|落地|修复|写入|创建|提交|删除|修改|部署|上线|清理)|commit [0-9a-f]{7,}|✅|验收通过|测试通过|全部通过)/;
+        const isClaim = claimRe.test(final);
+        const taskish = /(继续任务|继续执行|开始执行|接着做|接着改|请(执行|修复|优化|实现|落地|部署|清理|提交)|帮我(修复|改|写|建|实现|优化|清理|部署)|修复|优化|实现|落地|部署|提交|执行|清理|体检|改造|推进)/.test(lastUserTextOf(msgs));
+        if (isClaim && taskish) {
+          if (fakeWarnCount < lim.fakeContinueWarn) {
+            fakeWarnCount++;
+            msgs.push({ role: 'system', content: '【平台强制检测：本轮声称完成但无工具调用】你上一条回复声称已执行完成（"' + String(final).replace(/\s+/g, ' ').slice(0, 120) + '"），但本轮没有任何工具执行记录。请立即用真实工具完成所述工作并展示结果；若你确实无法执行或本轮仅为说明，请明确说明"本轮未实际执行任何工具操作"，不要声称完成。' });
+            continue; // 打回重答
+          }
+          // 已达打回上限：放行但强制标注"未经验证"，避免假完成直接以可信姿态收尾
+          final = '⚠️【平台检测：本回复声称已执行完成，但本轮无任何工具调用记录，内容未经工具验证】\n' + final;
+          emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型声称完成但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
+        }
+      }
       // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
       if (!final.trim() && toolLog.length > 0) {
         const names = {};
