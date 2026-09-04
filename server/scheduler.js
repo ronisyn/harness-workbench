@@ -1,8 +1,9 @@
-// server/scheduler.js - 定时任务（F14/C12）
+// server/scheduler.js - 定时任务（F14/C12）+ 空闲会话自动归档（WS5e P2 触发）
 // cron 简化格式："分 时 日 月 周"（* 通配，如每日 2:30 = "30 2 * * *"）
 // 调度器每分钟检查一次到期任务 → 创建/复用会话执行 runAgent → 记录结果
 import { db } from './db.js';
 import { runAgent } from './agent.js';
+import { summarizeConversation } from './tools/index.js';
 import { config } from './config.js';
 
 export function cronToNext(cron, from = new Date()) {
@@ -101,4 +102,22 @@ export function startScheduler() {
     } catch (e) { /* 调度循环容错 */ }
   }, 60000);
   console.log('[scheduler] 定时任务调度器已启动（每分钟检查，并发≤2）');
+  // WS5e P2 自动归档：每 10 分钟扫"24h 无消息且消息数>60 且摘要落后于最后活动"的会话，自动 summarizeConversation（最多 3 个/轮）
+  setInterval(async () => {
+    try {
+      const cands = await db.query(
+        `SELECT c.id FROM conversations c
+         WHERE c.channel='web'
+           AND c.updated_at < NOW() - INTERVAL 24 HOUR
+           AND (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) > 60
+           AND NOT EXISTS (SELECT 1 FROM conv_summaries s WHERE s.conversation_id=c.id AND s.updated_at > c.updated_at)
+         ORDER BY c.updated_at ASC LIMIT 3`);
+      for (const c of cands) {
+        try { await summarizeConversation(c.id, { semantic: true, keys: config.keys }); }
+        catch (e) { console.error('[scheduler] 归档失败 conv#' + c.id + ':', e.message); }
+      }
+      if (cands.length) console.log('[scheduler] 自动归档', cands.length, '个空闲长会话');
+    } catch (e) { /* 归档扫描容错 */ }
+  }, 600000);
+  console.log('[scheduler] 空闲会话自动归档已启动（每 10 分钟）');
 }

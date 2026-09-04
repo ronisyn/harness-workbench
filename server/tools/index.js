@@ -750,40 +750,44 @@ export const TOOLS = [
   // ---------- 会话归档（WS5e：conv_summarize → conv_summaries；v2=语义摘要（LLM），失败/关闭时回退结构化 v1） ----------
   { name: 'conv_summarize', description: '归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求"总结这个对话"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）', permission: 'read',
     params: { conversationId: { type: 'number', desc: '目标会话 id，缺省=当前会话' }, semantic: { type: 'boolean', desc: 'true=强制 LLM 语义摘要；缺省自动（>80 条消息时）' } },
-    run: async (a, ctx) => {
-      const cid = a.conversationId || ctx.conversationId;
-      if (!cid) throw new Error('缺少会话 id');
-      const ms = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 300', [cid]);
-      if (!ms.length) throw new Error('会话无消息');
-      const total = await db.query('SELECT COUNT(*) c FROM messages WHERE conversation_id=?', [cid]);
-      const useLLM = a.semantic === true || ms.length > 80;
-      let summary = null;
-      if (useLLM && ctx.__keys) {
-        try {
-          const ordered = ms.slice().reverse(); // 时间序
-          const text = ordered.map((m) => (m.role === 'user' ? '我：' : 'AI：') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 600)).join('\n').slice(-24000);
-          const r = await chatOnce(ctx.__provider || 'deepseek',
-            [
-              { role: 'system', content: '你是会话归档器。把下面的对话压缩为 ≤300 字中文要点摘要，必须覆盖：①主题与目标 ②关键决策/结论（含路径、编号、文件）③进行中/未完成事项 ④用户偏好与约定 ⑤风险提示。只输出摘要本体，不要解释。' },
-              { role: 'user', content: text },
-            ],
-            { model: ctx.__model || 'deepseek-v4-flash', maxTokens: 800, timeoutMs: 90000 }, ctx.__keys);
-          summary = '【会话归档 v2 语义摘要】\n' + String(r.content || '').trim().slice(0, 4000);
-        } catch (e) { summary = '【会话归档 v2 语义摘要生成失败，回退结构化】' + (e.message || '').slice(0, 200); }
-      }
-      if (!summary) {
-        const first = ms[ms.length - 1];
-        const recent = ms.slice(0, 3).reverse();
-        summary = [
-          '【会话归档 v1 结构化】消息总数 ' + total[0].c,
-          '主题(首条用户): ' + String(first.content || '').replace(/\s+/g, ' ').slice(0, 120),
-          '最近动态:\n' + recent.map((m) => (m.role === 'user' ? '我: ' : 'AI: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 400)).join('\n'),
-        ].join('\n');
-      }
-      await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [cid, String(summary).slice(0, 6000)]);
-      return { archived: true, conversationId: cid, semantic: useLLM, summaryHead: summary.slice(0, 200) };
-    } },
+    run: async (a, ctx) => summarizeConversation(a.conversationId || ctx.conversationId, { semantic: a.semantic, provider: ctx.__provider, model: ctx.__model, keys: ctx.__keys }) },
 ];
+
+// 会话归档共享实现（conv_summarize 工具与 scheduler 自动归档共用；scheduler 无 keys 时自动回退结构化）
+export async function summarizeConversation(cid, opts = {}) {
+  const conversationId = Number(cid);
+  if (!conversationId) throw new Error('缺少会话 id');
+  const ms = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 300', [conversationId]);
+  if (!ms.length) throw new Error('会话无消息');
+  const total = await db.query('SELECT COUNT(*) c FROM messages WHERE conversation_id=?', [conversationId]);
+  const keys = opts.keys || {};
+  const useLLM = opts.semantic === true || ms.length > 80;
+  let summary = null;
+  if (useLLM && keys && Object.keys(keys).length) {
+    try {
+      const ordered = ms.slice().reverse(); // 时间序
+      const text = ordered.map((m) => (m.role === 'user' ? '我：' : 'AI：') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 600)).join('\n').slice(-24000);
+      const r = await chatOnce(opts.provider || 'deepseek',
+        [
+          { role: 'system', content: '你是会话归档器。把下面的对话压缩为 ≤300 字中文要点摘要，必须覆盖：①主题与目标 ②关键决策/结论（含路径、编号、文件）③进行中/未完成事项 ④用户偏好与约定 ⑤风险提示。只输出摘要本体，不要解释。' },
+          { role: 'user', content: text },
+        ],
+        { model: opts.model || 'deepseek-v4-flash', maxTokens: 800, timeoutMs: 90000 }, keys);
+      summary = '【会话归档 v2 语义摘要】\n' + String(r.content || '').trim().slice(0, 4000);
+    } catch (e) { summary = '【会话归档 v2 语义摘要生成失败，回退结构化】' + (e.message || '').slice(0, 200); }
+  }
+  if (!summary) {
+    const first = ms[ms.length - 1];
+    const recent = ms.slice(0, 3).reverse();
+    summary = [
+      '【会话归档 v1 结构化】消息总数 ' + total[0].c,
+      '主题(首条用户): ' + String(first.content || '').replace(/\s+/g, ' ').slice(0, 120),
+      '最近动态:\n' + recent.map((m) => (m.role === 'user' ? '我: ' : 'AI: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 400)).join('\n'),
+    ].join('\n');
+  }
+  await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, String(summary).slice(0, 6000)]);
+  return { archived: true, conversationId, semantic: useLLM, summaryHead: summary.slice(0, 200) };
+}
 
 export function findTool(name) {
   return TOOLS.find((t) => t.name === name);
