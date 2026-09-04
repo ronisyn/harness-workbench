@@ -16,6 +16,7 @@ import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { startDriver } from './driver.js';
+import { autoTitle } from './autotitle.js';
 import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
@@ -161,6 +162,11 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   params.push(req.params.id, req.user.id);
   await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
   res.json({ ok: true });
+});
+
+app.post('/api/conversations/:id/autotitle', requireAuth, async (req, res) => {
+  try { res.json(await autoTitle(req.params.id, req.user.id, !!req.body?.force)); }
+  catch (e) { res.status(500).json({ ok: false, message: String(e.message) }); }
 });
 
 app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
