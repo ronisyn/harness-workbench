@@ -7,7 +7,7 @@ import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider } from './llm/providers.js';
-import { chatStream } from './llm/gateway.js';
+import { chatStream, calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
@@ -286,12 +286,7 @@ function resolveRoute(content, provider, model) {
   return route;
 }
 
-// ---------- 费用单价（元/百万 token，近似；F13 费用统计） ----------
-const PRICE_IN = { deepseek: 1, glm: 2, ark: 0.3, moonshot: 4, dashscope: 0.5, tokenhub: 2, qianfan: 8, minimax: 5, siliconflow: 2 };
-const PRICE_OUT = { deepseek: 2, glm: 5, ark: 0.8, moonshot: 16, dashscope: 2, tokenhub: 5, qianfan: 20, minimax: 12, siliconflow: 5 };
-function estCost(providerId, tin, tout) {
-  return ((tin / 1e6) * (PRICE_IN[providerId] ?? 2) + (tout / 1e6) * (PRICE_OUT[providerId] ?? 6)).toFixed(4);
-}
+// 费用=真实三档计费（calcCost，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
@@ -521,8 +516,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       if (!useTools) {
         const tin = usage.tokens_in || 0;
         const tout = usage.tokens_out || 0;
-        await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, first_token_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"request")',
-          [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, estCost(provider, tin, tout), Date.now() - t0, firstTokenMs]);
+        const chit = usage.cache_hit || 0;
+        const cmiss = usage.cache_miss != null ? usage.cache_miss : Math.max(0, tin - chit);
+        const cost = calcCost(provider, { hit: chit, miss: cmiss, out: tout });
+        await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, first_token_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW(),"request")',
+          [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, chit, cmiss, cost, Date.now() - t0, firstTokenMs]);
       }
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复

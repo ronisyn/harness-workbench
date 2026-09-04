@@ -2,6 +2,34 @@
 // 护栏标准（参照 3080）：模型 API 调用超时 60-90s；流式连接 60s
 import { findProvider } from './providers.js';
 
+// 真实计费价目（元/M tokens，三档 hit/miss/out）
+// deepseek 档=2026-09 真实账单加权有效单价（平台两档价并存，按用量加权：hit≈0.086/miss≈2.30/out≈8.0）；
+// 其它厂商无账单明细，沿用平台报价近似（hit 按 miss×5% 估算）
+export const PRICE = {
+  deepseek: { hit: 0.086, miss: 2.3, out: 8.0 },
+  glm: { hit: 0.1, miss: 2, out: 5 },
+  ark: { hit: 0.02, miss: 0.3, out: 0.8 },
+  moonshot: { hit: 0.2, miss: 4, out: 16 },
+  dashscope: { hit: 0.03, miss: 0.5, out: 2 },
+  tokenhub: { hit: 0.1, miss: 2, out: 5 },
+  qianfan: { hit: 0.4, miss: 8, out: 20 },
+  minimax: { hit: 0.25, miss: 5, out: 12 },
+  siliconflow: { hit: 0.1, miss: 2, out: 5 },
+};
+export function calcCost(providerId, tokens = {}) {
+  const p = PRICE[providerId] || { hit: 0.1, miss: 2, out: 6 };
+  const hit = Number(tokens.hit) || 0;
+  const miss = Number(tokens.miss) || 0;
+  const out = Number(tokens.out) || 0;
+  return Number(((hit / 1e6) * p.hit + (miss / 1e6) * p.miss + (out / 1e6) * p.out).toFixed(4));
+}
+// 从响应 usage 提取缓存拆分（deepseek 专有字段优先，OpenAI cached_tokens 回退）
+const cacheOf = (u = {}) => {
+  const hit = u.prompt_cache_hit_tokens != null ? u.prompt_cache_hit_tokens : (u.prompt_tokens_details?.cached_tokens || 0);
+  const miss = u.prompt_cache_miss_tokens != null ? u.prompt_cache_miss_tokens : Math.max(0, (u.prompt_tokens || 0) - Number(hit || 0));
+  return { cache_hit: Number(hit) || 0, cache_miss: Number(miss) || 0 };
+};
+
 function resolve(providerId, keys) {
   const p = findProvider(providerId);
   if (!p) throw new Error('未知厂商: ' + providerId);
@@ -24,7 +52,7 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
   if (!res.ok) throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
   const content = j.choices?.[0]?.message?.content || '';
   const usage = j.usage || {};
-  return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0 };
+  return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0, ...cacheOf(usage) };
 }
 
 // 流式调用：async generator，产出 content 增量；思考内容经 ctx.onThink 回调；ctx.usage 带回用量
@@ -80,7 +108,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
             ctx.usage = {
               tokens_in: j.usage.prompt_tokens || 0,
               tokens_out: j.usage.completion_tokens || 0,
-              cache_hit: j.usage.prompt_tokens_details?.cached_tokens || 0,
+              ...cacheOf(j.usage),
             };
           }
         } catch { /* 忽略不完整帧 */ }
@@ -119,7 +147,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     reasoning: msg.reasoning_content || '',
     finishReason: j.choices?.[0]?.finish_reason || '',
     toolCalls: msg.tool_calls || [],
-    usage: { tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0 },
+    usage: { tokens_in: usage.prompt_tokens || 0, tokens_out: usage.completion_tokens || 0, ...cacheOf(usage) },
   };
 }
 

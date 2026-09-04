@@ -143,6 +143,7 @@ const SCHEMA = [
     duration_ms INT DEFAULT 0,
     first_token_ms INT DEFAULT 0,
     cache_hit_tokens INT DEFAULT 0,
+    cache_miss_tokens INT DEFAULT 0,
     kind VARCHAR(16) DEFAULT 'request',
     created_at DATETIME DEFAULT NOW(),
     INDEX idx_usage_time (created_at),
@@ -282,6 +283,7 @@ export async function initSchema() {
     "ALTER TABLE conversations ADD COLUMN preset VARCHAR(8) DEFAULT 'all'",
     "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
     'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
+    'ALTER TABLE usage_stats ADD COLUMN cache_miss_tokens INT DEFAULT 0',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

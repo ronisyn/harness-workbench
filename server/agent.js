@@ -2,7 +2,7 @@
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
-import { chatOnceWithTools, chatOnce } from './llm/gateway.js';
+import { chatOnceWithTools, chatOnce, calcCost } from './llm/gateway.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -70,12 +70,7 @@ function contextResultPrune(text, cap) {
   return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
 }
 
-// 每轮 LLM 用量的费用估算（元，近似；与 usage_stats.cost 口径一致）
-const P_IN = { deepseek: 1, glm: 2, ark: 0.3, moonshot: 4, dashscope: 0.5, tokenhub: 2, qianfan: 8, minimax: 5, siliconflow: 2 };
-const P_OUT = { deepseek: 2, glm: 5, ark: 0.8, moonshot: 16, dashscope: 2, tokenhub: 5, qianfan: 20, minimax: 12, siliconflow: 5 };
-function roundCost(providerId, tin, tout) {
-  return Number(((tin / 1e6) * (P_IN[providerId] ?? 2) + (tout / 1e6) * (P_OUT[providerId] ?? 6)).toFixed(4));
-}
+// 每轮费用=真实三档计费（calcCost：hit/miss/out，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
 // 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
 // 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
@@ -276,12 +271,13 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const llmT0 = Date.now();
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset, ctx.__enabledTools), keys, temperature);
     const llmMs = Date.now() - llmT0;
-    // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id），子代理/渠道/定时同源覆盖
+    // 全量计量（账本=真实消耗，三档计费 hit/miss/out）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id）
     try {
       const u = res.usage || {};
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,NOW(),"round")',
-        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
-      cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += roundCost(provider, u.tokens_in || 0, u.tokens_out || 0);
+      const cost = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokens_in || 0) - (u.cache_hit || 0), out: u.tokens_out || 0 });
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
+        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs]);
+      cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += cost;
     } catch { /* 计量失败不影响执行 */ }
     // WS7.4/5.7 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
     if (effBudgetYuan > 0 && cumCost > effBudgetYuan) {
