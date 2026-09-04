@@ -39,11 +39,11 @@
 ## 2. 真实差距（外部 CLI 有、RW 暂无，建议按批次落地）
 
 ### P1（高价值，推荐下一批做）
-1. **⬜ hooks 事件系统（Claude Code 特色）**
+1. **✅ hooks 事件系统（Claude Code 特色）**（落地：server/tools/hooks.js 事件总线 + execTool 前/后集成 + hooks_list 工具，本批）
    - 外部：PreToolUse / PostToolUse / Stop / SubagentStop 等事件钩子，可在工具调用前后自动注入提示或执行脚本。
    - RW 现状：无 hooks；工具门禁靠 preset 静态集合（tools/index.js GUARDED/MUTATING_TOOLS）。
    - 价值：让"工具使用纪律/失败自检/停止善后"从提示词纪律变成平台强制钩子。
-   - 建议落地：tools/index.js 加轻量 eventBus：execTool 前/后按工具名触发注册的 hook（先做内置 hook 表，如 write/edit 后自动提示 git commit；run_command 前强制注入 timeout 提示）。
+   - 落地记录：server/tools/hooks.js 轻量事件总线（registerHook/listHooks/clearHook/emitHooks，上限 128 条，按注册顺序执行，stop 短路）；execTool 在工具执行【前】触发 before 钩子（可 {stop,reason} 拦截或 {args} 浅合并改写参数）、【后】触发 after 钩子（观察审计，stop 仅留痕 result.hookAfter）；任何钩子抛错 warn 忽略，内置安全钩子（builtin+failClosed）异常时保守拦截，钩子永不拖垮主流程。内置 2 个强制纪律钩子：danger_command_guard（before run_command：rm -rf /与/*、fork bomb、dd 写盘、mkfs、shutdown/reboot、kill 1、chmod -R 777 / 等 fail-closed 拦截；精确路径 rm -rf 不误伤）与 system_write_guard（before 带 path 写工具：写 /etc /boot /usr/bin 等系统关键区 fail-closed 拦截；工作区/平台代码正常写）。模型侧只读 hooks_list 工具（core，已入默认启用集）排查"已被 hook 拦截"原因；清除/追加钩子仅平台管理员在配置/代码侧 registerHook 完成（不给模型动态注册，防伪纪律）。冒烟脚本 verify_hooks.mjs 16 PASS（拦截/放行不误伤/参数改写/抛错容错/stop 短路）。
 2. **✅ 文件改动自动 checkpoint/undo（Claude Code checkpoint / Aider 自动 git）**（落地：server/tools/checkpoint.js + undo_checkpoint 工具 + execTool 集成）
    - 外部：每次文件修改前自动建恢复点（git 提交或快照），失败可回滚。
    - RW 现状：git_commit 工具靠 Agent 自觉 + 行为准则 4.2 纪律，无自动快照。
@@ -72,11 +72,11 @@
   但 server/scheduler.js 实测只有 scheduled_tasks 表驱动，**无自动归档逻辑** → 文档超前于实现。
   处理：若保留该 P2，需在 scheduler 增加周期扫描（注意 LLM 成本，建议仅对 >40 条消息的静默会话触发）；或改文档标注"未实现"。
 
-## 4. 执行顺序建议
-1. P1-2 自动 checkpoint（安全网，改动小，立即受益于自我修改场景）
-2. P1-1 hooks 事件表（先内置 3-4 个强制钩子，验证价值后再开放注册）
-3. P2-3 repo_map（大仓库任务提效）
-4. P2-4 双模型交叉验证（可选，配合审计需求）
+## 4. 执行顺序建议（1-2 已完成，剩余按序推进）
+1. ✅ P1-2 自动 checkpoint（安全网，改动小，立即受益于自我修改场景）
+2. ✅ P1-1 hooks 事件表（先内置 3-4 个强制钩子，验证价值后再开放注册）——已内置 2 个强制安全钩子验证价值；开放注册待 P2 repo_map 之后再评估（避免模型动态注册制造伪纪律）
+3. ⬜ P2-3 repo_map（大仓库任务提效）
+4. ⬜ P2-4 双模型交叉验证（可选，配合审计需求）
 每项走：git_commit 当前状态 → 改 → syntax_check → reload_platform → E2E 冒烟 → 更新本文档勾选。
 
 ## 5. 一句话回答（本文档的结论）

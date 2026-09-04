@@ -12,6 +12,7 @@ import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
+import { emitHooks, listHooks } from './hooks.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -913,9 +914,24 @@ export async function execTool(name, args, ctx) {
     if (blocked) {
       result = { error: blocked };
     } else {
-      // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
-      try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
-      result = await tool.run(args, eff);
+      // P1-1 hooks（借鉴 Claude Code PreToolUse）：工具执行前触发已注册钩子——可拦截（{stop,reason}）或改写参数（{args} 浅合并）。
+      // 内置安全钩子 fail-closed（danger_command_guard / system_write_guard）；钩子抛错不拖垮主流程（emitHooks 内部已兜底）
+      let hookStop = null;
+      const payload = { args, ctx: eff };
+      try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
+      if (hookStop && hookStop.stopped) {
+        result = { error: '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）' };
+      } else {
+        if (payload.args !== args) args = payload.args; // 钩子改写后的参数（浅合并结果）
+        // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
+        try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
+        result = await tool.run(args, eff);
+        // P1-1 hooks after（观察/审计；不阻断已完成的执行，stop 仅留痕到 result.hookAfter）
+        try {
+          const ha = await emitHooks('after', name, { args, result, ctx: eff });
+          if (ha.stopped && result && typeof result === 'object' && !Array.isArray(result)) result.hookAfter = 'stopped:' + (ha.reason || '');
+        } catch { /* after 钩子异常忽略 */ }
+      }
     }
   } catch (e) {
     result = { error: e.message };
@@ -945,5 +961,17 @@ TOOLS.push({
     const cid = a.convId || ctx.conversationId || ctx.accountId || 'anon';
     if (a.list) return { checkpoints: listCheckpoints(cid, 10) };
     return undoCheckpoint(cid, a.n ?? 1);
+  },
+});
+
+// P1-1 hooks_list：查看事件钩子注册（排查"已被 hook 拦截"原因；只读审计，不暴露清除能力给模型）
+TOOLS.push({
+  name: 'hooks_list',
+  description: '列出当前已注册的 hooks 事件钩子（before/after、目标工具、名称、是否内置）。当工具执行返回"已被 hook 拦截"时，用它查看是哪个纪律钩子拦的、为什么',
+  permission: 'read',
+  params: {},
+  run: async () => {
+    const hooks = listHooks();
+    return { hooks, note: '内置钩子为平台强制安全纪律（fail-closed：danger_command_guard 拦破坏性命令、system_write_guard 拦系统关键区写入）；before 钩子可拦截工具或浅合并改写参数，after 钩子为观察/审计。平台管理员可在配置/代码中用 registerHook 追加（模型侧只读）' };
   },
 });

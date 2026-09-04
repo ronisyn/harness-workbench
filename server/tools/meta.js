@@ -10,6 +10,7 @@ export const TOOL_META = {
   append_file: { tier: 'core', when: '文件末尾追加（日志/渐进内容）', not: '覆盖/创建用 write_file', ex: 'append_file {path, content}' },
   edit_file: { tier: 'core', when: '精确局部替换（old 需与文件内容唯一匹配）', not: '未先 read_file 不要盲改；大段重写用 write_file', ex: 'edit_file {path, old, new}' },
   undo_checkpoint: { tier: 'core', when: '改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）', not: '正常小错用 edit_file 直接修', ex: 'undo_checkpoint {list:true} 或 {n:1}' },
+  hooks_list: { tier: 'core', when: '查看已注册 hooks（工具被"已被 hook 拦截"时排查是哪个纪律钩子）', not: '清除/调整钩子属平台管理，模型侧只读', ex: 'hooks_list {}' },
   list_dir: { tier: 'core', when: '列目录看结构、确认路径存在', not: '递归找文件用 find_file', ex: 'list_dir {path}' },
   mkdir: { tier: 'core', when: '创建目录', not: '创建文件用 write_file', ex: 'mkdir {path}' },
   copy_move: { tier: 'core', when: '复制或移动文件/目录', not: '删除用 delete_file', ex: 'copy_move {src, dst, mode:"copy"}' },
@@ -79,7 +80,7 @@ export const DEFAULT_TOOLSET = [
   'db_query', 'git_status', 'git_commit',
   'plan_tasks', 'plan_done', 'finish_task', 'ask_user', 'set_goal',
   'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
-  'undo_checkpoint',
+  'undo_checkpoint', 'hooks_list',
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
 export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];
