@@ -328,7 +328,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   }
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
-  for (const m of hist) messages.push({ role: m.role, content: m.content });
   // F10 目标注入：会话存在 active 目标时提醒持续推进（目标由 set_goal 工具创建；表缺失等异常不阻断对话）
   try {
     const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
@@ -397,6 +396,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         '- 用户批准（如说"开始/按计划执行"）后，在普通模式下再实施。',
       ].join('\n'),
     });
+  }
+
+  // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
+  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化；
+  // assistant 超长文逐条截断（保留头+尾，DB messages 表仍有全文，不影响 UI 回看）
+  for (const m of hist) {
+    let c = String(m.content || '');
+    if (m.role === 'assistant' && c.length > 4000) {
+      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
+    }
+    messages.push({ role: m.role, content: c });
   }
 
   // SSE 头

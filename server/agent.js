@@ -84,8 +84,8 @@ function lastUserTextOf(msgs) {
 // 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
 // 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
 function archiveEarlyContext(msgs) {
-  if (msgs.length <= 110) return;
-  const keepFrom = msgs.length - 100;
+  if (msgs.length <= 90) return;
+  const keepFrom = msgs.length - 80;
   for (let i = 1; i < keepFrom; i++) {
     const m = msgs[i];
     if (!m) continue;
@@ -168,6 +168,9 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let cumTin = 0, cumTout = 0, cumCost = 0; // WS2 本任务累计钱包（每轮计量后累加）
 
   // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
+  // 2026-09 token 优化（缓存友好）：快照内容每轮变化（轮次/用时/累计 token），若插在历史前（splice(1,0)）
+  // 会击穿 DeepSeek 前缀缓存（缓存要求前缀完全一致 → 整段历史 100% 按 miss 全价计费，miss/hit 价差 27 倍）。
+  // 改为 append 到消息末尾：前缀 = ENV_MAP + 历史保持稳定 → 历史命中 hit 价，仅尾部增量按 miss 计费。
   const pushSnapshot = async (round, lim) => {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
@@ -181,7 +184,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       + ' | 会话 mode=' + (ctx.mode || 'chat') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
       + ' | 政策版本 rev ' + lim.rev + resume
       + '\n以本快照为准；政策版本变化=规则已更新，丢弃旧理解。';
-    msgs.splice(1, 0, { role: 'system', content: snap });
+    msgs.push({ role: 'system', content: snap });
   };
 
   // 5.2 后台/子代理完成通知（事件驱动化：父代理轮间自动获知完成，无需反复轮询）
@@ -217,19 +220,19 @@ export async function runAgent({ provider, model, messages, permission = 'full',
 
   // 5.1 语义折叠（按 harness 压缩标准）：早期已完成轮次用一次 LLM 摘要折叠成 1 条 system，
   // 防止长任务上下文涨到 10 万 token 顶格（每轮 3 万→尾段 10 万是慢与贵的根因）；
-  // 折叠后保留最近 100 条；间隔 ≥30 轮可再次折叠；明细始终在 DB tool_calls 可查
+  // 折叠后保留最近 80 条；间隔 ≥20 轮可再次折叠；明细始终在 DB tool_calls 可查
   let lastCollapseRound = -99;
   const maybeCollapseEarly = async (round) => {
-    if (round - lastCollapseRound < 30) return false;
-    const end = msgs.length - 100;
+    if (round - lastCollapseRound < 20) return false;
+    const end = msgs.length - 80;
     if (end <= 2) return false;
     let totalChars = 0;
     for (let i = 1; i < end; i++) totalChars += String(msgs[i]?.content || '').length + 60;
-    if (totalChars < 45000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
+    if (totalChars < 30000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
     const head = msgs.slice(1, end);
     const text = head
-      .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 700))
-      .join('\n').slice(-22000);
+      .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 500))
+      .join('\n').slice(-18000);
     let digest = '';
     try {
       const r = await chatOnce(ctx.__provider || 'deepseek',
@@ -243,8 +246,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     msgs.splice(1, end - 1, {
       role: 'system',
       content: digest
-        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 100 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
-        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 100 条）；明细在 DB tool_calls，可用 db_query 查询】',
+        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 80 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
+        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 80 条）；明细在 DB tool_calls，可用 db_query 查询】',
     });
     lastCollapseRound = round;
     return true;
