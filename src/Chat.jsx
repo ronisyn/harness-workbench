@@ -139,6 +139,9 @@ export default function Chat({ user, onLogout }) {
   const [modelList, setModelList] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // WS4：设置 schema（GET /api/settings 返回）驱动渲染非 runtime 键（budget 等）
+  const [settingsSchema, setSettingsSchema] = useState([]);
+  const [sval, setSval] = useState({});
   // 活动轮询（旁观/断连实时性兜底：事件环增量 + 活动条 + 完成自动刷新）
   const [live, setLive] = useState(null); // {last, tools, ts}
   const actSeqRef = useRef(0);
@@ -406,6 +409,8 @@ export default function Chat({ user, onLogout }) {
     const d = await api.capabilities();
     setCaps(d.list);
     api.getSettings().then((s) => {
+      setSettingsSchema(s.schema || []);
+      setSval(s.settings || {});
       if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
       if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
       if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
@@ -654,6 +659,13 @@ export default function Chat({ user, onLogout }) {
                       <label>并行工具 <input className="rw-input" type="number" min="0" value={limParallel} onChange={(e) => saveLim('max_parallel_tools', e.target.value)} /></label>
                     </div>
                   </div>
+                  {settingsSchema.filter((s) => s.group !== 'runtime').map((s) => (
+                    <div key={s.key} className="rw-cap-item col">
+                      <span style={{ marginBottom: 4 }}>{s.label}（{s.hint || ''}）</span>
+                      <input className="rw-input" type="number" min={s.min || 0} value={sval[s.key] ?? s.def ?? ''}
+                        onChange={(e) => { const v = e.target.value; setSval((o) => ({ ...o, [s.key]: v })); saveLim(s.key, v); }} />
+                    </div>
+                  ))}
                 </div>
               )}
               {drawerTab === 'caps' && ['A', 'B', 'C'].map((g) => (
