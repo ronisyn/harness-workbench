@@ -237,10 +237,12 @@ export const TOOLS = [
   { name: 'extract_pptx', description: '提取 PPT 文本', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractPptx(a.path)).slice(0, 20000) }) },
 
   // ---------- B21/B22 数据库（全局权限） ----------
-  { name: 'db_query', description: '数据库只读查询（SELECT）', permission: 'global',
+  { name: 'db_query', description: '数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。', permission: 'global',
     params: { sql: { type: 'string', required: true } },
     run: async (a) => {
-      if (!/^\s*select\b/i.test(a.sql)) throw new Error('仅允许 SELECT');
+      if (!/^\s*select\b/i.test(a.sql)) {
+        throw new Error('仅支持单条 SELECT（当前语句被拒）。不支持 SHOW/EXPLAIN/多语句/写操作。查表清单：SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()；查某表列：SELECT column_name FROM information_schema.columns WHERE table_name=\'<表名>\'。请改用 SELECT 或先查 information_schema。');
+      }
       const rows = await db.query(a.sql);
       return { rowCount: rows.length, rows: rows.slice(0, 50) };
     } },

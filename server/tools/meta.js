@@ -32,7 +32,7 @@ export const TOOL_META = {
   extract_docx: { tier: 'pro', when: '解析 Word 文本', not: '文本文件用 read_file', ex: 'extract_docx {path}' },
   extract_xlsx: { tier: 'pro', when: '解析 Excel 内容', not: '文本文件用 read_file', ex: 'extract_xlsx {path}' },
   extract_pptx: { tier: 'pro', when: '解析 PPT 文本', not: '文本文件用 read_file', ex: 'extract_pptx {path}' },
-  db_query: { tier: 'pro', when: '只读查库（SELECT；用量/会话/工具统计/系统表）', not: '写库用 db_write；查文件内容用 grep', ex: 'db_query {sql:"SELECT COUNT(*) FROM usage_stats"}' },
+  db_query: { tier: 'pro', when: '只读查库（单条 SELECT；用量/会话/工具统计）', not: '写库用 db_write；SHOW/多语句不支持；表列结构先查 information_schema，勿猜列名', ex: 'db_query {sql:"SELECT COUNT(*) FROM usage_stats"}' },
   git_status: { tier: 'pro', when: '提交前查看工作区状态', not: '看提交历史用 run_command git log', ex: 'git_status {dir}' },
   git_commit: { tier: 'pro', when: '小步提交（自改纪律：改前先提交当前状态）', not: '未验证代码不提交', ex: 'git_commit {dir, message}' },
   git_branch: { tier: 'pro', when: '分支 list/create/checkout', not: '推送用 git_pull_push', ex: 'git_branch {dir, action:"list"}' },
