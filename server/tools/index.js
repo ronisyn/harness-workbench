@@ -51,7 +51,14 @@ function inside(p, root) {
 function runCmd(cmd, args, opts = {}, timeout = 30000) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 8000), err: String(stderr || '').slice(0, 2000) });
+      const pr = (s, cap) => {
+        const t = String(s || '');
+        if (t.length <= cap) return t;
+        const head = Math.floor(cap * 0.7);
+        const tail = Math.floor(cap * 0.2);
+        return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
+      };
+      resolve({ ok: !err, code: err?.code ?? 0, out: pr(stdout, 8000), err: pr(stderr, 2000) });
     });
   });
 }
