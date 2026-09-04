@@ -31,6 +31,22 @@ function PlanCard({ plan }) {
 // （状态 + 名称 + 次数 + 末次结果一行预览 + 耗时），点击行才展开完整参数/结果；文件工具可打开
 const FILE_TOOLS = ['read_file', 'write_file', 'append_file', 'edit_file', 'extract_pdf', 'extract_docx', 'extract_xlsx', 'extract_pptx', 'syntax_check', 'ocr_image', 'view_image'];
 const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+// P2 UI diff 视图：结果文本含 diff 特征（转义 \n 的 -/+ 行 或 "diff" 字段）→ 渲染着色 diff 块
+const isDiffLike = (v) => /\\n[+-] /.test(String(v ?? '')) || /"diff"\s*:/.test(String(v ?? ''));
+function DiffBlock({ text }) {
+  const pretty = String(text ?? '').replace(/\\n/g, '\n');
+  const lines = pretty.split('\n').slice(0, 150);
+  return (
+    <pre className="rw-diff">
+      {lines.map((ln, i) => {
+        const del = /^-(?![-\s])/.test(ln) || /^-\s/.test(ln);
+        const add = /^\+(?!\+)/.test(ln);
+        const cls = del ? ' del' : add ? ' add' : '';
+        return <div key={i} className={'rw-diff-l' + cls}>{ln || '\u00A0'}</div>;
+      })}
+    </pre>
+  );
+}
 
 function TraceCard({ items }) {
   const [open, setOpen] = React.useState(false);
@@ -84,7 +100,9 @@ function TraceCard({ items }) {
               <div key={xi} className={'rw-trace-step' + (x.status === 'fail' ? ' fail' : '')}>
                 <div className="rw-trace-step-head">{list.length > 1 ? '#' + (xi + 1) + ' ' : ''}{x.name} · {x.status === 'done' ? '✓' : x.status === 'running' ? '● 运行中' : '✕'} {x.duration_ms ? ((x.duration_ms / 1000).toFixed(1) + 's') : ''}</div>
                 {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 500)}</pre></div> : null}
-                {xres ? <div className="rw-trace-line"><b>结果</b><pre>{xres.slice(0, 1000)}</pre></div> : null}
+                {xres ? (isDiffLike(xres)
+                  ? <div className="rw-trace-line"><b>结果（diff）</b><DiffBlock text={xres} /></div>
+                  : <div className="rw-trace-line"><b>结果</b><pre>{xres.slice(0, 1000)}</pre></div>) : null}
               </div>
             );
           })}
@@ -648,13 +666,18 @@ export default function Chat({ user, onLogout }) {
               {drawerTab === 'trace' && (
                 <div className="rw-trace">
                   <div className="rw-cap-gtitle">工具调用轨迹</div>
-                  {toolcalls.length ? toolcalls.map((t) => (
+                  {toolcalls.length ? toolcalls.map((t) => {
+                    const rsum = String(t.result_summary || '');
+                    return (
                     <div key={t.id} className="rw-trace-item">
                       <div className="rw-trace-head"><b>{t.tool_name}</b> <span className={'rw-trace-status ' + t.status}>{t.status}</span> {t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : ''}</div>
                       <div className="rw-trace-args">参数：{String(t.args || '').slice(0, 150)}</div>
-                      <div className="rw-trace-res">结果：{String(t.result_summary || '').slice(0, 200)}</div>
-                    </div>
-                  )) : <div className="rw-empty">本会话暂无工具调用</div>}
+                      <div className="rw-trace-res">结果：{rsum.slice(0, 200)}</div>
+                      {isDiffLike(rsum) && (
+                        <details className="rw-diff-details"><summary>diff 视图</summary><DiffBlock text={rsum} /></details>
+                      )}
+                    </div>);
+                  }) : <div className="rw-empty">本会话暂无工具调用</div>}
                 </div>
               )}
 
