@@ -858,18 +858,23 @@ export async function execTool(name, args, ctx) {
         }
       }
     }
-    // WS1 preset 暴露面：非 all 会话调用未暴露层级的工具 → 指引性错误（不静默）；run_command 命令纪律软门禁
+    // WS1 preset 暴露面：非 all 会话调用未暴露层级的工具 → 指引性错误（不静默）
     if (!blocked && ctx.preset && ctx.preset !== 'all') {
       const allowT = ctx.preset === 'minimal' ? new Set(['core']) : ctx.preset === 'standard' ? new Set(['core', 'pro']) : null;
       const metaTier = TOOL_META[name]?.tier;
       if (allowT && metaTier && !allowT.has(metaTier)) {
         blocked = `工具 ${name}（${metaTier} 级）不在当前会话 preset=${ctx.preset} 的暴露范围。可 ask_user 请用户把 preset 切到 standard/all，或改用 core 级工具完成。`;
       }
-      if (!blocked && name === 'run_command') {
-        const first = String(args.command || '').trim().split(/\s+/)[0];
-        if (/^(cat|ls|grep|sed|head|tail|find|cd|echo)$/.test(first || '')) {
-          blocked = `run_command 软门禁：${first} 有专门工具（read_file/list_dir/grep_search/find_file 等），请改用专门工具（preset=all 会话不受此限）。`;
-        }
+    }
+    // run_command 读型命令门禁（全部会话生效；审计 58% 的 shell 调用本可用专门工具）：
+    // 有专门工具却以 cat/ls/grep/find/sed(-i 除外)/head/cd/echo 开头 → 拦截+指引。
+    // 放行：tail（日志跟随）、sed -i（批量编辑无工具等价）、git/npm/node/curl/ps/awk 管道等系统操作（B 桶）。
+    if (!blocked && name === 'run_command') {
+      const cmdline = String(args.command || '').trim();
+      const first = cmdline.split(/\s+/)[0];
+      const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
+      if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
+        blocked = `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。`;
       }
     }
     // 5.3c 启用集门禁：账号工具启用集未包含且非平台豁免 → 指引（可恢复：设置→工具 勾选）

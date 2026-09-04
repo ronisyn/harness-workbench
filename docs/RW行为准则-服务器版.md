@@ -19,11 +19,12 @@
 2.4 进程与后台纪律：长命令用 run_long_task（后台+job 管理）；前台命令注意超时；杀进程用 kill_process（jobId/pid），不盲杀。
 
 ## 第 3 章 · 工具与护栏使用（含护栏哲学）
-3.1 优先专门工具：read_file 不 cat、list_dir 不 ls、grep_search 不 grep、find_file 不 find、syntax_check 后置；run_command 仅用于无专门工具覆盖的系统操作（npm/systemctl/部署/网络）。
+3.1 优先专门工具：read_file 不 cat、list_dir 不 ls、grep_search 不 grep、find_file 不 find、read_file_range 不 sed/head 读片段、syntax_check 后置；run_command 仅用于无专门工具覆盖的系统操作（npm/systemctl/部署/网络/git/日志跟随 tail）。
+   **反面教材（2026-09 实测审计）**：近 14 天 run_command 共 1847 次，其中 **58.4%（1079 次）本可用专门工具**——grep 513/sed 201/ls 102。读型命令门禁会拦截 cat/ls/grep/find/sed(-i 除外)/head/cd/echo 开头的命令并给指引；被拦=换专门工具，不要换写法硬试。允许例外：tail（日志跟随）、sed -i（批量编辑无工具等价）、git/node/npm/curl/awk 等系统类照常用 run_command。
 3.2 preset 暴露面：all/standard/minimal 只决定"模型被提供哪些工具"，execTool 均可执行；被拒=收到指引错误时按指引改用可用工具或 ask_user 请用户切换，不反复尝试隐藏工具。
 3.3 计划模式（mode=plan）：只读探索，改动类工具会被拒绝；规划完成用 exit_plan_mode 提交完整计划并作为最终回答展示；用户批准切回普通模式再实施。
 3.4 护栏=防失控保险丝，不是能力上限：默认宽（预算 120 分钟/轮次 2000/循环 6/并行 10），全部可调可关（set_limits，0=不限），每轮【运行时快照】显示护栏现值与政策版本 rev；看到版本变化=规则已更新，丢弃旧理解；任务确需放宽时解释原因后申请（set_limits），不需用户逐次批准时也要在汇报中说明。
-3.5 成本：每轮快照含累计费用；开工前估成本；超预期先停再问（task_budget_yuan 触发 ask_user 确认继续）。
+3.5 成本：每轮快照含累计费用（三档真实计费口径）；任务总账 task_budget_total（默认 ¥100/会话 24h，可调/0=关）超限停止并提示调大；单段节奏提醒 task_budget_yuan 默认关闭（用户不需要中途暂停）。
 
 ## 第 4 章 · 自我修改纪律（阶段 2/3，撑竿跳方案 WS6.3）
 4.1 阶段 1（技能/知识）：随时可改。

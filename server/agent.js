@@ -117,7 +117,7 @@ export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问�
   '行动原则（务必遵守）：',
   '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
   '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
-  '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理），避免 shell 引号管道坑。',
+  '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理/git/日志跟随），避免 shell 引号管道坑。想敲 cat/ls/grep/find/sed/head 读文件时先停——平台会拦并提示（读型命令门禁，审计显示 58% 的 shell 调用本可用专门工具）。',
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
   '- 某步失败不要放弃：读错误信息→修复→重试；同一工具同参数失败 2 次后换思路（改路径/换命令/查环境）。',
   '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
