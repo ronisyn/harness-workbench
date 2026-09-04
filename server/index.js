@@ -137,23 +137,26 @@ app.put('/api/toolset', requireAuth, async (req, res) => {
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
   const rows = await db.query(
-    'SELECT id, channel, permission, preset, title, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
+    'SELECT id, channel, permission, preset, title, provider, model, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
   res.json({ ok: true, conversations: rows });
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
-  const { title, permission, preset } = req.body || {};
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset) VALUES (?,?,?,?)',
-    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all']);
+  const { title, permission, preset, provider, model } = req.body || {};
+  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model) VALUES (?,?,?,?,?,?)',
+    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
+      provider || null, model || null]);
   res.json({ ok: true, id: r.insertId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
-  const { title, permission, preset } = req.body || {};
+  const { title, permission, preset, provider, model } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
   if (permission !== undefined) { set.push('permission=?'); params.push(permission); }
   if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
+  if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
+  if (model !== undefined) { set.push('model=?'); params.push(model || null); }
   if (!set.length) return res.json({ ok: true });
   params.push(req.params.id, req.user.id);
   await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);

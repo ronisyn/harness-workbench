@@ -294,6 +294,9 @@ export async function initSchema() {
     "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
     'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
     'ALTER TABLE usage_stats ADD COLUMN cache_miss_tokens INT DEFAULT 0',
+    // 2026-09 对话内模型：conversations 记录每会话选中的 provider/model（前端打开会话时恢复、切换即保存）
+    "ALTER TABLE conversations ADD COLUMN provider VARCHAR(32)",
+    "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

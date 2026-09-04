@@ -168,8 +168,14 @@ export default function Chat({ user, onLogout }) {
   const [limParallel, setLimParallel] = useState(10);
   const [tasks, setTasks] = useState([]);
   const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
+  const [queue, setQueue] = useState([]);       // 输入队列：执行中输入的消息排队，结束后自动发送
+  const queueRef = useRef([]);                  // 队列同步 ref（回调判空/取队首不依赖闭包过期）
+  const [renamingId, setRenamingId] = useState(null); // 正在重命名的会话 id（null=无）
+  const [renameVal, setRenameVal] = useState('');
+  const [pends, setPends] = useState(null);     // 待处理审批/问询（断连/刷新后恢复）：{key, approvals, asks}
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
+  const pollTickRef = useRef(0); // 轮询计数：每 3 tick（~7.5s）补拉一次挂起审批/问询（断连恢复）
 
   const loadConvs = useCallback(async () => {
     const d = await api.conversations();
@@ -198,11 +204,22 @@ export default function Chat({ user, onLogout }) {
 
   const switchProvider = (pid) => {
     setProvider(pid);
-    if (pid === 'auto') { setModelList([]); setModel('__auto__'); return; }
+    if (pid === 'auto') { setModelList([]); setModel('__auto__'); saveModelSel(pid, '__auto__'); return; }
     const p = provList.find((x) => x.provider_key === pid);
     const ms = (p?.models || []).filter((m) => m.enabled);
     setModelList(ms);
-    setModel(ms[0]?.model_id || '');
+    const mid = ms[0]?.model_id || '';
+    setModel(mid);
+    saveModelSel(pid, mid); // 对话内模型：切厂商即把该会话选择写库（新对话继承当前选择）
+  };
+
+  // 会话模型快照写入（当前会话切换即保存；打开该会话时恢复）——模型跟会话走而非全局
+  const saveModelSel = async (pid, mid) => {
+    if (!cur) return;
+    try {
+      await api.patchConversation(cur, { provider: pid || null, model: mid || null });
+      setConvs((cs) => cs.map((x) => (x.id === cur ? { ...x, provider: pid || null, model: mid || null } : x)));
+    } catch { /* 静默：模型选择保存失败不打断 */ }
   };
 
   // 加载会话全部（消息+轨迹+统计）；openConv 与活动轮询完成刷新共用
@@ -234,11 +251,26 @@ export default function Chat({ user, onLogout }) {
     actSeqRef.current = 0;
     lastActRef.current = 0;
     setLive(null);
+    // 对话内模型：恢复该会话上次选择的厂商/模型（无记录则保持当前选择）
+    const c = convs.find((x) => x.id === id);
+    if (c?.provider) {
+      const p = provList.find((x) => x.provider_key === c.provider);
+      if (c.provider === 'auto') { setProvider('auto'); setModelList([]); setModel('__auto__'); }
+      else if (p) {
+        setProvider(c.provider);
+        const ms = (p.models || []).filter((m) => m.enabled);
+        setModelList(ms);
+        setModel(c.model && ms.some((m) => m.model_id === c.model) ? c.model : (ms[0]?.model_id || ''));
+      } else { setProvider(c.provider); setModelList([]); setModel(c.model || ''); }
+    }
     await loadMessages(id);
+    fetchPending(); // 打开会话即检查服务端挂起的审批/问询（断连恢复入口）
   };
 
   const newConv = async () => {
     const d = await api.createConversation('新对话', 'full');
+    // 会话级模型：新会话继承当前选中的厂商/模型（打开即恢复）
+    try { await api.patchConversation(d.id, { provider, model: model || null }); } catch { /* ignore */ }
     await loadConvs();
     setCur(d.id); setCurTitle('新对话'); setMsgs([]); setToolcalls([]); setStats({});
   };
@@ -249,6 +281,30 @@ export default function Chat({ user, onLogout }) {
     await api.deleteConversation(id);
     if (cur === id) { setCur(null); setCurTitle(''); setMsgs([]); setStats({}); }
     loadConvs();
+  };
+
+  // —— 会话重命名（标题双击 或 ✎ 进入 inline 编辑：Enter 保存 / Esc 取消 / 失焦保存）——
+  const startRename = (c) => { setRenamingId(c.id); setRenameVal(c.title || ''); };
+  const saveRename = async (id) => {
+    const title = renameVal.trim();
+    setRenamingId(null);
+    if (!title) return;
+    try {
+      await api.patchConversation(id, { title });
+      setConvs((cs) => cs.map((x) => (x.id === id ? { ...x, title } : x)));
+      if (cur === id) setCurTitle(title);
+      setToast('已重命名');
+    } catch (e) { setToast(e.message); }
+  };
+
+  // —— 待处理审批/问询（断连/刷新后恢复：SSE 断开期间挂起的审批/问询仍在服务端等待，这里补拉并渲染横幅）——
+  const fetchPending = async () => {
+    try {
+      const [a, q] = await Promise.all([api.approvals(), api.asks()]);
+      const items = [...(a.pending || []).map((x) => ({ kind: 'a', ...x })), ...(q.pending || []).map((x) => ({ kind: 'q', ...x }))];
+      const key = items.length ? JSON.stringify(items.map((x) => x.id).sort()) : '';
+      setPends((prev) => (prev && prev.key === key ? prev : { key, items }));
+    } catch { /* 忽略 */ }
   };
 
   // P1-F1 对话导出（Markdown）
@@ -266,7 +322,7 @@ export default function Chat({ user, onLogout }) {
     a.href = url;
     a.download = (curTitle || '对话') + '.md';
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1500); // 延迟释放：立即 revoke 偶发截断下载
     setToast('对话已导出');
   };
 
@@ -307,13 +363,14 @@ export default function Chat({ user, onLogout }) {
     catch (e) { setToast(e.message); }
   };
 
-  const send = async () => {
-    const content = input.trim();
-    if (!content || busy || !cur) return;
-    setInput(''); setBusy(true); busyConvRef.current = cur;
-    const convId = cur; // 本次发送锁定的会话：所有流式回调只更新该会话内由本次生成的消息
+  // —— 输入队列：send 拆为 runText(实际发送体)/send(入队或直发)/flushQueue(结束后自动续发) ——
+  const runText = async (convId, content) => {
+    const text = String(content || '').trim();
+    if (!text || busyRef.current) return;
+    busyRef.current = true; setBusy(true); busyConvRef.current = convId;
+    setInput('');
     const tmpId = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-    setMsgs((m) => [...m, { role: 'user', content }]);
+    setMsgs((m) => [...m, { role: 'user', content: text }]);
     let acc = '';
     setMsgs((m) => [...m, { _tmpId: tmpId, role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [], asks: [] }]);
     const ac = new AbortController();
@@ -321,7 +378,7 @@ export default function Chat({ user, onLogout }) {
     try {
       // 轨迹辅助：按 _tmpId 锚定本次流式消息（会话中途切换后不污染其它会话的消息/历史加载结果）
       const patchLast = (fn) => setMsgs((prev) => (curRef.current === convId ? prev.map((x) => (x._tmpId === tmpId ? fn(x) : x)) : prev));
-      await streamChat({ conversationId: cur, content, provider, model: model || undefined },
+      await streamChat({ conversationId: convId, content: text, provider, model: model || undefined },
         {
           onDelta: (delta) => {
             acc += delta;
@@ -367,10 +424,12 @@ export default function Chat({ user, onLogout }) {
               loadStats(convId);
               api.toolcalls(convId).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
             }
+            flushQueue(); // 本轮回合结束：如有排队消息自动发送下一条
           },
           onError: (msg) => {
             setToast(msg); setBusy(false); busyConvRef.current = null;
             patchLast((x) => ({ ...x, streaming: false, thinking: false, error: msg }));
+            // 错误结束不自动续发队列：避免“停止”误触发排队消息自动发送；用户可再次回车/发送续上
           },
         },
         ac.signal);
@@ -380,9 +439,35 @@ export default function Chat({ user, onLogout }) {
       setBusy(false); busyConvRef.current = null;
       // 只收尾本次流消息（_tmpId 锚定，不污染其它会话）；发送失败时提示并恢复输入内容
       setMsgs((prev) => prev.map((x) => (x._tmpId === tmpId ? { ...x, streaming: false, thinking: false, error: isStop ? undefined : String(ex.message || '发送失败') } : x)));
-      if (!isStop && curRef.current === convId && !acc) setInput(content);
+      if (!isStop && curRef.current === convId && !acc) setInput(text);
+      if (!isStop) flushQueue(); // 用户主动停止：队列保留（停止后仍可手动发/点停止仅中止当前轮）；异常结束：继续队列
     }
   };
+
+  // send：Enter/点发送 → 空闲直接发；任务执行中则入队（结束后自动续发）
+  const send = async () => {
+    const content = input.trim();
+    if (!content || !cur) return;
+    if (busyRef.current) {
+      queueRef.current = [...queueRef.current, content];
+      setQueue(queueRef.current); setInput('');
+      setToast('⏳ 任务执行中：已排队 ' + queueRef.current.length + ' 条，结束后自动发送');
+      return;
+    }
+    await runText(cur, content);
+  };
+
+  // flushQueue：上一轮结束后自动发送下一条排队消息（function 声明提升，runText 同步路径可安全调用）
+  async function flushQueue() {
+    if (busyRef.current || !curRef.current) return;
+    const q = queueRef.current;
+    if (!q.length) return;
+    const next = q[0];
+    queueRef.current = q.slice(1);
+    setQueue(queueRef.current);
+    setToast('▶ 自动发送排队消息（剩 ' + queueRef.current.length + ' 条）');
+    await runText(curRef.current, next);
+  }
 
   // 活动轮询（旁观/断连兜底）：当前会话每 2.5s 拉事件环增量；
   // 本页 busy（SSE 直连渲染中）只推进 seq 不重复渲染；静默>6s 视为本轮结束→自动刷新最新结果
@@ -392,6 +477,9 @@ export default function Chat({ user, onLogout }) {
     if (!cur) return;
     const t = setInterval(async () => {
       try {
+        // 每 ~7.5s 补拉一次服务端挂起的审批/问询（SSE 断开/刷新后的恢复兜底入口）
+        pollTickRef.current = (pollTickRef.current || 0) + 1;
+        if (pollTickRef.current % 3 === 0) fetchPending();
         const d = await api.activity(cur, actSeqRef.current);
         const items = (d && d.items) || [];
         if (!items.length) {
@@ -555,7 +643,6 @@ export default function Chat({ user, onLogout }) {
               {Object.entries(PRESET_LABEL).map(([k, v]) => <option key={k} value={k}>工具：{v}</option>)}
             </select>
           )}
-          {busy && <button className="rw-btn stop" onClick={stopGen}>■ 停止</button>}
         </div>
       </header>
 
@@ -567,17 +654,24 @@ export default function Chat({ user, onLogout }) {
               <option value="auto">🤖 自动路由</option>
               {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
-            <select className="rw-select rw-model-sel" value={model} onChange={(e) => setModel(e.target.value)} title="选择模型">
+            <select className="rw-select rw-model-sel" value={model} onChange={(e) => { const mv = e.target.value; setModel(mv); saveModelSel(provider, mv); }} title="选择模型（跟随当前会话，切换即保存）">
               {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : <option value="">默认</option>}
             </select>
           </div>
           <button className="rw-btn pri rw-newbtn" onClick={newConv}>＋ 新建对话</button>
           <div className="rw-side-list">
             {convs.map((c) => (
-              <div key={c.id} className={'rw-conv' + (cur === c.id ? ' sel' : '')} onClick={() => openConv(c.id)}>
-                <span className="rw-conv-t">{c.title}</span>
+              <div key={c.id} className={'rw-conv' + (cur === c.id ? ' sel' : '')} onClick={() => { if (renamingId !== c.id) openConv(c.id); }}>
+                {renamingId === c.id
+                  ? <input className="rw-input rw-rename-input" autoFocus value={renameVal}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameVal(e.target.value)}
+                      onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') saveRename(c.id); else if (e.key === 'Escape') setRenamingId(null); }}
+                      onBlur={() => { if (renamingId === c.id) saveRename(c.id); }} />
+                  : <span className="rw-conv-t" title="双击重命名" onDoubleClick={() => startRename(c)}>{c.title}</span>}
                 <span className="rw-conv-tag">{c.channel !== 'web' ? c.channel : ''}</span>
                 {c.preset && c.preset !== 'all' && <span className="rw-conv-tag" title={'工具预设：' + PRESET_TIP[c.preset]}>P:{PRESET_LABEL[c.preset] || c.preset}</span>}
+                <button className="rw-conv-rename" title="重命名" onClick={(e) => { e.stopPropagation(); startRename(c); }}>✎</button>
                 <button className="rw-conv-del" onClick={(e) => delConv(c.id, e)} title="删除">✕</button>
               </div>
             ))}
@@ -591,6 +685,16 @@ export default function Chat({ user, onLogout }) {
 
         {/* 对话区 */}
         <main className="rw-main">
+          {pends && pends.items && pends.items.length > 0 && (
+            <div className="rw-pendbar">
+              <b className="rw-pend-title">⚠ 待处理请求（断连/刷新后可在此补答）</b>
+              {pends.items.map((x) => (x.kind === 'a'
+                ? <span key={x.id} className="rw-pend-item"><span className="rw-pend-tag">审批</span><code className="rw-pend-code">{x.desc}</code>
+                  <button className="rw-btn pri" onClick={() => decideApprovalMsg(x.id, 'approve')}>批准</button><button className="rw-btn" onClick={() => decideApprovalMsg(x.id, 'reject')}>拒绝</button></span>
+                : <span key={x.id} className="rw-pend-item"><span className="rw-pend-tag">问询</span>{x.question}{(x.options || []).map((o) => <button key={o.value} className="rw-btn" onClick={() => answerAskMsg(x.id, o.value)}>{o.label}</button>)}</span>))}
+              <button className="rw-btn" onClick={() => setPends((p) => (p ? { ...p, items: [] } : p))}>暂不处理</button>
+            </div>
+          )}
           {live && (
             <div className="rw-livebar" title="该会话正在执行中（旁观实时状态）">
               <span className="rw-live-dot" /> 正在执行…
@@ -600,7 +704,7 @@ export default function Chat({ user, onLogout }) {
           <div className="rw-msgs">
             {!cur && <div className="rw-empty">← 新建或选择左侧会话，开始对话</div>}
             {msgs.map((m, i) => (
-              <div key={i} className={'rw-msg ' + (m.role === 'user' ? 'me' : 'ai') + (m.streaming ? ' stream' : '')}>
+              <div key={m.id || m._tmpId || i} className={'rw-msg ' + (m.role === 'user' ? 'me' : 'ai') + (m.streaming ? ' stream' : '')}>
                 <div className="rw-msg-role">{m.role === 'user' ? '我' : 'AI'}</div>
                 <div className="rw-msg-c">
                   {m.role === 'assistant'
@@ -658,11 +762,22 @@ export default function Chat({ user, onLogout }) {
             )}
           </div>
           <div className="rw-inputbar">
-            <input className="rw-input" placeholder="输入消息，Enter 发送…" value={input}
-              onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) send(); }} disabled={busy || !cur} />
-            {busy
-              ? <button className="rw-btn stop" onClick={stopGen} title="停止生成">■ 停止</button>
-              : <button className="rw-btn pri" onClick={send} disabled={!cur || !input.trim()}>发送</button>}
+            <div className="rw-inputbox">
+              {queue.length > 0 && (
+                <div className="rw-queuebar">⏳ 任务执行中，已排队 <b>{queue.length}</b> 条，完成后自动发送（可继续输入排队；点「发送」加入队列、点「■ 停止」只中止当前任务）</div>
+              )}
+              <div className="rw-inputrow">
+                <textarea className="rw-input" rows="2" placeholder="输入消息：Enter 发送，Shift+Enter 换行；任务执行中也可输入，会自动排队…" value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); send(); }
+                  }} disabled={!cur} />
+                <div className="rw-inputbtns">
+                  <button className="rw-btn pri" onClick={send} disabled={!cur || !input.trim()} title="发送（Enter）；执行中点击=加入队列">{busy ? '加入队列' : '发送'}</button>
+                  {busy && <button className="rw-btn stop" onClick={stopGen} title="停止生成（停止后排队消息保持，可再点发送）">■ 停止</button>}
+                </div>
+              </div>
+            </div>
           </div>
         </main>
       </div>
@@ -681,7 +796,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
                 <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
-              <button className="rw-btn" onClick={() => setDrawer(false)}>收起</button>
+              <button className="rw-btn" onClick={() => setDrawer(false)} title="保存并返回对话">← 返回对话</button>
             </div>
             <div className="rw-drawer-body">
               {drawerTab === 'caps' && (
