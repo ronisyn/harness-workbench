@@ -52,7 +52,7 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
   if (!res.ok) throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
   const content = j.choices?.[0]?.message?.content || '';
   const usage = j.usage || {};
-  return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0, ...cacheOf(usage) };
+  return { content, model: j.model || model, tokensIn: usage.prompt_tokens || 0, tokensOut: usage.completion_tokens || 0, finishReason: j.choices?.[0]?.finish_reason || '', ...cacheOf(usage) };
 }
 
 // 流式调用：async generator，产出 content 增量；思考内容经 ctx.onThink 回调；ctx.usage 带回用量

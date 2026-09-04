@@ -81,10 +81,42 @@ function lastUserTextOf(msgs) {
 
 // 每轮费用=真实三档计费（calcCost：hit/miss/out，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
+// C1 轨迹瘦身：assistant tool_calls 回填上下文时，对超长 arguments 做分级截断（保留 id/name 骨架与字段名，
+// 细节全文始终在 DB tool_calls.args 可按 tool_call_id 精确查回）。执行与落库仍用原始 calls，仅上下文体积变小。
+const SLIM_ARG_LEN = 600;  // arguments 总长超过此值才瘦身（短参数原样保留，如 read_file 路径）
+const SLIM_VAL_LEN = 200;  // 单个字段值超过此长度截断（典型：write_file/append_file 的 content、edit_file 的 new）
+function slimToolCallForContext(call) {
+  const name = call.function?.name || 'tool';
+  const raw = String(call.function?.arguments ?? '');
+  if (raw.length <= SLIM_ARG_LEN) return { id: call.id, type: 'function', function: call.function };
+  let slim = raw;
+  try {
+    const obj = JSON.parse(raw);
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v == null) continue;
+      const str = typeof v === 'string' ? v : JSON.stringify(v);
+      if (str.length > SLIM_VAL_LEN) {
+        obj[k] = `[内容已截断(原文 ${str.length} 字符)；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+      }
+    }
+    slim = JSON.stringify(obj);
+  } catch {
+    slim = raw.slice(0, SLIM_ARG_LEN) + `…[原文 ${raw.length} 字符已截断；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+  }
+  return { id: call.id, type: 'function', function: { name, arguments: slim } };
+}
 // 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
 // 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
+// C3 触发条件 = 条数 > 90 或 累计字符 > 65000（防"条数不多但单条巨大"撑爆窗口）
 function archiveEarlyContext(msgs) {
-  if (msgs.length <= 90) return;
+  let totalChars = 0;
+  for (const m of msgs) {
+    if (!m) continue;
+    totalChars += String(m.content || '').length;
+    if (m.tool_calls) for (const tc of m.tool_calls) totalChars += String(tc.function?.arguments || '').length;
+  }
+  if (msgs.length <= 90 && totalChars <= 65000) return;
   const keepFrom = msgs.length - 80;
   for (let i = 1; i < keepFrom; i++) {
     const m = msgs[i];
@@ -92,6 +124,12 @@ function archiveEarlyContext(msgs) {
     if (m.role === 'system' && m.content === COMPLETION_HINT) { msgs.splice(i, 1); i--; continue; } // 早期重复评估提示移除（最新一条在尾部）
     if (m.role === 'tool' && String(m.content || '').length > 150) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
     else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 350) m.content = '（早期过程说明已压缩归档）';
+    else if (m.role === 'assistant' && m.tool_calls) { // C2 早期工具调用 arguments 折叠（保留 id/name 骨架维持 API 配对合法）
+      for (const tc of m.tool_calls) {
+        const a = String(tc.function?.arguments || '');
+        if (a.length > 120) tc.function.arguments = JSON.stringify({ _archived: true, note: '早期工具调用参数已折叠；全文可按 tool_call_id=' + tc.id + ' 用 db_query 查 tool_calls.args' });
+      }
+    }
   }
 }
 async function agentLimits() {
@@ -304,6 +342,33 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
       let final = res.content || '';
+      // C4 输出自动续段（2026-09）：单轮输出触到模型 max_tokens 上限(finish_reason=length)时自动续写拼接，
+      // 不再要求用户手动说"继续"。续写上下文=已输出片段+增量指令；只续不重；达上限自动停下并注明。
+      let frC4 = res.finishReason || '';
+      if (frC4 === 'length') {
+        let contN = 0;
+        while (frC4 === 'length' && contN < 4 && final.length < 24000) {
+          contN++;
+          const contRes = await chatOnce(provider,
+            [...msgs,
+              { role: 'assistant', content: final },
+              { role: 'user', content: '（平台自动续写：你上一条输出触到单次长度上限被截断。请直接从中断处继续输出剩余部分；只输出增量，不得重复已输出内容，不加开场白与总结。）' }],
+            { model: model || provider, maxTokens: 8000, timeoutMs: 120000 }, keys).catch(() => null);
+          if (!contRes || !contRes.content) break;
+          const seg = String(contRes.content).trim();
+          if (!seg) break;
+          final += seg;
+          frC4 = contRes.finishReason || '';
+          const u = contRes;
+          const costSeg = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokensIn || 0) - (u.cache_hit || 0), out: u.tokensOut || 0 });
+          try {
+            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
+              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0]);
+            cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
+          } catch { /* 计量失败不影响续写 */ }
+        }
+        if (frC4 === 'length') final += '\n\n> ⚠️ 本段输出经 ' + contN + ' 次自动续写仍达长度上限；如还需剩余部分可回复"继续"。';
+      }
       // B6 假完成检测（平台强制，非提示词）：声称"已执行/已完成"但本轮 toolLog 为空（未调用任何工具）→ 打回
       // 适用：任务语境（用户下达了执行类指令/恢复了挂起任务），模型却直接输出"完成了/提交了/改好了"等完成声称。
       // 语义：纯问答（知识性/闲聊）不带执行声称词 → 不触发；空答兜底 final 自动生成摘要 → 不触发（final 非模型声称）。
@@ -366,7 +431,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       };
     }
     // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
-    msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
+    // C1：回填上下文用瘦身版 arguments（原始 calls 仍用于执行与落库，见下方 execOne）
+    msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
     const maxPar = lim.maxParallelT > 0 ? lim.maxParallelT : 1; // 0=关闭并行（串行）
     const results = new Array(calls.length);
     const execOne = async (call, idx) => {
