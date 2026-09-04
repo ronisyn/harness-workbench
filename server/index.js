@@ -358,12 +358,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     }
   } catch { /* 知识表不可用时静默跳过 */ }
   // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
-  try {
-    const { execFileSync } = await import('node:child_process');
-    const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const gLines = gitLog.trim().split('\n').filter(Boolean);
-    if (gLines.length) messages.push({ role: 'system', content: '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n') });
-  } catch { /* git 不可用/非仓库时静默跳过 */ }
+  // 2026-09 C1 修复：git 块原位于 hist 之前=消息前缀中部，自改场景有新 commit 时该块内容变化
+  // → 其后全部历史（含最近 30 条）前缀缓存击穿（DeepSeek miss/hit 价差 27 倍）。
+  // 改为 append 到消息末尾（hist 之后）：前缀=固定注入+增长历史稳定，git 变化仅影响尾部少量 token。
+  const buildGitBlock = async () => {
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const gLines = gitLog.trim().split('\n').filter(Boolean);
+      if (gLines.length) return '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n');
+    } catch { /* git 不可用/非仓库时静默跳过 */ }
+    return null;
+  };
   // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
   try {
     const sp = await getSetting('systemPrompt', '');
@@ -408,6 +414,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     }
     messages.push({ role: m.role, content: c });
   }
+
+  // F19b git 块 append 到消息末尾（C1 修复：git 内容随 commit 变化，放 hist 之前会击穿其后全部历史的前缀缓存；
+  // 放末尾则 git 变化只影响自身尾部，前缀 = 固定注入 + 增长历史保持稳定命中）
+  try {
+    const gb = await buildGitBlock();
+    if (gb) messages.push({ role: 'system', content: gb });
+  } catch { /* git 不可用/非仓库时静默跳过 */ }
 
   // SSE 头
   res.writeHead(200, {
@@ -846,9 +859,21 @@ async function main() {
   // 重启自检：遗留 running 现场 → interrupted（断点恢复外壳）
   try { await interruptStaleOnBoot(); } catch (e) { console.error('[runtrack] 重启自检失败:', e.message); }
   // D5 启动清理：24h 前仍 running 的后台任务标记 stale（父进程可能已退出/僵尸残留；不 kill 防误伤新 pid，仅显式标记便于 job_list 识别）
+  // E4 修正：先探测日志文件活跃度——若日志 24h 内仍在写入（任务实际仍在产出）则不标 stale，避免误标合法长任务
   try {
-    const r = await db.query("UPDATE long_jobs SET status='stale', updated_at=NOW() WHERE status='running' AND started_at < NOW() - INTERVAL 24 HOUR");
-    if (r && r.affectedRows > 0) console.log('[jobs] 启动清理：标记 ' + r.affectedRows + ' 个陈旧 running 任务为 stale');
+    const staleCandidates = await db.query("SELECT job_id, log_file FROM long_jobs WHERE status='running' AND started_at < NOW() - INTERVAL 24 HOUR");
+    let staleN = 0, aliveN = 0;
+    for (const row of staleCandidates) {
+      try {
+        const st = await fs.promises.stat(row.log_file);
+        const mtimeMs = st.mtimeMs;
+        const active = Date.now() - mtimeMs < 24 * 3600 * 1000; // 日志 24h 内有新写入 = 仍活跃
+        if (active) { aliveN++; continue; }
+      } catch { /* 日志文件缺失/不可读：无产出依据，按陈旧处理 */ }
+      await db.query("UPDATE long_jobs SET status='stale', updated_at=NOW() WHERE job_id=?", [row.job_id]);
+      staleN++;
+    }
+    if (staleN > 0 || aliveN > 0) console.log(`[jobs] 启动清理：标记 ${staleN} 个陈旧 running 任务为 stale，保留 ${aliveN} 个日志仍活跃的任务`);
   } catch (e) { console.error('[jobs] 启动清理失败:', e.message); }
   scheduleMarketRefresh();
   // 定时任务调度器（F14）

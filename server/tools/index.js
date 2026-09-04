@@ -558,7 +558,7 @@ export const TOOLS = [
 
   // ---------- 知识库（F19：global 全会话可见 / conv 仅本会话；正文大段用 kb_search 取） ----------
   { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
-    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' } },
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = a.scope === 'global' ? 'global' : 'conv';
@@ -566,9 +566,23 @@ export const TOOLS = [
       const body = String(a.body || '').slice(0, 8000);
       if (!title) throw new Error('title 必填');
       // D1 去重：同账号+同 scope(+同会话) 下 title 已存在 → 覆盖更新（同名条目不重复堆积；精确 title 匹配防误并）
+      // E2 防激进覆盖：同名且新旧内容差异显著（字符集合 Jaccard 相似度 <0.35 且新旧均非空）时，
+      // 默认拒绝覆盖并回显旧内容片段，让调用方确认（overwrite:true 显式覆盖）或换 title——避免无意冲掉高价值旧记忆
       const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
-      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, title]);
+      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, title]);
       if (exist.length) {
+        const oldB = String(exist[0].body || '');
+        const jac = (() => {
+          if (!oldB || !body) return 1; // 一侧为空不算差异冲突（覆盖空值/旧值缺失可放行）
+          const sa = new Set(oldB), sb = new Set(body);
+          let inter = 0;
+          for (const ch of sa) if (sb.has(ch)) inter++;
+          return inter / Math.max(1, sa.size + sb.size - inter);
+        })();
+        if (!a.overwrite && jac < 0.35) {
+          return { saved: false, conflict: true, id: exist[0].id, scope, title,
+            reason: '同名条目已存在且新旧内容差异显著（相似度 ' + jac.toFixed(2) + ' < 0.35），已拒绝覆盖以防误冲高价值旧记忆。请确认：若确为同主题更新请在调用中加 overwrite:true 覆盖；否则请改用不同 title 新增。现有内容片段：' + oldB.slice(0, 300) + (oldB.length > 300 ? '…' : '') };
+        }
         await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
         return { saved: true, id: exist[0].id, updated: true, scope, title };
       }

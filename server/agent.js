@@ -275,7 +275,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     try {
       const r = await chatOnce(ctx.__provider || 'deepseek',
         [
-          { role: 'system', content: '你是任务执行归档器。把下面【早期执行轮次】压缩成 ≤260 字中文摘要，必须保留：用户目标、已确认的关键事实/路径/编号、已达成的中间结论、未完成事项与线索。工具级细节省略（可在 DB 查）。只输出摘要本体。' },
+          { role: 'system', content: '你是任务执行归档器。把下面【早期执行轮次】压缩成 ≤260 字中文摘要，必须保留：用户目标、已确认的关键事实/路径/编号、已达成的中间结论、未完成事项与线索。工具级细节省略（可在 DB 查）。只输出摘要本体。注意：凡涉及"已改/已完成/已提交"的结论，摘要中一律只陈述当时动作（如"曾执行 edit_file 改 X"），不得断言"现已生效"——最终状态以当前文件系统/git/DB 实时查询为准。' },
           { role: 'user', content: text },
         ],
         { model: ctx.__model || 'deepseek-v4-flash', maxTokens: 500, timeoutMs: 60000 }, keys);
@@ -344,10 +344,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       let final = res.content || '';
       // C4 输出自动续段（2026-09）：单轮输出触到模型 max_tokens 上限(finish_reason=length)时自动续写拼接，
       // 不再要求用户手动说"继续"。续写上下文=已输出片段+增量指令；只续不重；达上限自动停下并注明。
+      // E3 修正：次数/长度上限从硬编码改为可调常量（防长输出任务被 4 次×24000 硬上限无谓截断——
+      // 现代模型本可完整输出，截断只会让用户反复说"继续"，徒增轮次与往返成本）
+      const C4_MAX_CONT = 8;      // 最多自动续写 8 次（原 4 次；继续延长仍以 finish_reason + 预算护栏收口）
+      const C4_MAX_CHARS = 80000; // 续写累计上限 8 万字符（原 2.4 万，覆盖绝大多数长文档；仍远低于上下文窗口）
       let frC4 = res.finishReason || '';
       if (frC4 === 'length') {
         let contN = 0;
-        while (frC4 === 'length' && contN < 4 && final.length < 24000) {
+        while (frC4 === 'length' && contN < C4_MAX_CONT && final.length < C4_MAX_CHARS) {
           contN++;
           const contRes = await chatOnce(provider,
             [...msgs,
