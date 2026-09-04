@@ -2,7 +2,7 @@
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
-import { chatOnceWithTools } from './llm/gateway.js';
+import { chatOnceWithTools, chatOnce } from './llm/gateway.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -208,6 +208,41 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     return out;
   };
 
+  // 5.1 语义折叠（按 harness 压缩标准）：早期已完成轮次用一次 LLM 摘要折叠成 1 条 system，
+  // 防止长任务上下文涨到 10 万 token 顶格（每轮 3 万→尾段 10 万是慢与贵的根因）；
+  // 折叠后保留最近 100 条；间隔 ≥30 轮可再次折叠；明细始终在 DB tool_calls 可查
+  let lastCollapseRound = -99;
+  const maybeCollapseEarly = async (round) => {
+    if (round - lastCollapseRound < 30) return false;
+    const end = msgs.length - 100;
+    if (end <= 2) return false;
+    let totalChars = 0;
+    for (let i = 1; i < end; i++) totalChars += String(msgs[i]?.content || '').length + 60;
+    if (totalChars < 45000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
+    const head = msgs.slice(1, end);
+    const text = head
+      .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 700))
+      .join('\n').slice(-22000);
+    let digest = '';
+    try {
+      const r = await chatOnce(ctx.__provider || 'deepseek',
+        [
+          { role: 'system', content: '你是任务执行归档器。把下面【早期执行轮次】压缩成 ≤260 字中文摘要，必须保留：用户目标、已确认的关键事实/路径/编号、已达成的中间结论、未完成事项与线索。工具级细节省略（可在 DB 查）。只输出摘要本体。' },
+          { role: 'user', content: text },
+        ],
+        { model: ctx.__model || 'deepseek-v4-flash', maxTokens: 500, timeoutMs: 60000 }, keys);
+      digest = String(r.content || '').trim().slice(0, 1500);
+    } catch { digest = ''; }
+    msgs.splice(1, end - 1, {
+      role: 'system',
+      content: digest
+        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 100 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
+        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 100 条）；明细在 DB tool_calls，可用 db_query 查询】',
+    });
+    lastCollapseRound = round;
+    return true;
+  };
+
   for (let round = 0; ; round++) {
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
@@ -236,7 +271,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
     emitEv(ctx.conversationId, emit, { type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
-    archiveEarlyContext(msgs); // 运行中压缩：防早期内容导致上下文平方膨胀
+    archiveEarlyContext(msgs); // 轻压缩：早期超长项置占位
+    await maybeCollapseEarly(round); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩
     const llmT0 = Date.now();
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset), keys, temperature);
     const llmMs = Date.now() - llmT0;
