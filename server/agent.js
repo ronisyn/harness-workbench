@@ -3,7 +3,7 @@
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools } from './llm/gateway.js';
-import { toolDefs, execTool, plans } from './tools/index.js';
+import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
@@ -77,23 +77,24 @@ function roundCost(providerId, tin, tout) {
   return Number(((tin / 1e6) * (P_IN[providerId] ?? 2) + (tout / 1e6) * (P_OUT[providerId] ?? 6)).toFixed(4));
 }
 
-// 单任务运行中压缩：轮次很长时，把早期 tool/assistant 内容归档为极短占位（防上下文 token 平方膨胀；
-// 全量细节始终在 DB tool_calls 可查）
+// 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
+// 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
 function archiveEarlyContext(msgs) {
-  if (msgs.length <= 170) return;
-  const keepFrom = msgs.length - 160;
+  if (msgs.length <= 110) return;
+  const keepFrom = msgs.length - 100;
   for (let i = 1; i < keepFrom; i++) {
     const m = msgs[i];
     if (!m) continue;
-    if (m.role === 'tool' && String(m.content || '').length > 200) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
-    else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 600) m.content = '（早期过程说明已压缩归档）';
+    if (m.role === 'system' && m.content === COMPLETION_HINT) { msgs.splice(i, 1); i--; continue; } // 早期重复评估提示移除（最新一条在尾部）
+    if (m.role === 'tool' && String(m.content || '').length > 150) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
+    else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 350) m.content = '（早期过程说明已压缩归档）';
   }
 }
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -102,10 +103,10 @@ async function agentLimits() {
     limitsCache = {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
-      budgetYuan: pick('task_budget_yuan', 20),
+      budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 30),
       rev: pick('__policy_rev', 0),
     };
-  } catch { limitsCache = { ...def, budgetYuan: 20, rev: 0 }; }
+  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 30, rev: 0 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
 }
@@ -176,6 +177,37 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     msgs.splice(1, 0, { role: 'system', content: snap });
   };
 
+  // 5.2 后台/子代理完成通知（事件驱动化：父代理轮间自动获知完成，无需反复轮询）
+  const bgInterest = new Set();
+  const bgNoted = new Set();
+  const scanBg = () => {
+    for (const t of toolLog) {
+      if (t.status !== 'done') continue;
+      try {
+        const j = JSON.parse(t.result || '{}');
+        if (t.name === 'run_long_task' && j.jobId) bgInterest.add('job:' + String(j.jobId));
+        else if ((t.name === 'subagent' || t.name === 'subagent_fork') && j.sub_id && j.status === 'running') bgInterest.add('sub:' + String(j.sub_id));
+      } catch { /* 解析失败忽略（sync/无 id 结果不注册） */ }
+    }
+  };
+  const bgNotices = async () => {
+    const out = [];
+    for (const id of bgInterest) {
+      if (bgNoted.has(id)) continue;
+      if (id.startsWith('job:')) {
+        const j = jobs.get(id.slice(4));
+        if (j && j.status === 'exited') { bgNoted.add(id); out.push('【后台任务完成】job ' + id.slice(4) + '（' + String(j.cmd || '').slice(0, 60) + '）已退出' + (j.code != null ? '，exit ' + j.code : '') + '；输出用 job_output 查看。'); }
+      } else if (id.startsWith('sub:')) {
+        try {
+          const { subs } = await import('./subagent.js');
+          const s = subs.get(id.slice(4));
+          if (s && s.status !== 'running') { bgNoted.add(id); out.push('【子代理完成】' + (s.name || id.slice(4)) + ' 已结束（' + s.status + (s.error ? '：' + String(s.error).slice(0, 120) : '') + '）；结论用 subagent_output 取回' + (s.status === 'error' ? '，失败请改策略重试' : '') + '。'); }
+        } catch { /* ignore */ }
+      }
+    }
+    return out;
+  };
+
   for (let round = 0; ; round++) {
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
@@ -184,6 +216,17 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     // 护栏每轮读取（5s 缓存防 DB 风暴）：预算/轮次用最新值判定，快照与判定同源
     const lim = await agentLimits();
+    // 5.7 预算融合：段知情阈值（task_budget_yuan）× 会话 24h 剩余（task_budget_total 总账，index.js 注入 __budgetRemain）
+    const effBudgetYuan = (ctx.__budgetRemain != null && ctx.__budgetRemain >= 0)
+      ? (lim.budgetYuan > 0 ? Math.min(lim.budgetYuan, ctx.__budgetRemain) : ctx.__budgetRemain)
+      : lim.budgetYuan;
+    if (ctx.__budgetRemain === 0) {
+      return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total' };
+    }
+    // 5.2 后台/子代理完成通知注入
+    scanBg();
+    const bgNotes = await bgNotices();
+    for (const n of bgNotes) msgs.push({ role: 'system', content: n });
     if (lim.budgetMin > 0 && Date.now() - t0 > lim.budgetMin * 60000) {
       return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget' };
     }
@@ -204,9 +247,9 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, roundCost(provider, u.tokens_in || 0, u.tokens_out || 0), llmMs]);
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += roundCost(provider, u.tokens_in || 0, u.tokens_out || 0);
     } catch { /* 计量失败不影响执行 */ }
-    // WS7.4 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
-    if (lim.budgetYuan > 0 && cumCost > lim.budgetYuan) {
-      return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超知情阈值 ¥${lim.budgetYuan}（设置 task_budget_yuan，可调/0=关）。先停再问：回复"继续"放行下一段，或调高阈值后续跑）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
+    // WS7.4/5.7 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
+    if (effBudgetYuan > 0 && cumCost > effBudgetYuan) {
+      return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超可用预算 ¥${effBudgetYuan}（段阈值 task_budget_yuan=${lim.budgetYuan} × 会话总账剩余；可调大 task_budget_total/task_budget_yuan 或 0=关）。先停再问：回复"继续"放行下一段）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
     }
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
     if (res.reasoning) emitEv(ctx.conversationId, emit, { type: 'think', text: res.reasoning });
@@ -293,6 +336,11 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       });
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
+    // 5.8 消息卫生：每轮只保留一条最新 COMPLETION_HINT（旧版逐轮堆积会稀释注意力并浪费 token）
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const mm = msgs[i];
+      if (mm && mm.role === 'system' && mm.content === COMPLETION_HINT) { msgs.splice(i, 1); break; }
+    }
     msgs.push({ role: 'system', content: COMPLETION_HINT });
   }
   /* 不可达兜底（轮次判定在循环头按护栏现值执行） */
