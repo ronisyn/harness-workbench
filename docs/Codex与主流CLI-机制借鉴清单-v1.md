@@ -80,7 +80,7 @@
 2. ✅ P1-1 hooks 事件表（先内置 3-4 个强制钩子，验证价值后再开放注册）——已内置 2 个强制安全钩子验证价值；开放注册待 P2 repo_map 之后再评估（避免模型动态注册制造伪纪律）
 3. ✅ P2-3 repo_map（大仓库任务提效）——落地 commit 211dc9b（server/tools/repomap.js + repo_map 工具，轻量符号扫描版）
 4. ⬜ P2-4 双模型交叉验证（可选，配合审计需求）
-每项走：git_commit 当前状态 → 改 → syntax_check → reload_platform → E2E 冒烟 → 更新本文档勾选。
+每项走：git_commit 当前状态 → 改 → syntax_check → reload_platform → E2E 冒烟 → 更新本文档勾选 → **kb_add 更新 global 进度记忆**（防止"做了但记忆滞后 → 后续会话重复提议/假遗忘"——2026-09 实测根因：knowledge 表条目落后于 git 提交，导致 agent 反复说"还没做 P1-1"）。
 
 ## 5. 一句话回答（本文档的结论）
 RW **有能力**学习 Codex / Claude Code / Aider 的长处来优化自己：模型权重改不了，但机制、工具、上下文工程、行为纪律全部可改、已改、正在改（22 项能力+6 技能+记忆四层即证据）。
