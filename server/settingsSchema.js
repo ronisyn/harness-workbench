@@ -8,7 +8,7 @@ export const SETTINGS_SCHEMA = [
   { key: 'loop_guard', label: '循环检测连续次数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.loopGuard, min: 0, hint: '连续相同调用判循环；0=关闭' },
   { key: 'max_parallel_tools', label: '同一步并行工具数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.maxParallelT, min: 0, hint: '0=串行' },
   { key: 'task_budget_yuan', label: '单段成本提醒阈值（元，默认关）', group: 'budget', type: 'number', def: 0, min: 0, hint: '默认 0=关闭（不要中途节奏暂停）；需要时开启：任务每累计该金额暂停一次问你"继续吗"。真正上限由"任务总预算"承担' },
-  { key: 'task_budget_total', label: '任务总预算（元/会话 24h）', group: 'budget', type: 'number', def: 30, min: 0, hint: '会话 24h 总账上限（含子代理，跨"继续"累计）；超限停止并提示调大；0=不限' },
+  { key: 'task_budget_total', label: '任务总预算（元/会话 24h）', group: 'budget', type: 'number', def: 100, min: 0, hint: '会话 24h 总账上限（含子代理，跨"继续"累计）；超限停止并提示调大；0=不限' },
   { key: 'selfchange_budget_yuan', label: '自改任务成本知情阈值（元）', group: 'budget', type: 'number', def: 20, min: 0, hint: '阶段2 自改平台代码时同语义阈值；0=关闭' },
 ];
 

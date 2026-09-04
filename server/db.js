@@ -291,7 +291,7 @@ export async function initSchema() {
   const SEEDS = [
     ['__policy_rev', '1'],
     ['task_budget_yuan', '0'],
-    ['task_budget_total', '30'],
+    ['task_budget_total', '100'],
   ];
   for (const [k, v] of SEEDS) {
     try {

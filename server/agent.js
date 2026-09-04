@@ -103,10 +103,10 @@ async function agentLimits() {
     limitsCache = {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
-      budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 30),
+      budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 100),
       rev: pick('__policy_rev', 0),
     };
-  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 30, rev: 0 }; }
+  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
 }

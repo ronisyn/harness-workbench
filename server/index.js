@@ -433,7 +433,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 5.7 预算融合：会话 24h 总账剩余（usage_stats 按会话归集，含子代理同会话计入；总预算 task_budget_total）
       let budgetRemain = null;
       try {
-        const total = Number(await getSetting('task_budget_total', 30)) || 0;
+        const total = Number(await getSetting('task_budget_total', 100)) || 0;
         if (total > 0) {
           const spent = (await db.query('SELECT COALESCE(SUM(cost),0) c FROM usage_stats WHERE conversation_id=? AND created_at > NOW() - INTERVAL 24 HOUR', [conversationId]))[0] || {};
           budgetRemain = Math.max(0, Number(total) - Number(spent.c || 0));
