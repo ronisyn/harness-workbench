@@ -13,6 +13,7 @@ import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
+import { buildRepoMap } from './repomap.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -973,5 +974,20 @@ TOOLS.push({
   run: async () => {
     const hooks = listHooks();
     return { hooks, note: '内置钩子为平台强制安全纪律（fail-closed：danger_command_guard 拦破坏性命令、system_write_guard 拦系统关键区写入）；before 钩子可拦截工具或浅合并改写参数，after 钩子为观察/审计。平台管理员可在配置/代码中用 registerHook 追加（模型侧只读）' };
+  },
+});
+
+// P2-3 repo_map：代码库结构地图（借鉴 Aider tree-sitter repo map 的轻量版——目录树+行数+imports+顶层符号摘要）
+// 价值：长代码库任务先取一张"地图"，少做盲目 list_dir/find/grep 探测；容量受控（repomap.js 内 MAX_TEXT 截断）
+TOOLS.push({
+  name: 'repo_map',
+  description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
+  permission: 'read',
+  params: { dir: { type: 'string', required: false, desc: '目标目录，缺省=当前工作区' } },
+  run: async (a, ctx) => {
+    const dir = a.dir || ctx.root || '/srv/rw-workspace';
+    const r = buildRepoMap(dir);
+    if (!r.ok) return { error: r.error };
+    return { ok: true, root: r.root, summary: r.summary, text: r.text, files: r.files };
   },
 });

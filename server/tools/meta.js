@@ -3,7 +3,7 @@
 // when/not/ex：拼进 function calling description，帮模型在正确时刻选对工具（X1 评审）
 // 注意：conv_summarize 为 WS5 预留（尚未注册进 TOOLS），tier=pro
 export const TOOL_META = {
-  // ===== core(21) =====
+  // ===== core(22) =====
   read_file: { tier: 'core', when: '读文本内容、改前先读、查实现细节', not: '大文件超限用 read_file_range；列目录用 list_dir', ex: 'read_file {path:"/srv/harness-workbench/server/agent.js"}' },
   read_file_range: { tier: 'core', when: '大文件按 offset/length 分段读', not: '小文件直接用 read_file', ex: 'read_file_range {path, offset:10000, length:5000}' },
   write_file: { tier: 'core', when: '新建文件或整体覆盖', not: '局部小改用 edit_file；追加用 append_file', ex: 'write_file {path, content}' },
@@ -27,6 +27,7 @@ export const TOOL_META = {
   set_goal: { tier: 'core', when: '用户要求持续推进的跨轮大目标', not: '一次性任务用 plan_tasks', ex: 'set_goal {objective}' },
   get_goal: { tier: 'core', when: '查看当前活动目标与进度', not: '—', ex: 'get_goal {}' },
   update_goal: { tier: 'core', when: '汇报目标进展/标记完成/放弃', not: '—', ex: 'update_goal {progress, status:"done"}' },
+  repo_map: { tier: 'core', when: '大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）', not: '小目录直接 list_dir；找符号位置用 grep_search', ex: 'repo_map {dir:"/srv/harness-workbench"}' },
   // ===== pro(31) =====
   ocr_image: { tier: 'pro', when: '图片含文字需提取（截图/扫描件）', not: '图片理解用 view_image', ex: 'ocr_image {path}' },
   view_image: { tier: 'pro', when: '视觉理解图片内容', not: '纯文字提取用 ocr_image', ex: 'view_image {path}' },
@@ -80,7 +81,7 @@ export const DEFAULT_TOOLSET = [
   'db_query', 'git_status', 'git_commit',
   'plan_tasks', 'plan_done', 'finish_task', 'ask_user', 'set_goal',
   'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
-  'undo_checkpoint', 'hooks_list',
+  'undo_checkpoint', 'hooks_list', 'repo_map',
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
 export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];
