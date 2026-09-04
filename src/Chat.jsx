@@ -151,6 +151,7 @@ export default function Chat({ user, onLogout }) {
   const [drawer, setDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState('caps');
   const [caps, setCaps] = useState([]);
+  const [toolList, setToolList] = useState([]); // 5.3c 工具启用集（设置→工具）
   const [provList, setProvList] = useState([]);
   const [market, setMarket] = useState([]);
   const [marketBusy, setMarketBusy] = useState(false);
@@ -404,6 +405,17 @@ export default function Chat({ user, onLogout }) {
     setToast('工具预设已切换为 ' + PRESET_LABEL[preset] + '（' + PRESET_TIP[preset] + '）');
   };
 
+  // 5.3c 工具启用集切换（豁免工具恒启用，不可勾）
+  const toggleTool = async (name, on) => {
+    const en = toolList.filter((t) => t.enabled && !t.defaultOn).map((t) => t.name);
+    const next = on ? [...en, name] : en.filter((n) => n !== name);
+    try {
+      await api.setToolset(next);
+      setToolList((ls) => ls.map((t) => (t.name === name ? { ...t, enabled: on } : t)));
+      setToast((on ? '已启用 ' : '已停用 ') + name + '（下轮生效）');
+    } catch (e) { setToast(e.message); }
+  };
+
   const openDrawer = async (tab = 'caps') => {
     setDrawer(true); setDrawerTab(tab);
     const d = await api.capabilities();
@@ -422,6 +434,7 @@ export default function Chat({ user, onLogout }) {
     if (tab === 'market') await loadMarket();
     if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
     if (tab === 'tasks') { const t = await api.tasks(); setTasks(t.tasks || []); }
+    if (tab === 'tools') { const t = await api.getToolset(); setToolList(t.tools || []); }
   };
 
   const loadTasks = async () => { try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ } };
@@ -630,6 +643,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'caps' ? ' sel' : '')} onClick={() => openDrawer('caps')}>能力</button>
                 <button className={'rw-dtab' + (drawerTab === 'providers' ? ' sel' : '')} onClick={() => openDrawer('providers')}>厂商</button>
                 <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => openDrawer('market')}>模型市场</button>
+                <button className={'rw-dtab' + (drawerTab === 'tools' ? ' sel' : '')} onClick={() => openDrawer('tools')}>工具</button>
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
                 <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
@@ -720,6 +734,23 @@ export default function Chat({ user, onLogout }) {
                     </div>
                   ))}
                   {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
+                </div>
+              )}
+
+              {drawerTab === 'tools' && (
+                <div className="rw-trace">
+                  <div className="rw-cap-gtitle">工具启用集（默认 25 项勾选；未启用工具不被提供，调用时给指引）</div>
+                  <div className="rw-toolgrid">
+                    {toolList.map((t) => (
+                      <label key={t.name} className="rw-cap-item" title={'[' + (t.tier || '') + ']' + (t.defaultOn ? ' 默认启用/平台豁免' : '')}>
+                        <input type="checkbox" disabled={t.defaultOn} checked={t.enabled}
+                          onChange={(e) => toggleTool(t.name, e.target.checked)} />
+                        <span>{t.name}</span>
+                        <em className="rw-tool-tier">{t.tier}</em>
+                      </label>
+                    ))}
+                  </div>
+                  {!toolList.length && <div className="rw-empty">加载中…</div>}
                 </div>
               )}
 

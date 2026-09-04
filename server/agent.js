@@ -274,7 +274,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     archiveEarlyContext(msgs); // 轻压缩：早期超长项置占位
     await maybeCollapseEarly(round); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩
     const llmT0 = Date.now();
-    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset), keys, temperature);
+    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset, ctx.__enabledTools), keys, temperature);
     const llmMs = Date.now() - llmT0;
     // 全量计量（账本=真实消耗）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id），子代理/渠道/定时同源覆盖
     try {

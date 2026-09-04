@@ -267,3 +267,8 @@ body {
 .rw-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #2e8b57; animation: rw-live-pulse 1.2s ease-in-out infinite; }
 .rw-live-cur { color: var(--rw-muted); }
 @keyframes rw-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* 工具启用集（设置→工具） */
+.rw-toolgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 8px; max-height: 46vh; overflow: auto; padding: 4px 2px; }
+.rw-toolgrid .rw-cap-item { font-size: 12px; gap: 4px; }
+.rw-tool-tier { font-style: normal; opacity: 0.45; font-size: 10px; margin-left: auto; }

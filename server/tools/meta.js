@@ -69,3 +69,15 @@ export const TOOL_META = {
   plan_mode: { tier: 'expert', when: '用户要求"先规划只读、别动手"', not: '普通任务不要进入', ex: 'plan_mode {}' },
   exit_plan_mode: { tier: 'expert', when: '规划查证完成，提交完整计划并退出只读', not: '未查证完不要提交', ex: 'exit_plan_mode {plan}' },
 };
+
+// 5.3c/5.4 默认工具启用集（harness 标准 25：日常开发/运维高频；其余在 设置→工具 按需勾选）
+export const DEFAULT_TOOLSET = [
+  'read_file', 'write_file', 'append_file', 'edit_file', 'list_dir', 'find_file', 'grep_search',
+  'web_search', 'fetch_url',
+  'run_command', 'syntax_check', 'run_test',
+  'db_query', 'git_status', 'git_commit',
+  'plan_tasks', 'plan_done', 'finish_task', 'ask_user', 'set_goal',
+  'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
+];
+// 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
+export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];

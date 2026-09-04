@@ -10,7 +10,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META } from './meta.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -796,11 +796,16 @@ export function checkPerm(tool, sessionPerm) {
   return order[tool.permission] <= order[sessionPerm || 'full'];
 }
 
-// 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行）
-export function toolDefs(expose = 'all') {
+// 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行；
+// enabled=账号工具启用集 Set（5.3c），null=全部启用（驱动器等无人值守场景）；expert 平台豁免工具不受启用集限制）
+export function toolDefs(expose = 'all', enabled = null) {
   const allow = expose === 'minimal' ? ['core'] : expose === 'standard' ? ['core', 'pro'] : ['core', 'pro', 'expert'];
   const PKEYS = ['enum', 'items', 'min', 'max']; // 参数 schema 白名单透传（防任意键注入）
-  return TOOLS.filter((t) => allow.includes(TOOL_META[t.name]?.tier || 'pro')).map((t) => {
+  return TOOLS.filter((t) => {
+    if (!allow.includes(TOOL_META[t.name]?.tier || 'pro')) return false;
+    if (enabled && !enabled.has(t.name) && !PLATFORM_EXEMPT.includes(t.name)) return false;
+    return true;
+  }).map((t) => {
     const meta = TOOL_META[t.name] || {};
     let description = t.description;
     if (meta.when) description += '\n何时用：' + meta.when;
@@ -862,6 +867,10 @@ export async function execTool(name, args, ctx) {
           blocked = `run_command 软门禁：${first} 有专门工具（read_file/list_dir/grep_search/find_file 等），请改用专门工具（preset=all 会话不受此限）。`;
         }
       }
+    }
+    // 5.3c 启用集门禁：账号工具启用集未包含且非平台豁免 → 指引（可恢复：设置→工具 勾选）
+    if (!blocked && ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
+      blocked = `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。`;
     }
     // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝
     if (!blocked && eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {

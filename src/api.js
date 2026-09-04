@@ -30,6 +30,8 @@ export const api = {
   activity: (id, after) => request('/api/conversations/' + id + '/activity?after=' + (Number(after) || 0)),
   capabilities: () => request('/api/capabilities'),
   setCapabilities: (updates) => request('/api/capabilities', { method: 'PUT', body: JSON.stringify({ updates }) }),
+  getToolset: () => request('/api/toolset'),
+  setToolset: (enabled) => request('/api/toolset', { method: 'PUT', body: JSON.stringify({ enabled }) }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),
   marketList: () => request('/api/market/list'),
   marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),

@@ -9,7 +9,8 @@ import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
-import { SKILLS_ROOT } from './tools/index.js';
+import { SKILLS_ROOT, TOOLS } from './tools/index.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -103,6 +104,34 @@ app.put('/api/capabilities', requireAuth, async (req, res) => {
     await db.query('INSERT INTO capabilities (account_id, cap_key, enabled) VALUES (?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)', [req.user.id, k, v ? 1 : 0]);
   }
   res.json({ ok: true });
+});
+
+// 5.3c 工具启用集（默认 DEFAULT_TOOLSET 25；平台豁免工具恒可用；设置→工具 勾选维护）
+app.get('/api/toolset', requireAuth, async (req, res) => {
+  try {
+    const saved = await getSetting('toolset_enabled', null);
+    const list = Array.isArray(saved) ? saved : DEFAULT_TOOLSET;
+    const enabled = new Set(list.filter((x) => typeof x === 'string'));
+    const toolNames = new Set(TOOLS.map((t) => t.name));
+    const tools = Object.keys(TOOL_META)
+      .filter((n) => toolNames.has(n))
+      .map((name) => ({
+        name, tier: TOOL_META[name].tier,
+        defaultOn: DEFAULT_TOOLSET.includes(name) || PLATFORM_EXEMPT.includes(name),
+        enabled: enabled.has(name) || PLATFORM_EXEMPT.includes(name),
+      }));
+    res.json({ ok: true, tools, defaultCount: DEFAULT_TOOLSET.length });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.put('/api/toolset', requireAuth, async (req, res) => {
+  try {
+    const { enabled } = req.body || {};
+    if (!Array.isArray(enabled)) return res.status(400).json({ ok: false, message: 'enabled 需为工具名数组' });
+    const valid = new Set(TOOLS.map((t) => t.name));
+    const clean = [...new Set(enabled)].filter((n) => valid.has(n) && !PLATFORM_EXEMPT.includes(n));
+    await setSetting('toolset_enabled', clean);
+    res.json({ ok: true, enabled: clean.length });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 会话 ----------
@@ -410,7 +439,15 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           budgetRemain = Math.max(0, Number(total) - Number(spent.c || 0));
         }
       } catch { /* 预算查询失败不阻断（null=不限） */ }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, mode: convMode, preset: convPreset };
+      // 5.3c 工具启用集（默认 25；settings toolset_enabled 覆盖；设置→工具 勾选）
+      let enabledTools = null;
+      try {
+        const saved = await getSetting('toolset_enabled', null);
+        const arr = Array.isArray(saved) ? saved : DEFAULT_TOOLSET;
+        enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
+        if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
+      } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
