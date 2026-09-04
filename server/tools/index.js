@@ -25,6 +25,9 @@ const MUTATING_TOOLS = new Set([
   'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
 ]);
 
+  const PH_RE=/\[(?:内容已截断|原文 \d+ 字符已截断|上下文已裁剪中段)[^\]]*\]|全文可按 tool_call_id=/;
+function rejectPh(l,s){ if(typeof s==='string'&&PH_RE.test(s)) throw new Error(l+' 内容疑似被截断占位符污染(含"已截断/tool_call_id"标记)，拒绝写盘防损坏；请拆成 ≤400 字符小步写入或 append_file 分段追加'); }
+
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -112,20 +115,22 @@ function planOf(ctx) {
 }
 
 export const TOOLS = [
-  // ---------- B1-B10 文件 ----------
+
+// ---------- B1-B10 文件 ----------
   { name: 'read_file', description: '读取文本文件内容（max 50KB）', permission: 'read',
     params: { path: { type: 'string', required: true, desc: '文件绝对路径' } },
     run: async (a) => ({ content: readTxt(a.path).slice(0, 50000) }) },
   { name: 'write_file', description: '写入文件（创建/覆盖）', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('write_file', a.content); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
   { name: 'append_file', description: '追加内容到文件', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('append_file', a.content); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
   { name: 'edit_file', description: '精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）', permission: 'write',
     params: { path: { type: 'string', required: true, desc: '文件路径' }, old: { type: 'string', required: true, desc: '要替换的原文（必须完全匹配文件内容）' }, new: { type: 'string', desc: '新内容（默认删除 old）' } },
     run: async (a, ctx) => {
       if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区');
+      rejectPh('edit_file.new', a.new); rejectPh('edit_file.old', a.old);
       const content = fs.readFileSync(a.path, 'utf8');
       if (!content.includes(a.old)) throw new Error('未找到要替换的原文（old 须与文件内容完全匹配，可用 read_file 先确认）');
       const updated = content.split(a.old).join(a.new ?? '');
