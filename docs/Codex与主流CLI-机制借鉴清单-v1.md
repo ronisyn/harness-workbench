@@ -44,11 +44,11 @@
    - RW 现状：无 hooks；工具门禁靠 preset 静态集合（tools/index.js GUARDED/MUTATING_TOOLS）。
    - 价值：让"工具使用纪律/失败自检/停止善后"从提示词纪律变成平台强制钩子。
    - 建议落地：tools/index.js 加轻量 eventBus：execTool 前/后按工具名触发注册的 hook（先做内置 hook 表，如 write/edit 后自动提示 git commit；run_command 前强制注入 timeout 提示）。
-2. **⬜ 文件改动自动 checkpoint/undo（Claude Code checkpoint / Aider 自动 git）**
+2. **✅ 文件改动自动 checkpoint/undo（Claude Code checkpoint / Aider 自动 git）**（落地：server/tools/checkpoint.js + undo_checkpoint 工具 + execTool 集成）
    - 外部：每次文件修改前自动建恢复点（git 提交或快照），失败可回滚。
    - RW 现状：git_commit 工具靠 Agent 自觉 + 行为准则 4.2 纪律，无自动快照。
    - 价值：自我修改平台代码时安全网，回滚从"记得提交"变"自动留痕"。
-   - 建议落地：tools/index.js 中 write/edit/append/delete 执行前，若目标在平台仓库 /srv/harness-workbench 内，自动 `git add -A && git commit` 一次（或用 .runtime/undo/ 快照 + 恢复工具）。
+   - 落地记录：execTool 在 write_file/append_file/edit_file/delete_file 执行【前】自动调 snapshotBeforeWrite()（try/catch 失败不阻断），快照原内容到 工作区/.rw-checkpoints/<会话>/<ts>-<seq>-<工具>/；undo_checkpoint 工具 {list:true} 列快照、{n:1} 回滚第 n 新（撤销栈语义：undo 成功即消费快照）。选快照而非 git commit：不污染提交历史，且非 git 工作区目录同样受保护。冒烟脚本 verify_cp.mjs 全 PASS（新建删除/覆盖恢复两条路径）。
 
 ### P2（中价值）
 3. **⬜ repo map / 代码库结构感知（Aider tree-sitter repo map）**

@@ -11,13 +11,14 @@ import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
+import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
 
 // 计划模式（plan_mode）禁用的改动类工具：会话 mode=plan 时直接拒绝（只读）
 const MUTATING_TOOLS = new Set([
-  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move',
+  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
   'run_command', 'run_long_task', 'kill_process', 'db_write',
   'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
 ]);
@@ -912,6 +913,8 @@ export async function execTool(name, args, ctx) {
     if (blocked) {
       result = { error: blocked };
     } else {
+      // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
+      try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
       result = await tool.run(args, eff);
     }
   } catch (e) {
@@ -927,3 +930,20 @@ export async function execTool(name, args, ctx) {
   }
   return result;
 }
+
+// P1-2 undo_checkpoint：回滚自动快照（Claude Code 式文件时间线安全网的恢复端；SNAPSHOT_TOOLS 不含本工具，undo 不会再次触发快照）
+TOOLS.push({
+  name: 'undo_checkpoint',
+  description: '回滚一次自动文件快照：写类工具(write_file/append_file/edit_file/delete_file)执行前系统已自动快照原内容。{list:true} 查看最近快照；{n:1} 回滚最近第 n 次（1=最新）。改坏了代码/文件时用它回到操作前一刻',
+  permission: 'write',
+  params: {
+    list: { type: 'boolean', required: false, desc: 'true=只列快照不回滚' },
+    n: { type: 'number', required: false, desc: '回滚第 n 新的快照（默认 1=最近一次）' },
+    convId: { type: 'string', required: false, desc: '目标会话 id（默认当前会话）' },
+  },
+  run: async (a, ctx) => {
+    const cid = a.convId || ctx.conversationId || ctx.accountId || 'anon';
+    if (a.list) return { checkpoints: listCheckpoints(cid, 10) };
+    return undoCheckpoint(cid, a.n ?? 1);
+  },
+});

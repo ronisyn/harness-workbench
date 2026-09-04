@@ -9,6 +9,7 @@ export const TOOL_META = {
   write_file: { tier: 'core', when: '新建文件或整体覆盖', not: '局部小改用 edit_file；追加用 append_file', ex: 'write_file {path, content}' },
   append_file: { tier: 'core', when: '文件末尾追加（日志/渐进内容）', not: '覆盖/创建用 write_file', ex: 'append_file {path, content}' },
   edit_file: { tier: 'core', when: '精确局部替换（old 需与文件内容唯一匹配）', not: '未先 read_file 不要盲改；大段重写用 write_file', ex: 'edit_file {path, old, new}' },
+  undo_checkpoint: { tier: 'core', when: '改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）', not: '正常小错用 edit_file 直接修', ex: 'undo_checkpoint {list:true} 或 {n:1}' },
   list_dir: { tier: 'core', when: '列目录看结构、确认路径存在', not: '递归找文件用 find_file', ex: 'list_dir {path}' },
   mkdir: { tier: 'core', when: '创建目录', not: '创建文件用 write_file', ex: 'mkdir {path}' },
   copy_move: { tier: 'core', when: '复制或移动文件/目录', not: '删除用 delete_file', ex: 'copy_move {src, dst, mode:"copy"}' },
@@ -78,6 +79,7 @@ export const DEFAULT_TOOLSET = [
   'db_query', 'git_status', 'git_commit',
   'plan_tasks', 'plan_done', 'finish_task', 'ask_user', 'set_goal',
   'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
+  'undo_checkpoint',
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
 export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];
