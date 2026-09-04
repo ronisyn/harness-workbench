@@ -136,7 +136,14 @@ export const TOOLS = [
     } },
   { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）', permission: 'read',
     params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
-    run: async (a) => { const c = readTxt(a.path); const off = a.offset || 0; return { content: c.slice(off, off + (a.length || 10000)) }; } },
+    run: async (a) => {
+      const c = readTxt(a.path);
+      const off = a.offset == null ? 0 : Number(a.offset);
+      const len = a.length == null ? 10000 : Number(a.length);
+      if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + a.offset);
+      if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + a.length);
+      return { content: c.slice(off, off + len), offset: off, length: len, total: c.length };
+    } },
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
   { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
@@ -198,7 +205,14 @@ export const TOOLS = [
     } },
   { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
-    run: async (a) => { try { process.kill(a.pid, 'SIGTERM'); return { killed: true }; } catch (e) { throw new Error('终止失败: ' + e.message); } } },
+    run: async (a) => {
+      try { process.kill(a.pid, 'SIGTERM'); return { killed: true }; }
+      catch (e) {
+        // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可去 /tmp/rw-jobs 按时间找
+        if (e.code === 'ESRCH') return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 /tmp/rw-jobs 下可查' };
+        throw new Error('终止失败: ' + e.message);
+      }
+    } },
   { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
     params: {},
     run: async () => ({ jobs: [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log })) }) },
@@ -206,9 +220,10 @@ export const TOOLS = [
     params: { jobId: { type: 'string', required: true } },
     run: async (a) => {
       const j = jobs.get(String(a.jobId));
-      if (!j) throw new Error('job 不存在: ' + a.jobId + '（可用 job_list 查看）');
+      // job 不在进程表：可能已退出超过保留期或服务器重启（jobs 为内存态）；引导去日志目录按时间找，不静默
+      if (!j) return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 /tmp/rw-jobs/job-<时间戳>.log 下，可按时间戳查找。' };
       let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
-      return { jobId: a.jobId, status: j.status, output: out.slice(-8000) };
+      return { jobId: a.jobId, status: j.status, output: out.slice(-8000), log: j.log };
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
