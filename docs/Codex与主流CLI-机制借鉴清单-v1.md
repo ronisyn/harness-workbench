@@ -51,11 +51,13 @@
    - 落地记录：execTool 在 write_file/append_file/edit_file/delete_file 执行【前】自动调 snapshotBeforeWrite()（try/catch 失败不阻断），快照原内容到 工作区/.rw-checkpoints/<会话>/<ts>-<seq>-<工具>/；undo_checkpoint 工具 {list:true} 列快照、{n:1} 回滚第 n 新（撤销栈语义：undo 成功即消费快照）。选快照而非 git commit：不污染提交历史，且非 git 工作区目录同样受保护。冒烟脚本 verify_cp.mjs 全 PASS（新建删除/覆盖恢复两条路径）。
 
 ### P2（中价值）
-3. **⬜ repo map / 代码库结构感知（Aider tree-sitter repo map）**
+3. **✅ repo map / 代码库结构感知（Aider tree-sitter repo map）**（落地：server/tools/repomap.js + repo_map 工具，commit 211dc9b，2025-06 会话）
    - 外部：用 tree-sitter 生成仓库符号地图，让长代码库任务不迷路、少读文件。
    - RW 现状：有 find/grep/list_dir 工具，但无自动结构地图注入；Agent 靠探索纪律技能。
    - 价值：大代码库任务（如本次这类）上下文效率提升明显。
-   - 建议落地：加可选工具 `repo_map(dir)` 生成目录树+函数符号摘要（不需要完整 tree-sitter，先做目录树+文件行数+imports 扫描）。
+   - 落地：轻量首阶段（按建议落地）：`repo_map(dir)` 生成目录树+每文件行数/imports/顶层符号摘要，
+     逐行正则提取符号（js/ts/py/go/rs/java/kt/c/cpp/rb/php/swift），容量受控（≤30K 字符、400 文件上限），
+     不引入完整 tree-sitter。已注册 permission:read、tier core、入 DEFAULT_TOOLSET；15 项冒烟全过。
 4. **⬜ 多模型交叉验证（可选）**
    - 外部：同一任务派 2 个不同厂商模型跑，比对关键结论（防单模型盲区）。
    - RW 现状：多厂商网关已有（models/providers），无交叉验证编排。
@@ -75,7 +77,7 @@
 ## 4. 执行顺序建议（1-2 已完成，剩余按序推进）
 1. ✅ P1-2 自动 checkpoint（安全网，改动小，立即受益于自我修改场景）
 2. ✅ P1-1 hooks 事件表（先内置 3-4 个强制钩子，验证价值后再开放注册）——已内置 2 个强制安全钩子验证价值；开放注册待 P2 repo_map 之后再评估（避免模型动态注册制造伪纪律）
-3. ⬜ P2-3 repo_map（大仓库任务提效）
+3. ✅ P2-3 repo_map（大仓库任务提效）——落地 commit 211dc9b（server/tools/repomap.js + repo_map 工具，轻量符号扫描版）
 4. ⬜ P2-4 双模型交叉验证（可选，配合审计需求）
 每项走：git_commit 当前状态 → 改 → syntax_check → reload_platform → E2E 冒烟 → 更新本文档勾选。
 
