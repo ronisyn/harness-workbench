@@ -70,9 +70,10 @@
 6. **⬜ watch 文件变更广播（3080 skills watch）**：服务器版价值低，不做（docs/3080机制对照已注）。
 
 ## 3. 文档-实现差异（自查发现，顺手可修）
-- docs/记忆架构.md §4 写"自动触发（P2）：scheduler 扫 24h 无消息会话调用 conv_summarize"，
-  但 server/scheduler.js 实测只有 scheduled_tasks 表驱动，**无自动归档逻辑** → 文档超前于实现。
-  处理：若保留该 P2，需在 scheduler 增加周期扫描（注意 LLM 成本，建议仅对 >40 条消息的静默会话触发）；或改文档标注"未实现"。
+- ~~docs/记忆架构.md §4 写"自动触发（P2）：scheduler 扫 24h 无消息会话调用 conv_summarize"，~~
+  ~~但 server/scheduler.js 实测只有 scheduled_tasks 表驱动，无自动归档逻辑 → 文档超前于实现。~~
+  ~~处理：若保留该 P2，需在 scheduler 增加周期扫描（注意 LLM 成本，建议仅对 >40 条消息的静默会话触发）；或改文档标注"未实现"。~~
+- ✅ **已解决**：server/scheduler.js 已落地 WS5e P2 自动归档（每 10 分钟扫：channel=web、24h 无消息、消息数>60、摘要落后于最后活动 → summarizeConversation，最多 3 个/轮，LLM 成本受消息数门槛约束）。文档与实现现已一致。
 
 ## 4. 执行顺序建议（1-2 已完成，剩余按序推进）
 1. ✅ P1-2 自动 checkpoint（安全网，改动小，立即受益于自我修改场景）

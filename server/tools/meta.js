@@ -1,7 +1,7 @@
 // server/tools/meta.js - 工具契约元数据（WS1；施工图 docs/tool-contracts-v1.md 转录）
 // tier: core|pro|expert（toolDefs(expose) 过滤用；过滤只影响暴露不影响 execTool 执行）
 // when/not/ex：拼进 function calling description，帮模型在正确时刻选对工具（X1 评审）
-// 注意：conv_summarize 为 WS5 预留（尚未注册进 TOOLS），tier=pro
+// 注意：conv_summarize 已注册进 TOOLS（index.js），tier=pro；下方注释仅为工具使用提醒，注册状态以 tools/index.js 为准
 export const TOOL_META = {
   // ===== core(22) =====
   read_file: { tier: 'core', when: '读文本内容、改前先读、查实现细节', not: '大文件超限用 read_file_range；列目录用 list_dir', ex: 'read_file {path:"/srv/harness-workbench/server/agent.js"}' },
@@ -60,7 +60,7 @@ export const TOOL_META = {
   feishu_doc_read: { tier: 'pro', when: '读飞书云文档/知识库内容', not: '非飞书用 fetch_url', ex: 'feishu_doc_read {url}' },
   feishu_sheet_read: { tier: 'pro', when: '读飞书电子表格', not: '—', ex: 'feishu_sheet_read {url, range}' },
   feishu_bitable_read: { tier: 'pro', when: '读飞书多维表格', not: '—', ex: 'feishu_bitable_read {appToken, tableId}' },
-  conv_summarize: { tier: 'pro', when: '长会话收尾/跨周 resume 前归档摘要（WS5 注册）', not: '短会话不需要', ex: 'conv_summarize {}' },
+  conv_summarize: { tier: 'pro', when: '长会话收尾/跨周 resume 前归档摘要（已注册）', not: '短会话不需要', ex: 'conv_summarize {}' },
   // ===== expert(9) =====
   delete_file: { tier: 'expert', when: '删除文件/目录（确认过；高危留痕）', not: '保留内容用 copy_move 移走', ex: 'delete_file {path}' },
   db_write: { tier: 'expert', when: '数据库写入/迁移（非 SELECT）', not: '读用 db_query；写前先 SELECT 复核影响面', ex: 'db_write {sql, params}' },
