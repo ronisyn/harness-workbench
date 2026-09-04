@@ -316,6 +316,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
   await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conversationId]);
+  // 会话自动命名：标题仍为默认「新对话」时用首条用户消息自动起名（已手动重命名的跳过）
+  await db.query('UPDATE conversations SET title=LEFT(?,24) WHERE id=? AND (title IS NULL OR title=? OR title=?)',
+    [content.replace(/\s+/g, ' ').trim().slice(0, 40), conversationId, '新对话', '']);
 
   // 组装历史（长对话压缩 P1-F8：>40 条用摘要 + 最近 30 条；摘要异步懒生成不阻塞对话）
   let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
