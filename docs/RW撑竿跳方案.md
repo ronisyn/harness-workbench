@@ -36,7 +36,7 @@
 - KPI2 **步数/成本**：每任务轮数与 cost 的中位/均值（账本已全量计量）。
 - KPI3 **自审闭环率**：打回会话中存在 `kb_add(title=打回复盘:*)` 数 / 打回数。
 - KPI4 **沉淀增长率**：skills/知识条目新增数 + 按周复用次数（skill_load/kb_search 计数）。
-- KPI5 **事故率**：仅计"失控类"=paused（连续重复无进展挂起）占比与静默收工（空答兜底触发）次数；guard（预算/轮次达限挂起，现场保留可恢复）为**正常挂起不计事故**；高危工具（db_write/git_pull_push/delete_file）调用次数单列供周报人工判读。
+- KPI5 **事故率**：仅计"失控类"=paused（连续重复无进展挂起）占比与静默收工（空答兜底触发）次数、**假继续**（assistant 承诺"执行/开始/动手"后停滞：该条 assistant 无工具调用归属、且后续无 finish_task/继续推进）次数；guard（预算/轮次达限挂起，现场保留可恢复）为**正常挂起不计事故**；高危工具（db_write/git_pull_push/delete_file）调用次数单列供周报人工判读。
 - 执行前建立基线快照（WS0），每批后对照；**进步判据=打回率下降 + 沉淀增长 + 事故不增**（教学包 Part V 口径）。
 
 ---
@@ -212,6 +212,7 @@
 | 32 | 18 维自审报告（含 8 处修正） | 附录E |
 | 33 | 教学包融合映射（Part0–V→方案落点） | 附录F |
 | 34 | 部署通道确认（git push origin main→服务器 pull） | §2.6/附录C |
+| 35 | **"假继续"缺陷**（用户实测 Codex 学习任务中：assistant 只给计划/承诺，未真正触发工具而停滞）→ KPI5 增加假继续计数；准则 5.5 承诺-动手契约；kpi.mjs fakeContinue 检测 | WS0/WS3/kpi.mjs |
 
 ## 附录B · 工具盘点与分级基线（实测 TOOLS=61；conv_summarize 注册后 62）
 - 结论：不硬删（grep/read 与 run_command 重复由软门禁+描述解决；read_file_range 独立用例；find_file=名字/grep_search=内容职责已清）。策略=暴露分级+描述升级+健康度榜裁剪（比删除更可回滚）。

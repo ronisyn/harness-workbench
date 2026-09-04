@@ -92,7 +92,27 @@ const paused = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='pause
 const guard = await rows(`SELECT COUNT(*) c FROM agent_runs WHERE status='interrupted' AND started_at > NOW() - INTERVAL ? DAY AND (reason LIKE '%预算%' OR reason LIKE '%上限%' OR reason LIKE '%停止%' OR reason LIKE '%重启%')`, [DAYS]);
 const silent = await rows(`SELECT COUNT(*) c FROM messages WHERE role='assistant' AND content LIKE '（任务执行完成）本轮共%' AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
 const danger = await rows(`SELECT COUNT(*) c FROM tool_calls WHERE tool_name IN ('db_write','git_pull_push','delete_file') AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
-out.kpi5 = { runawayPaused: paused[0].c, silentWrapup: silent[0].c, guardSuspends_normal: guard[0].c, dangerToolCalls: danger[0].c };
+// 假继续检测（v1 近似口径，附录A #35）：assistant 消息命中"承诺动手"表达、该条无工具调用归属、
+// 且该会话在此后无任何工具调用或 finish_task（=承诺后停滞）→ 计一次
+const COMMIT_RE = /(我(?:来|会|将|现在|马上|先|这就)(?:去|就|要)?(?:执行|动手|开始|检查|修复|写|建|改|查|跑|调|测|部署|处理))|(?:现在就(?:去|开始|动手))|(?:继续任务|继续执行)/;
+const commitCand = await rows(
+  `SELECT id, conversation_id, content, created_at FROM messages
+   WHERE role='assistant' AND created_at > NOW() - INTERVAL ? DAY
+     AND (content LIKE '%执行%' OR content LIKE '%动手%' OR content LIKE '%我来%' OR content LIKE '%开始%' OR content LIKE '%继续%' OR content LIKE '%检查%' OR content LIKE '%修复%' OR content LIKE '%部署%')
+   ORDER BY id DESC LIMIT 400`, [DAYS]);
+let fakeContinue = 0;
+const fcConvs = new Set();
+for (const c of commitCand) {
+  if (!COMMIT_RE.test(String(c.content || ''))) continue;
+  // 该条消息是否被工具轨迹归属（本轮有真工具动作）
+  const own = await rows('SELECT COUNT(*) c FROM tool_calls WHERE message_id=?', [c.id]);
+  if (own[0].c > 0) continue;
+  // 该会话此后（时间序）是否有任何工具调用或 finish_task
+  const after = await rows(`SELECT COUNT(*) c FROM tool_calls WHERE conversation_id=? AND created_at > ?`, [c.conversation_id, c.created_at]);
+  if (after[0].c > 0) continue;
+  fakeContinue++; fcConvs.add(c.conversation_id);
+}
+out.kpi5 = { runawayPaused: paused[0].c, silentWrapup: silent[0].c, fakeContinue, guardSuspends_normal: guard[0].c, dangerToolCalls: danger[0].c, fcConvs: [...fcConvs].slice(0, 10) };
 
 // ---------- 工具健康度榜 ----------
 const tools = await rows(
@@ -111,7 +131,7 @@ else {
   L.push(`     状态分布: ${JSON.stringify(out.kpi2.statusDist)}${out.orphanRounds.convs ? `；未挂run会话 ${out.orphanRounds.convs} 个（成本 top: ${out.orphanRounds.topByCost.map((x) => '#' + x.conversationId + ' ¥' + x.cost.toFixed(3)).join(' ') }）` : ''}`);
   L.push(`KPI3 自审闭环: ${out.kpi3.closed}/${out.kpi3.rejected}${out.kpi3.rate === null ? '' : ' = ' + out.kpi3.rate + '%'}`);
   L.push(`KPI4 沉淀: kb新增 ${out.kpi4.kbNew} / 技能新增 ${out.kpi4.skillNew < 0 ? '(目录不可用)' : out.kpi4.skillNew} / 复用 ${out.kpi4.skillAndKbReuse}`);
-  L.push(`KPI5 事故: 失控挂起 ${out.kpi5.runawayPaused} / 空答兜底 ${out.kpi5.silentWrapup}（guard正常挂起 ${out.kpi5.guardSuspends_normal} 不计；高危工具 ${out.kpi5.dangerToolCalls} 次单列）`);
+  L.push(`KPI5 事故: 失控挂起 ${out.kpi5.runawayPaused} / 空答兜底 ${out.kpi5.silentWrapup} / 假继续 ${out.kpi5.fakeContinue}（guard正常挂起 ${out.kpi5.guardSuspends_normal} 不计；高危工具 ${out.kpi5.dangerToolCalls} 次单列）`);
   L.push(`工具榜 top${Math.min(out.toolHealth.length, 8)}: ${out.toolHealth.slice(0, 8).map((t) => t.tool + '×' + t.calls + (t.fails ? '(fail' + t.fails + ')' : '')).join(' ')}`);
   console.log(L.join('\n'));
 }
