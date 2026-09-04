@@ -845,6 +845,11 @@ async function main() {
   } catch { /* 修正失败不阻塞 */ }
   // 重启自检：遗留 running 现场 → interrupted（断点恢复外壳）
   try { await interruptStaleOnBoot(); } catch (e) { console.error('[runtrack] 重启自检失败:', e.message); }
+  // D5 启动清理：24h 前仍 running 的后台任务标记 stale（父进程可能已退出/僵尸残留；不 kill 防误伤新 pid，仅显式标记便于 job_list 识别）
+  try {
+    const r = await db.query("UPDATE long_jobs SET status='stale', updated_at=NOW() WHERE status='running' AND started_at < NOW() - INTERVAL 24 HOUR");
+    if (r && r.affectedRows > 0) console.log('[jobs] 启动清理：标记 ' + r.affectedRows + ' 个陈旧 running 任务为 stale');
+  } catch (e) { console.error('[jobs] 启动清理失败:', e.message); }
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }

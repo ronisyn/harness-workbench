@@ -182,3 +182,20 @@ export function buildRepoMap(dir) {
     files: fileMeta.slice(0, 200).map((f) => ({ path: f.path, lines: f.lines, symbols: f.symbols.length, imports: f.imports.length })),
   };
 }
+
+// D4 一致性自检（2026-09）：校验 buildRepoMap 输出的每个文件真实存在、行数统计与实读一致，
+// 防未来结构/路径/行数逻辑改动后静默产出错误映射。单独导出，供 run_test/CI 或人工复核调用。
+export function selftestRepoMap(root) {
+  const m = buildRepoMap(root);
+  const missing = [];
+  const badLines = [];
+  for (const f of m.files || []) {
+    const abs = path.join(root, f.path);
+    if (!isFile(abs)) { missing.push(f.path); continue; }
+    if (f.lines > 0) {
+      const real = countLines(abs);
+      if (Math.abs(real - f.lines) > 1) badLines.push({ path: f.path, mapLines: f.lines, realLines: real });
+    }
+  }
+  return { ok: missing.length === 0 && badLines.length === 0, listed: (m.files || []).length, missing, badLines, summary: m.summary };
+}

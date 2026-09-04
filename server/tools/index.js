@@ -76,6 +76,25 @@ function pruneJobs() {
     for (const [id] of finished.slice(0, doneCount - JOB_MAX)) jobs.delete(id);
   }
 }
+// D2/D5 后台任务 DB 持久化：jobs Map 是内存态，重启/超 TTL 后 pid↔日志映射丢失；
+// 这里把 job 同步到 long_jobs 表（fire 后任何 DB 失败都不阻断任务主流程）
+async function jobDbUpsert(job) {
+  try {
+    await db.run('INSERT INTO long_jobs (job_id, cmd, log_file, started_at, status, code, updated_at) VALUES (?,?,?,FROM_UNIXTIME(?/1000),?,?,NOW()) ON DUPLICATE KEY UPDATE cmd=VALUES(cmd), log_file=VALUES(log_file), status=VALUES(status), code=VALUES(code), updated_at=NOW()',
+      [String(job.pid), job.cmd, job.log, job.started, job.status, job.code ?? null]);
+  } catch { /* DB 不可用不影响任务运行 */ }
+}
+async function jobDbGet(id) {
+  try { const r = await db.query('SELECT * FROM long_jobs WHERE job_id=?', [String(id)]); return r[0] || null; } catch { return null; }
+}
+async function jobDbSetStatus(id, status, code) {
+  try { await db.run('UPDATE long_jobs SET status=?, code=?, updated_at=NOW() WHERE job_id=?', [status, code ?? null, String(id)]); } catch { /* ignore */ }
+}
+async function jobDbList() {
+  try {
+    return await db.query("SELECT job_id, cmd, log_file, started_at, status, code FROM long_jobs WHERE status IN ('running','exited') ORDER BY started_at DESC LIMIT 50");
+  } catch { return []; }
+}
 // 会话任务清单（F9：plan_tasks/plan_done 使用；key=conversationId）
 export const plans = new Map();
 
@@ -199,31 +218,50 @@ export const TOOLS = [
       const fd = fs.openSync(logFile, 'a');
       const child = spawn(cmd, args, { detached: true, stdio: ['ignore', fd, fd] });
       child.unref();
-      jobs.set(String(child.pid), { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' });
-      child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } });
+      const jobRec = { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' };
+      jobs.set(String(child.pid), jobRec);
+      await jobDbUpsert(jobRec); // D2：pid↔cmd↔日志映射落库，重启后仍可按 jobId 查
+      child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } jobDbSetStatus(String(child.pid), 'exited', code); });
       return { jobId: String(child.pid), cmd: a.cmd, log: logFile };
     } },
   { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
     run: async (a) => {
-      try { process.kill(a.pid, 'SIGTERM'); return { killed: true }; }
+      try {
+        process.kill(a.pid, 'SIGTERM');
+        jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
+        return { killed: true };
+      }
       catch (e) {
         // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可去 /tmp/rw-jobs 按时间找
-        if (e.code === 'ESRCH') return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 /tmp/rw-jobs 下可查' };
+        if (e.code === 'ESRCH') { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 /tmp/rw-jobs 下可查' }; }
         throw new Error('终止失败: ' + e.message);
       }
     } },
   { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
     params: {},
-    run: async () => ({ jobs: [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log })) }) },
+    run: async () => {
+      const mem = [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log }));
+      // D2：内存 Map 之外补 DB 持久化记录（服务器重启后进程表重建，任务仍可列出；jobId 唯一不重复）
+      const dbRows = await jobDbList();
+      const dbJobs = dbRows.filter((d) => !jobs.has(String(d.job_id))).map((d) => ({ jobId: String(d.job_id), cmd: d.cmd, status: d.status, code: d.code ?? null, started: d.started_at ? new Date(d.started_at).toISOString() : null, log: d.log_file, persisted: true }));
+      return { jobs: [...mem, ...dbJobs] };
+    } },
   { name: 'job_output', description: '查看后台任务输出日志（最近 8000 字符）', permission: 'full',
     params: { jobId: { type: 'string', required: true } },
     run: async (a) => {
       const j = jobs.get(String(a.jobId));
-      // job 不在进程表：可能已退出超过保留期或服务器重启（jobs 为内存态）；引导去日志目录按时间找，不静默
-      if (!j) return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 /tmp/rw-jobs/job-<时间戳>.log 下，可按时间戳查找。' };
-      let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
-      return { jobId: a.jobId, status: j.status, output: out.slice(-8000), log: j.log };
+      if (j) {
+        let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
+        return { jobId: a.jobId, status: j.status, output: out.slice(-8000), log: j.log };
+      }
+      // D2：内存 Map miss → DB 持久化记录兜底（重启后仍可按 jobId 读到原日志文件）
+      const dj = await jobDbGet(a.jobId);
+      if (dj) {
+        let out = ''; try { out = fs.readFileSync(dj.log_file, 'utf8'); } catch { /* ignore */ }
+        return { jobId: String(dj.job_id), status: dj.status, output: out.slice(-8000), log: dj.log_file, persisted: true };
+      }
+      return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表与持久化记录中（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 /tmp/rw-jobs/job-<时间戳>.log 下，可按时间戳查找。' };
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
@@ -525,10 +563,17 @@ export const TOOLS = [
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = a.scope === 'global' ? 'global' : 'conv';
       const title = String(a.title || '').trim().slice(0, 200);
+      const body = String(a.body || '').slice(0, 8000);
       if (!title) throw new Error('title 必填');
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)',
-        [ctx.accountId, scope, scope === 'conv' ? (ctx.conversationId || null) : null, title, String(a.body || '').slice(0, 8000)]);
-      return { saved: true, id: r.insertId, scope, title };
+      // D1 去重：同账号+同 scope(+同会话) 下 title 已存在 → 覆盖更新（同名条目不重复堆积；精确 title 匹配防误并）
+      const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
+      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, title]);
+      if (exist.length) {
+        await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
+        return { saved: true, id: exist[0].id, updated: true, scope, title };
+      }
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)', [ctx.accountId, scope, convId, title, body]);
+      return { saved: true, id: r.insertId, updated: false, scope, title };
     } },
   { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=自己scope=conv + 全部global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
     params: { q: { type: 'string', required: true, desc: '关键词' } },
