@@ -358,6 +358,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
     }
   } catch { /* 知识表不可用时静默跳过 */ }
+  // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
+  try {
+    const { execFileSync } = await import('node:child_process');
+    const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const gLines = gitLog.trim().split('\n').filter(Boolean);
+    if (gLines.length) messages.push({ role: 'system', content: '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n') });
+  } catch { /* git 不可用/非仓库时静默跳过 */ }
   // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
   try {
     const sp = await getSetting('systemPrompt', '');
@@ -407,7 +414,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
   // SSE 断连即中止：客户端关页/断网 → Agent 停止继续（避免无人监听的循环烧 token/改动服务器）
-  const onDisconnect = () => actrl.abort();
+  // 2026-09 中断原因区分：abort(reason) 传 'user'(点停止按钮) / 'disconnect'(断连)，收尾时据此标记 run 与占位消息
+  const onDisconnect = () => actrl.abort('disconnect');
   req.on('close', onDisconnect);
   res.on('close', onDisconnect);
   let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
@@ -467,7 +475,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 收尾：按结果登记现场状态（completed/paused/interrupted+原因）
       if (run) {
         try {
-          if (result.stopped) await markRun(run.id, 'interrupted', '用户点击停止');
+          if (result.stopped) {
+            // 2026-09：区分中断来源——用户点停止(user) vs SSE 断连(disconnect)，现场都保留可恢复
+            const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
+            await markRun(run.id, 'interrupted', why);
+          }
           else if (result.guard === 'budget') await markRun(run.id, 'interrupted', '时间预算达到（可 set_limits 调大/关闭）');
           else if (result.guard === 'cap') await markRun(run.id, 'interrupted', '轮次上限达到（可调大/关闭）');
           else if (result.paused) await markRun(run.id, 'paused', result.reason || '循环无进展挂起');
@@ -524,9 +536,20 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
+      // 2026-09：占位消息带中断原因 + 已执行进度（run.checkpoint 落库），避免"中断=看起来啥也没干"
       try {
+        let prog = '';
+        if (agentRunId) {
+          const rr = (await db.query('SELECT rounds, tool_counts, last_step FROM agent_runs WHERE id=?', [agentRunId]))[0];
+          if (rr) {
+            const cts = (() => { try { return JSON.parse(rr.tool_counts || '{}'); } catch { return {}; } })();
+            const cText = Object.entries(cts).map(([k, v]) => k + '×' + v).join('、');
+            prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
+          }
+        }
+        const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
         await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
-          [conversationId, 'assistant', '（任务已停止 / 会话中断：现场已保存。回复"继续任务"可恢复，或给我新指令。）']);
+          [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
       } catch { /* 忽略 */ }
     }
   } catch (e) {
@@ -584,7 +607,7 @@ app.post('/api/asks/:id', requireAuth, async (req, res) => {
 app.post('/api/chat/stop', requireAuth, (req, res) => {
   const { conversationId } = req.body || {};
   const c = conversationId ? abortMap.get(req.user.id + ':' + conversationId) : null;
-  if (c) c.abort();
+  if (c) c.abort('user'); // 2026-09：区分用户主动停止(user) 与 SSE 断连(disconnect)
   res.json({ ok: true, stopped: Boolean(c) });
 });
 
