@@ -72,9 +72,9 @@ function TraceCard({ items }) {
     <div className={'rw-trace-row' + (t.status === 'fail' ? ' fail' : '')}>
       <div className="rw-trace-row-head" onClick={() => setOpen(!open)}>
         <span className={'rw-trace-badge ' + (t.status || 'done')}>{st}</span>
-        <span className="rw-trace-tool">🔧 {t.name}</span>
+        <span className="rw-trace-tool">{humanTool(t.name)}</span>
         {list.length > 1 && <span className="rw-trace-count">×{list.length}</span>}
-        <span className="rw-trace-preview">{oneLine(resText).slice(0, 90) || (t.status === 'running' ? '运行中…' : t.status === 'fail' ? '失败' : '')}</span>
+        <span className="rw-trace-preview">{humanTarget(t) || oneLine(resText).slice(0, 70) || (t.status === 'running' ? '运行中…' : t.status === 'fail' ? '失败' : '')}</span>
         <span className="rw-trace-ms">{totalMs / 1000 > 0 ? ((totalMs / 1000)).toFixed(1) + 's' : ''}</span>
         {filePath && <button className="rw-trace-open" onClick={openFile} title="打开文件查看内容">📂 打开</button>}
         <span className="rw-trace-toggle">{open ? '▾' : '▸'}</span>
@@ -175,6 +175,8 @@ export default function Chat({ user, onLogout }) {
   const [pends, setPends] = useState(null);     // 待处理审批/问询（断连/刷新后恢复）：{key, approvals, asks}
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
+  const msgsBoxRef = useRef(null);                       // 消息滚动容器（自动贴底跟随）
+  const [stickBottom, setStickBottom] = useState(true);  // 用户是否停在底部：true=内容更新自动贴底；用户上翻=停止跟随
   const pollTickRef = useRef(0); // 轮询计数：每 3 tick（~7.5s）补拉一次挂起审批/问询（断连恢复）
 
   const loadConvs = useCallback(async () => {
@@ -248,6 +250,7 @@ export default function Chat({ user, onLogout }) {
 
   const openConv = async (id) => {
     setCur(id);
+    setStickBottom(true); // 切换会话：回到贴底跟随（避免停留在上一会话的滚动位置）
     actSeqRef.current = 0;
     lastActRef.current = 0;
     setLive(null);
@@ -272,7 +275,7 @@ export default function Chat({ user, onLogout }) {
     // 会话级模型：新会话继承当前选中的厂商/模型（打开即恢复）
     try { await api.patchConversation(d.id, { provider, model: model || null }); } catch { /* ignore */ }
     await loadConvs();
-    setCur(d.id); setCurTitle('新对话'); setMsgs([]); setToolcalls([]); setStats({});
+    setCur(d.id); setCurTitle('新对话'); setMsgs([]); setToolcalls([]); setStats({}); setStickBottom(true);
   };
 
   const delConv = async (id, e) => {
@@ -620,7 +623,22 @@ export default function Chat({ user, onLogout }) {
     if (toast) { const t = setTimeout(() => setToast(''), 2500); return () => clearTimeout(t); }
   }, [toast]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
+  // —— 阅读体验 v3：贴底跟随（仅当用户停在底部才自动贴底；用户上翻即停，流式/思考更新不再强拽页面）——
+  useEffect(() => {
+    const el = msgsBoxRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+      setStickBottom((prev) => (prev === near ? prev : near));
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+  useEffect(() => {
+    if (!stickBottom) return;
+    const el = msgsBoxRef.current;
+    if (el) el.scrollTop = el.scrollHeight; // 即时贴底（无 smooth 动画：高频流式不卡顿、可随时上翻打断）
+  }, [msgs, stickBottom]);
 
   const curPerm = convs.find((c) => c.id === cur)?.permission || 'full';
   const curPreset = convs.find((c) => c.id === cur)?.preset || 'all';
@@ -701,7 +719,7 @@ export default function Chat({ user, onLogout }) {
               {live.last ? <span className="rw-live-cur">当前：{String(live.last).slice(0, 40)}</span> : <span className="rw-live-cur">思考中</span>}
             </div>
           )}
-          <div className="rw-msgs">
+          <div className="rw-msgs" ref={msgsBoxRef}>
             {!cur && <div className="rw-empty">← 新建或选择左侧会话，开始对话</div>}
             {msgs.map((m, i) => (
               <div key={m.id || m._tmpId || i} className={'rw-msg ' + (m.role === 'user' ? 'me' : 'ai') + (m.streaming ? ' stream' : '')}>
@@ -710,12 +728,7 @@ export default function Chat({ user, onLogout }) {
                   {m.role === 'assistant'
                     ? <>
                         {m.plan && m.plan.length > 0 && <PlanCard plan={m.plan} />}
-                        {m.think ? (
-                          <details className="rw-think" open={m.streaming}>
-                            <summary>🧠 思考过程</summary>
-                            <div style={{ whiteSpace: 'pre-wrap' }}>{m.think}</div>
-                          </details>
-                        ) : null}
+                        {m.think ? <ThinkBox text={m.think} streaming={Boolean(m.streaming)} /> : null}
                         {m.approvals && m.approvals.length > 0 && m.approvals.map((ap) => (
                           <div key={ap.id} className="rw-approval">
                             <div className="rw-approval-desc">{ap.desc}</div>
@@ -739,11 +752,7 @@ export default function Chat({ user, onLogout }) {
                                 </div>}
                           </div>
                         ))}
-                        {m.traces && m.traces.length > 0 && (
-                          <div className="rw-msg-traces">
-                            {groupTraces(m.traces).map((g, gi) => <TraceCard key={gi} items={g.items} />)}
-                          </div>
-                        )}
+                        {m.traces && m.traces.length > 0 && <TracePanel traces={m.traces} streaming={Boolean(m.streaming)} />}
                         {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
                         {m.error ? <div className="rw-err">⚠️ {m.error}</div> : null}
                         {!m.error && m.content && (m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />)}
@@ -956,4 +965,86 @@ export default function Chat({ user, onLogout }) {
       {toast && <div className="rw-toast">{toast}</div>}
     </div>
   );
+}
+
+/* ============================================================
+   阅读体验 v3（2026-09）：轨迹/思考对人友好
+   - 工具名中文化 + 目标摘要（轨迹行是给人看的，不是给 AI 看的）
+   - ThinkBox：思考区流式期间自动贴底；结束后可自由开合细读
+   - TracePanel：整轮工具过程收进单一可折叠面板，默认摘要一行
+   ============================================================ */
+/* ============================================================
+   阅读体验 v3（2026-09）：轨迹/思考对人友好
+   - 工具名中文化 + 目标摘要（轨迹行是给人看的）
+   - ThinkBox：思考区流式贴底、结束可开合细读
+   - TracePanel：整轮工具过程收进单一可折叠面板
+   ============================================================ */
+const TRACE_LABEL = {
+  read_file: '读取文件', write_file: '写入文件', append_file: '追加内容', edit_file: '修改文件',
+  delete_file: '删除文件', list_dir: '查看目录', find_file: '查找文件', grep_search: '搜索内容',
+  repo_map: '生成代码地图', run_command: '执行命令', run_test: '运行测试', syntax_check: '语法检查',
+  plan_tasks: '规划任务', plan_done: '标记步骤', finish_task: '任务提测', web_search: '联网搜索',
+  fetch_url: '抓取网页', db_query: '查询数据库', db_write: '写入数据库',
+  git_commit: '提交 Git', git_status: '查看 Git 状态', undo_checkpoint: '撤销快照',
+  kb_add: '写入记忆', kb_search: '搜索记忆', skill_load: '载入技能', skill_save: '保存技能',
+  subagent: '子代理执行', ask_user: '向你提问', set_limits: '调整护栏', set_goal: '设定目标',
+  plan_mode: '进入计划模式', exit_plan_mode: '提交计划', reload_platform: '重载平台', hooks_list: '查看钩子',
+  read_file_range: '分段读取', extract_pdf: '解析 PDF', extract_docx: '解析 Word', view_image: '查看图片',
+  ocr_image: '识别图片'
+};
+const humanTool = (name) => TRACE_LABEL[name] || String(name || '');
+
+const humanTarget = (t) => {
+  if (!t || !t.args || typeof t.args !== 'object') return '';
+  const a = t.args;
+  const p = a.path || a.file || a.src;
+  if (p) {
+    let s = String(p);
+    s = s.replace(/^\/srv\/harness-workbench\//, 'rw/').replace(/^\/srv\/rw-workspace\//, 'ws/');
+    return s.length > 48 ? '…' + s.slice(-48) : s;
+  }
+  if (a.url) return String(a.url).slice(0, 64);
+  if (typeof a.q === 'string' && a.q) return '「' + a.q.slice(0, 42) + '」';
+  if (a.query) return '「' + String(a.query).slice(0, 42) + '」';
+  if (a.cmd) return String(a.cmd).slice(0, 56);
+  if (a.sql) return String(a.sql).slice(0, 56);
+  if (a.name) return String(a.name).slice(0, 40);
+  if (a.question) return '「' + String(a.question).slice(0, 42) + '」';
+  return '';
+};
+
+function ThinkBox({ text, streaming }) {
+  const box = useRef(null);
+  const near = useRef(true);
+  useEffect(() => {
+    const el = box.current;
+    if (el && streaming && near.current) el.scrollTop = el.scrollHeight;
+  }, [text, streaming]);
+  const onScroll = () => {
+    const el = box.current;
+    if (el) near.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 90;
+  };
+  const title = streaming ? '思考中（可点击收起）' : '思考过程';
+  return React.createElement('details', { className: 'rw-think', open: streaming || undefined },
+    React.createElement('summary', null, title),
+    React.createElement('div', { ref: box, onScroll: onScroll, style: { whiteSpace: 'pre-wrap' } }, text));
+}
+
+// TracePanel：整轮工具过程收进一个可折叠面板
+function TracePanel({ traces, streaming }) {
+  const groups = groupTraces(traces);
+  const running = traces.find((t) => t.status === 'running');
+  const failed = groups.find((g) => g.items.some((x) => x.status === 'fail'));
+
+const desc = running ? '正在' + humanTool(running.name) + '…' : (failed ? '出错：' + humanTool(failed.name) : '');
+
+  const dot = React.createElement('span', { className: 'rw-tracebox-dot' + ((streaming || running) ? ' run' : '') });
+  const title = React.createElement('span', { className: 'rw-tracebox-title' }, '工具过程 · ' + traces.length + ' 次');
+  const head = React.createElement('span', { className: 'rw-tracebox-sum' }, dot, title, desc ? React.createElement('span', { className: 'rw-tracebox-desc' }, desc) : null);
+
+  const arrow = React.createElement('span', { className: 'rw-tracebox-arrow' }, '展开查看明细');
+  return React.createElement('details', { className: 'rw-tracebox', open: streaming || undefined },
+    React.createElement('summary', null, head, arrow),
+    React.createElement('div', { className: 'rw-tracebody' },
+      groups.map((g, gi) => React.createElement(TraceCard, { key: gi, items: g.items }))));
 }
