@@ -36,7 +36,7 @@
 
 ### 修复与 commit
 - README.md：目录结构段按实测更新（server/ 扁平结构 + src/ + web/dist + tools/channels/llm 子目录等）。
-- commit：`<待提交后回填>`（docs: README 目录结构对齐现状 —— 2026-09-05）
+- commit：`0e6eae1`（docs: README 目录结构对齐现状 + 新增每日自我进化执行日志首条 —— 2026-09-05）
 
 ### 成本估算
 - 本次执行 ≈ ¥2–3（侦察 LLM 用量 + selfcheck 真实对话最小调用 2 delta），低于单日预算占比可忽略。
