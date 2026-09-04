@@ -261,3 +261,9 @@ body {
 .rw-diff-l.add { color: #8fe3a0; background: rgba(80, 220, 120, 0.10); }
 .rw-diff-details { margin-top: 4px; }
 .rw-diff-details summary { cursor: pointer; font-size: 12px; color: var(--rw-muted); user-select: none; }
+
+/* 活动轮询条：旁观/断连页面实时显示会话执行状态 */
+.rw-livebar { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #eef6ff; border-bottom: 1px solid var(--rw-border); font-size: 13px; color: #1a5fb4; position: sticky; top: 0; z-index: 5; }
+.rw-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #2e8b57; animation: rw-live-pulse 1.2s ease-in-out infinite; }
+.rw-live-cur { color: var(--rw-muted); }
+@keyframes rw-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }

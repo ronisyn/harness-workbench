@@ -27,6 +27,7 @@ export const api = {
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
   messages: (id) => request('/api/conversations/' + id + '/messages'),
   toolcalls: (id) => request('/api/conversations/' + id + '/toolcalls'),
+  activity: (id, after) => request('/api/conversations/' + id + '/activity?after=' + (Number(after) || 0)),
   capabilities: () => request('/api/capabilities'),
   setCapabilities: (updates) => request('/api/capabilities', { method: 'PUT', body: JSON.stringify({ updates }) }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),

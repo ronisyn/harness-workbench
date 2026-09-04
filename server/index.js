@@ -8,7 +8,7 @@ import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider } from './llm/providers.js';
 import { chatStream } from './llm/gateway.js';
-import { runAgent } from './agent.js';
+import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT } from './tools/index.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -170,6 +170,17 @@ app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
 app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, message_id, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 100', [req.params.id]);
   res.json({ ok: true, toolcalls: rows });
+});
+
+// 会话活动增量（事件环轮询：旁观/断连页面实时性；after=上次 seq）
+app.get('/api/conversations/:id/activity', requireAuth, async (req, res) => {
+  try {
+    const own = await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
+    if (!own.length) return res.status(404).json({ ok: false, message: '会话不存在' });
+    const after = Number(req.query.after) || 0;
+    const r = activitySince(req.params.id, after);
+    res.json({ ok: true, ...r });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
 // 已接入厂商 + 模型（设置页展示）
@@ -481,6 +492,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   if (abortMap.get(akey) === actrl) abortMap.delete(akey);
   // 释放并发槽位
   inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
+  clearActivity(conversationId); // 本轮事件环收尾（正常/异常/停止统一清理）
   res.end();
   // 自我重启协作：本回复已完整发出/落库，处理 reload_platform 请求
   maybeSelfRestart().catch(() => {});

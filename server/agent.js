@@ -8,6 +8,54 @@ import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
 
+// 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
+// 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）
+const activity = new Map(); // convId -> { items: [{seq,at,type,...}] }
+let actSeq = 0;
+const ACT_MAX = 300;
+function emitEv(conversationId, emit, ev) {
+  try { if (emit) emit(ev); } catch { /* 外部 emit 失败不影响执行 */ }
+  if (!conversationId) return;
+  try {
+    const key = String(conversationId);
+    let rec = activity.get(key);
+    if (!rec) { rec = { items: [] }; activity.set(key, rec); }
+    let item = { seq: ++actSeq, at: Date.now(), ...ev };
+    // think 增量合并（同轮 3s 内拼接，避免环被思考文本灌满）
+    if (ev.type === 'think') {
+      const last = rec.items[rec.items.length - 1];
+      if (last && last.type === 'think' && item.at - last.at < 3000 && last.text.length < 1800) {
+        last.text += String(ev.text || '');
+        last.seq = item.seq; last.at = item.at;
+        return;
+      }
+      item.text = String(ev.text || '').slice(0, 2000);
+    }
+    if (ev.type === 'tool_start' || ev.type === 'tool_done') item.tool = ev.tool;
+    rec.items.push(item);
+    if (rec.items.length > ACT_MAX) rec.items.splice(0, rec.items.length - ACT_MAX);
+  } catch { /* 环写入失败忽略 */ }
+}
+export function clearActivity(conversationId) {
+  if (!conversationId) return;
+  try {
+    const key = String(conversationId);
+    const rec = activity.get(key);
+    if (rec) {
+      rec.items.push({ seq: ++actSeq, at: Date.now(), type: 'run_end' });
+      if (rec.items.length > ACT_MAX) rec.items.splice(0, rec.items.length - ACT_MAX);
+    }
+    // 延迟回收（run_end 供轮询消费后清理）
+    setTimeout(() => activity.delete(key), 60000).unref?.();
+  } catch { /* 忽略 */ }
+}
+export function activitySince(conversationId, after = 0, limit = 200) {
+  const rec = activity.get(String(conversationId));
+  if (!rec || !rec.items.length) return { items: [], seq: Number(after) || 0 };
+  const items = rec.items.filter((x) => x.seq > (Number(after) || 0)).slice(-limit);
+  return { items, seq: items.length ? items[items.length - 1].seq : (Number(after) || 0) };
+}
+
 // 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)/task_budget_yuan(成本知情阈值,0=关)
 let limitsCache = null;
 let limitsCacheAt = 0;
@@ -144,7 +192,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
-    if (emit) emit({ type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
+    emitEv(ctx.conversationId, emit, { type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
     archiveEarlyContext(msgs); // 运行中压缩：防早期内容导致上下文平方膨胀
     const llmT0 = Date.now();
     const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset), keys, temperature);
@@ -161,7 +209,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超知情阈值 ¥${lim.budgetYuan}（设置 task_budget_yuan，可调/0=关）。先停再问：回复"继续"放行下一段，或调高阈值后续跑）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
     }
     // 模型推理过程（reasoning）实时透出 → 前端 think 区
-    if (res.reasoning && emit) emit({ type: 'think', text: res.reasoning });
+    if (res.reasoning) emitEv(ctx.conversationId, emit, { type: 'think', text: res.reasoning });
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
@@ -217,14 +265,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
       const seq = ++dispSeq; // 全 run 唯一，避免并行/子代理交错时撞号
-      if (emit) emit({ type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
+      emitEv(ctx.conversationId, emit, { type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
       const tStart = Date.now();
       const result = await execTool(call.function.name, args, { ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature });
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
       const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
       results[idx] = toolItem;
-      if (emit) emit({ type: 'tool_done', tool: toolItem });
+      emitEv(ctx.conversationId, emit, { type: 'tool_done', tool: toolItem });
       return result;
     };
     for (let start = 0; start < calls.length; start += maxPar) {
@@ -238,7 +286,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         toolLog.push(toolItem);
         if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
           const p = plans.get(String(ctx.conversationId || 'g'));
-          if (p) emit({ type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
+          if (p) emitEv(ctx.conversationId, emit, { type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
         }
         const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
         msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(rawResults[k]), msgCap) });

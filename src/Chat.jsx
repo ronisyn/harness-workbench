@@ -139,6 +139,11 @@ export default function Chat({ user, onLogout }) {
   const [modelList, setModelList] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // 活动轮询（旁观/断连实时性兜底：事件环增量 + 活动条 + 完成自动刷新）
+  const [live, setLive] = useState(null); // {last, tools, ts}
+  const actSeqRef = useRef(0);
+  const lastActRef = useRef(0);
+  const busyRef = useRef(false);
   const [stats, setStats] = useState({});
   const [drawer, setDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState('caps');
@@ -194,8 +199,9 @@ export default function Chat({ user, onLogout }) {
     setModel(ms[0]?.model_id || '');
   };
 
-  const openConv = async (id) => {
-    setCur(id);
+  // 加载会话全部（消息+轨迹+统计）；openConv 与活动轮询完成刷新共用
+  const loadMessages = async (id) => {
+    if (!id) return;
     const [md, tc] = await Promise.all([api.messages(id), api.toolcalls(id).catch(() => ({ toolcalls: [] }))]);
     // 轨迹按 message_id 挂到对应 assistant 消息（历史回看）
     const byMsg = {};
@@ -215,6 +221,14 @@ export default function Chat({ user, onLogout }) {
     loadStats(id);
     const c = convs.find((x) => x.id === id);
     setCurTitle(c?.title || '对话');
+  };
+
+  const openConv = async (id) => {
+    setCur(id);
+    actSeqRef.current = 0;
+    lastActRef.current = 0;
+    setLive(null);
+    await loadMessages(id);
   };
 
   const newConv = async () => {
@@ -346,6 +360,34 @@ export default function Chat({ user, onLogout }) {
       setBusy(false);
     }
   };
+
+  // 活动轮询（旁观/断连兜底）：当前会话每 2.5s 拉事件环增量；
+  // 本页 busy（SSE 直连渲染中）只推进 seq 不重复渲染；静默>6s 视为本轮结束→自动刷新最新结果
+  React.useEffect(() => { busyRef.current = busy; }, [busy]);
+  React.useEffect(() => {
+    if (!cur) return;
+    const t = setInterval(async () => {
+      try {
+        const d = await api.activity(cur, actSeqRef.current);
+        const items = (d && d.items) || [];
+        if (!items.length) {
+          // 空=仍在执行（LLM 思考间隙）或已结束但 run_end 未达：30s 兜底清理活动条
+          if (lastActRef.current && Date.now() - lastActRef.current > 30000) { lastActRef.current = 0; setLive(null); }
+          return;
+        }
+        actSeqRef.current = d.seq || actSeqRef.current;
+        lastActRef.current = Date.now();
+        const ended = items.some((x) => x.type === 'run_end');
+        if (ended) { lastActRef.current = 0; setLive(null); if (!busyRef.current) loadMessages(cur); return; }
+        if (busyRef.current) return; // 本页 SSE 直连渲染中，环仅作进度推进
+        const last = items[items.length - 1];
+        setLive({ last: (last.type === 'tool_start' || last.type === 'tool_done') && last.tool ? last.tool.name : last.type, ts: Date.now() });
+        // 同步轨迹抽屉数据（进行中也能看）
+        api.toolcalls(cur).then((x) => setToolcalls(x.toolcalls || [])).catch(() => {});
+      } catch { /* 轮询失败静默（断网/会话删除） */ }
+    }, 2500);
+    return () => clearInterval(t);
+  }, [cur]);
 
   const changePermission = async (perm) => {
     await api.patchConversation(cur, { permission: perm });
@@ -499,6 +541,12 @@ export default function Chat({ user, onLogout }) {
 
         {/* 对话区 */}
         <main className="rw-main">
+          {live && (
+            <div className="rw-livebar" title="该会话正在执行中（旁观实时状态）">
+              <span className="rw-live-dot" /> 正在执行…
+              {live.last ? <span className="rw-live-cur">当前：{String(live.last).slice(0, 40)}</span> : <span className="rw-live-cur">思考中</span>}
+            </div>
+          )}
           <div className="rw-msgs">
             {!cur && <div className="rw-empty">← 新建或选择左侧会话，开始对话</div>}
             {msgs.map((m, i) => (
