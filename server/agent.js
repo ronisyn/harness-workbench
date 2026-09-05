@@ -300,6 +300,18 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         ],
         { model: ctx.__model || 'deepseek-v4-flash', maxTokens: 500, timeoutMs: 60000 }, keys);
       digest = String(r.content || '').trim().slice(0, 1500);
+      // O-10 折叠成本入账（2026-09 批1）：折叠/归档是真实 LLM 消耗，此前不经 usage_stats 导致钱包虚低；
+      // 计入本任务累计（cumCost）与账本（kind=collapse，挂 agent_run_id），费用透明可查。
+      try {
+        const uc = r.tokensIn != null ? { hit: r.cache_hit || 0, miss: r.cache_miss != null ? r.cache_miss : Math.max(0, (r.tokensIn || 0) - (r.cache_hit || 0)), out: r.tokensOut || 0 } : null;
+        if (uc) {
+          const cCost = calcCost(ctx.__provider || 'deepseek', uc);
+          cumCost += cCost; cumTin += r.tokensIn || 0; cumTout += r.tokensOut || 0;
+          cumHit += r.cache_hit || 0; cumMiss += r.cache_miss != null ? r.cache_miss : 0;
+          await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"collapse")',
+            [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, ctx.__provider || 'deepseek', ctx.__model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, r.cache_miss != null ? r.cache_miss : 0, cCost]);
+        }
+      } catch { /* 折叠计量失败不影响折叠 */ }
     } catch { digest = ''; }
     msgs.splice(1, end - 1, {
       role: 'system',
