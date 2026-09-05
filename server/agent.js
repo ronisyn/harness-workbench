@@ -379,7 +379,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       if (lim.fakeContinueWarn > 0 && toolLog.length === 0) {
         const claimRe = /(已(完成|实现|落地|修复|写入|创建|提交|删除|修改|部署|上线|清理)|commit [0-9a-f]{7,}|✅|验收通过|测试通过|全部通过)/;
         const isClaim = claimRe.test(final);
-        const taskish = /(继续任务|继续执行|开始执行|接着做|接着改|请(执行|修复|优化|实现|落地|部署|清理|提交)|帮我(修复|改|写|建|实现|优化|清理|部署)|修复|优化|实现|落地|部署|提交|执行|清理|体检|改造|推进)/.test(lastUserTextOf(msgs));
+        // 任务语境判定（2026-09 修复"假开始"逃逸）：不能只看最后一条用户消息——恢复/催促语境
+        // （"继续验证""又假开始了""不要假开始，这次是不是又"）不含执行动词但显然处于任务流中。
+        // 方案：扫描最近 4 条用户消息，任一含任务/恢复/催促语义即视为任务语境；纯问答不受影响。
+        const _taskishRe = /(继续(任务|执行|验证|修复|检查|优化|推进|做|改|干|写|查)|恢复(任务|执行|工作)|接着(做|改|干|修|查|写)|自检|彻查|复查|重新(来|做|执行|验证)|又(中断|假开始|断了|停了|没做|假)|再来|再(试|做|来|执行|验证)一次|开始执行|开始修复|请(执行|修复|优化|实现|落地|部署|清理|提交|检查|彻查|自检|验证)|帮我(修复|改|写|建|实现|优化|清理|部署|验证|检查)|修复|优化|实现|落地|部署|提交|执行|清理|体检|改造|推进|验证一下|检查一下|测试通过|有没有问题|是否(真实|真的|存在)|核实|确认一下|动手|做一下|查一下|看看|读一下|改一下)/;
+        const _lastUsers = [];
+        for (let _i = msgs.length - 1; _i >= 0 && _lastUsers.length < 4; _i--) {
+          const _m = msgs[_i];
+          if (_m && _m.role === 'user') _lastUsers.push(String(_m.content || ''));
+        }
+        const taskish = _taskishRe.test(_lastUsers.join('\n'));
         if (isClaim && taskish) {
           if (fakeWarnCount < lim.fakeContinueWarn) {
             fakeWarnCount++;
@@ -389,6 +398,23 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           // 已达打回上限：放行但强制标注"未经验证"，避免假完成直接以可信姿态收尾
           final = '⚠️【平台检测：本回复声称已执行完成，但本轮无任何工具调用记录，内容未经工具验证】\n' + final;
           emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型声称完成但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
+        }
+        // B6b 假开始检测（B6 的逃逸形态，2026-09 实测根因）：B6 只打回"声称已完成"，模型规避方式=改为输出
+        // 纯承诺性开场（"开始执行——…""你说得对，现在立即…"）同样零工具调用 → 用户视角"说了开始就停"（假开始）。
+        // 判定：任务语境 + 本轮零工具 + 文本呈承诺性（开始/立即/先确认/我来核实等）+ 无实质内容（无 commit/路径/结论）→ 打回强制动手。
+        // 误伤防线：纯问答（taskish=false）不触发；真正给了结论/方案/数据的回复不触发（hasSubstance 排除）；
+        // 道歉认错但无行动词的也放行（promiseRe 要求具体行动承诺词）。
+        const promiseRe = /(开始执行|现在立即|马上(用|行动|动手|核实|查|看)|用可验证的行动|我来(查|看|核实|确认|做|写|改|修|读|检查|验证|跑)|让我先|我先(查|看|确认|核实|读|检查|跑|验证|动手)|这就(去|开始|动手|执行)|立即(用|查|看|核实|动手|开始|执行)|准备(开始|执行|动手)|接下来我(要|会|将)|先(确认|核实|查|看|检查|跑)(一下|一遍)?|本条回复即开始|现在就开始)/;
+        const isPromise = promiseRe.test(final);
+        const hasSubstance = /(commit [0-9a-f]{7,}|✅|结论|根因|原因是|问题(出在|在于)|方案[:：]|已读取|已写入|已修复|路径[:：]|\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+\.(js|jsx|ts|tsx|md|json|css|py|sh)|测试通过|验证通过|验收|本回复为最终总结)/.test(final);
+        if (isPromise && !hasSubstance) {
+          if (fakeWarnCount < lim.fakeContinueWarn) {
+            fakeWarnCount++;
+            msgs.push({ role: 'system', content: '【平台强制检测：本轮只输出行动承诺、未调用任何工具】你上一条回复（"' + String(final).replace(/\s+/g, ' ').slice(0, 120) + '"）只说了"将要做什么"，但没有任何工具执行记录。执行类任务请【直接在本轮调用工具动手】：先做一步真实的读/查/改/写再说话；开场说明压缩到一句即可，不要单独输出一整段"我将要做…"。' });
+            continue; // 打回重答：必须带工具调用重新生成
+          }
+          final = '⚠️【平台检测：本回复只承诺行动、无任何工具调用记录，内容未经工具验证】\n' + final;
+          emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型只输出行动承诺但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
         }
       }
       // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
