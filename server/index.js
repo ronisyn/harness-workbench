@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
-import { activeProviders, allProviders, findProvider } from './llm/providers.js';
+import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
 import { chatStream, calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS } from './tools/index.js';
@@ -221,13 +221,16 @@ app.get('/api/conversations/:id/activity', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
-// 已接入厂商 + 模型（设置页展示）
+// 已接入厂商 + 模型（设置页展示；connected=该厂商 key 是否已配置，前端据此区分"已接入"与"未配置 Key"）
 app.get('/api/providers', requireAuth, async (req, res) => {
-  const providers = await db.query('SELECT id, provider_key, name, base_url, enabled FROM providers ORDER BY sort_order, id');
+  const providers = await db.query('SELECT id, provider_key, name, base_url, api_key_env, enabled FROM providers ORDER BY sort_order, id');
   const models = await db.query('SELECT id, provider_id, model_id, name, capabilities, enabled FROM models ORDER BY provider_id, model_id');
   const byProvider = {};
   for (const m of models) (byProvider[m.provider_id] = byProvider[m.provider_id] || []).push(m);
-  res.json({ ok: true, providers: providers.map((p) => ({ ...p, models: byProvider[p.id] || [] })) });
+  res.json({
+    ok: true,
+    providers: providers.map((p) => ({ ...p, connected: Boolean(p.api_key_env && config.keys[p.api_key_env]), models: byProvider[p.id] || [] })),
+  });
 });
 
 // ---------- 对话（双路径） ----------
@@ -869,6 +872,13 @@ async function main() {
       await db.query('UPDATE models SET enabled=0 WHERE provider_id=? AND model_id=?', [dpr[0].id, 'deepseek-chat']);
     }
   } catch { /* 修正失败不阻塞 */ }
+  // 模型目录同步：各厂商 chatModels（主对话模型清单）入库供菜单可选；已存在不覆盖人工开关状态
+  try {
+    const prow = await db.query('SELECT id, provider_key FROM providers');
+    let synced = 0;
+    for (const row of prow) synced += await syncChatModels(db, row);
+    if (synced > 0) console.log(`[catalog] 模型目录同步完成：${synced} 个厂商目录已核对`);
+  } catch (e) { console.error('[catalog] 同步失败:', e.message); }
   // 重启自检：遗留 running 现场 → interrupted（断点恢复外壳）
   try { await interruptStaleOnBoot(); } catch (e) { console.error('[runtrack] 重启自检失败:', e.message); }
   // D5 启动清理：24h 前仍 running 的后台任务标记 stale（父进程可能已退出/僵尸残留；不 kill 防误伤新 pid，仅显式标记便于 job_list 识别）

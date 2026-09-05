@@ -194,7 +194,7 @@ export default function Chat({ user, onLogout }) {
     loadConvs();
     // 已接入厂商 + 各厂商模型列表（模型下拉用）
     api.providers().then((d) => {
-      const active = d.providers.filter((p) => p.provider_key !== 'openrouter');
+      const active = d.providers.filter((p) => p.connected);
       setProviders(active.map((p) => ({ id: p.provider_key, name: p.name })));
       setProvList(d.providers);
       if (active[0]) {
@@ -904,8 +904,8 @@ export default function Chat({ user, onLogout }) {
 
               {drawerTab === 'providers' && (
                 <div className="rw-providers">
-                  <div className="rw-cap-gtitle">已接入厂商（{provList.length}）</div>
-                  {provList.map((p) => (
+                  <div className="rw-cap-gtitle">已接入厂商（{provList.filter((p) => p.connected).length}）</div>
+                  {provList.filter((p) => p.connected).map((p) => (
                     <div key={p.id} className="rw-provider">
                       <div className="rw-provider-name">{p.name} <span className="rw-provider-key">{p.provider_key}</span></div>
                       <div className="rw-provider-models">
@@ -915,6 +915,17 @@ export default function Chat({ user, onLogout }) {
                       </div>
                     </div>
                   ))}
+                  {provList.filter((p) => !p.connected).length > 0 && (
+                    <>
+                      <div className="rw-cap-gtitle">未配置 Key（{provList.filter((p) => !p.connected).length}）</div>
+                      {provList.filter((p) => !p.connected).map((p) => (
+                        <div key={p.id} className="rw-provider rw-provider-off">
+                          <div className="rw-provider-name">{p.name} <span className="rw-provider-key">{p.provider_key}</span></div>
+                          <div className="rw-provider-models"><span className="rw-muted">未配置 Key，无法加载模型（在 .env 填入 {p.api_key_env || 'API key'} 后重启接入）</span></div>
+                        </div>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
 
