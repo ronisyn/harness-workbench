@@ -137,7 +137,7 @@ async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -148,9 +148,15 @@ async function agentLimits() {
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
       budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 100),
       fakeContinueWarn: pick('fake_continue_warn', def.fakeContinueWarn),
+      // F3 折叠阈值（0=默认现值）；F4 连续失败（默认 3，0=关）
+      collapseGap: pick('collapse_min_gap', 0) || 20,
+      collapseKeep: pick('collapse_keep_msgs', 0) || 80,
+      collapseChars: pick('collapse_trigger_chars', 0) || 30000,
+      collapseInput: pick('collapse_input_chars', 0) || 18000,
+      failGuardN: pick('consecutive_fail_guard', 0) || 3,
       rev: pick('__policy_rev', 0),
     };
-  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0 }; }
+  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
 }
@@ -280,17 +286,19 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   // 防止长任务上下文涨到 10 万 token 顶格（每轮 3 万→尾段 10 万是慢与贵的根因）；
   // 折叠后保留最近 80 条；间隔 ≥20 轮可再次折叠；明细始终在 DB tool_calls 可查
   let lastCollapseRound = -99;
-  const maybeCollapseEarly = async (round) => {
-    if (round - lastCollapseRound < 20) return false;
-    const end = msgs.length - 80;
+  const maybeCollapseEarly = async (round, lim) => {
+    // F3 折叠阈值可调（2026-09 批1）：间隔/保留条数/触发字符/输入截断均可 settings 调（0=默认现值）
+    const gap = lim.collapseGap || 20, keep = lim.collapseKeep || 80, trig = lim.collapseChars || 30000, inCap = lim.collapseInput || 18000;
+    if (round - lastCollapseRound < gap) return false;
+    const end = msgs.length - keep;
     if (end <= 2) return false;
     let totalChars = 0;
     for (let i = 1; i < end; i++) totalChars += String(msgs[i]?.content || '').length + 60;
-    if (totalChars < 30000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
+    if (totalChars < trig) return false; // 上下文尚可接受，不产生无谓 LLM 成本
     const head = msgs.slice(1, end);
     const text = head
       .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 500))
-      .join('\n').slice(-18000);
+      .join('\n').slice(-inCap);
     let digest = '';
     try {
       const r = await chatOnce(ctx.__provider || 'deepseek',
@@ -316,8 +324,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     msgs.splice(1, end - 1, {
       role: 'system',
       content: digest
-        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 80 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
-        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 80 条）；明细在 DB tool_calls，可用 db_query 查询】',
+        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 ' + keep + ' 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
+        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 ' + keep + ' 条）；明细在 DB tool_calls，可用 db_query 查询】',
     });
     lastCollapseRound = round;
     return true;
@@ -352,7 +360,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
     emitEv(ctx.conversationId, emit, { type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
     archiveEarlyContext(msgs); // 轻压缩：早期超长项置占位
-    await maybeCollapseEarly(round); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩
+    await maybeCollapseEarly(round, lim); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩（F3 阈值可调）
     const llmT0 = Date.now();
     // P1 统一通道：轻量模式（普通问答/无明确任务词）→ 只暴露 LIGHT_TOOLSET 只读工具（模型可零工具直接答，也可单轮只读查询）；
     // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
