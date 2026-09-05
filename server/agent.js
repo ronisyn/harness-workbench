@@ -70,26 +70,73 @@ function contextResultPrune(text, cap) {
   return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
 }
 
+// B6 假完成检测辅助：取最近一条用户消息文本（用于判断是否"任务语境"）
+function lastUserTextOf(msgs) {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m && m.role === 'user') return String(m.content || '');
+  }
+  return '';
+}
+
 // 每轮费用=真实三档计费（calcCost：hit/miss/out，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
+// C1 轨迹瘦身：assistant tool_calls 回填上下文时，对超长 arguments 做分级截断（保留 id/name 骨架与字段名，
+// 细节全文始终在 DB tool_calls.args 可按 tool_call_id 精确查回）。执行与落库仍用原始 calls，仅上下文体积变小。
+const SLIM_ARG_LEN = 600;  // arguments 总长超过此值才瘦身（短参数原样保留，如 read_file 路径）
+const SLIM_VAL_LEN = 200;  // 单个字段值超过此长度截断（典型：write_file/append_file 的 content、edit_file 的 new）
+function slimToolCallForContext(call) {
+  const name = call.function?.name || 'tool';
+  const raw = String(call.function?.arguments ?? '');
+  if (raw.length <= SLIM_ARG_LEN) return { id: call.id, type: 'function', function: call.function };
+  let slim = raw;
+  try {
+    const obj = JSON.parse(raw);
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v == null) continue;
+      const str = typeof v === 'string' ? v : JSON.stringify(v);
+      if (str.length > SLIM_VAL_LEN) {
+        obj[k] = `[内容已截断(原文 ${str.length} 字符)；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+      }
+    }
+    slim = JSON.stringify(obj);
+  } catch {
+    slim = raw.slice(0, SLIM_ARG_LEN) + `…[原文 ${raw.length} 字符已截断；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+  }
+  return { id: call.id, type: 'function', function: { name, arguments: slim } };
+}
 // 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
 // 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
+// C3 触发条件 = 条数 > 90 或 累计字符 > 65000（防"条数不多但单条巨大"撑爆窗口）
 function archiveEarlyContext(msgs) {
-  if (msgs.length <= 110) return;
-  const keepFrom = msgs.length - 100;
+  let totalChars = 0;
+  for (const m of msgs) {
+    if (!m) continue;
+    totalChars += String(m.content || '').length;
+    if (m.tool_calls) for (const tc of m.tool_calls) totalChars += String(tc.function?.arguments || '').length;
+  }
+  if (msgs.length <= 90 && totalChars <= 65000) return;
+  const keepFrom = msgs.length - 80;
   for (let i = 1; i < keepFrom; i++) {
     const m = msgs[i];
     if (!m) continue;
     if (m.role === 'system' && m.content === COMPLETION_HINT) { msgs.splice(i, 1); i--; continue; } // 早期重复评估提示移除（最新一条在尾部）
     if (m.role === 'tool' && String(m.content || '').length > 150) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
     else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 350) m.content = '（早期过程说明已压缩归档）';
+    else if (m.role === 'assistant' && m.tool_calls) { // C2 早期工具调用 arguments 折叠（保留 id/name 骨架维持 API 配对合法）
+      for (const tc of m.tool_calls) {
+        const a = String(tc.function?.arguments || '');
+        if (a.length > 120) tc.function.arguments = JSON.stringify({ _archived: true, note: '早期工具调用参数已折叠；全文可按 tool_call_id=' + tc.id + ' 用 db_query 查 tool_calls.args' });
+      }
+    }
   }
 }
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -99,6 +146,7 @@ async function agentLimits() {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
       loopGuard: pick('loop_guard', def.loopGuard), maxParallelT: pick('max_parallel_tools', def.maxParallelT),
       budgetYuan: pick('task_budget_yuan', 20), budgetTotal: pick('task_budget_total', 100),
+      fakeContinueWarn: pick('fake_continue_warn', def.fakeContinueWarn),
       rev: pick('__policy_rev', 0),
     };
   } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0 }; }
@@ -116,6 +164,7 @@ export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问�
   '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
   '行动原则（务必遵守）：',
   '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
+  '- **假完成会被平台打回**：任务语境下若你直接回复"已执行/已完成/已提交"等完成声称但本轮无任何工具调用记录，平台会自动打回要求补真实执行；连续不改则你的回复会被强制加注"未经工具验证"。诚实路径：真做→展示结果；或明确声明"本轮未执行工具操作"。',
   '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
   '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理/git/日志跟随），避免 shell 引号管道坑。想敲 cat/ls/grep/find/sed/head 读文件时先停——平台会拦并提示（读型命令门禁，审计显示 58% 的 shell 调用本可用专门工具）。',
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
@@ -135,7 +184,7 @@ const COMPLETION_HINT = [
   '- 若未完成或还需验证（如：写码后未测试、查询后未给结论、任务只做了一部分）：继续调用工具把任务做完，直到目标真正完成再总结。',
 ].join('\n');
 
-export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 1.0 }) {
+export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
   const sysContent = () => {
@@ -152,10 +201,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let dispSeq = 0;        // 展示序号：全 run 唯一单调递增（子代理/并行不撞号）
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
+  let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
   const t0 = Date.now();
   let cumTin = 0, cumTout = 0, cumCost = 0; // WS2 本任务累计钱包（每轮计量后累加）
 
   // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
+  // 2026-09 token 优化（缓存友好）：快照内容每轮变化（轮次/用时/累计 token），若插在历史前（splice(1,0)）
+  // 会击穿 DeepSeek 前缀缓存（缓存要求前缀完全一致 → 整段历史 100% 按 miss 全价计费，miss/hit 价差 27 倍）。
+  // 改为 append 到消息末尾：前缀 = ENV_MAP + 历史保持稳定 → 历史命中 hit 价，仅尾部增量按 miss 计费。
   const pushSnapshot = async (round, lim) => {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
@@ -169,7 +222,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       + ' | 会话 mode=' + (ctx.mode || 'chat') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
       + ' | 政策版本 rev ' + lim.rev + resume
       + '\n以本快照为准；政策版本变化=规则已更新，丢弃旧理解。';
-    msgs.splice(1, 0, { role: 'system', content: snap });
+    msgs.push({ role: 'system', content: snap });
   };
 
   // 5.2 后台/子代理完成通知（事件驱动化：父代理轮间自动获知完成，无需反复轮询）
@@ -205,24 +258,24 @@ export async function runAgent({ provider, model, messages, permission = 'full',
 
   // 5.1 语义折叠（按 harness 压缩标准）：早期已完成轮次用一次 LLM 摘要折叠成 1 条 system，
   // 防止长任务上下文涨到 10 万 token 顶格（每轮 3 万→尾段 10 万是慢与贵的根因）；
-  // 折叠后保留最近 100 条；间隔 ≥30 轮可再次折叠；明细始终在 DB tool_calls 可查
+  // 折叠后保留最近 80 条；间隔 ≥20 轮可再次折叠；明细始终在 DB tool_calls 可查
   let lastCollapseRound = -99;
   const maybeCollapseEarly = async (round) => {
-    if (round - lastCollapseRound < 30) return false;
-    const end = msgs.length - 100;
+    if (round - lastCollapseRound < 20) return false;
+    const end = msgs.length - 80;
     if (end <= 2) return false;
     let totalChars = 0;
     for (let i = 1; i < end; i++) totalChars += String(msgs[i]?.content || '').length + 60;
-    if (totalChars < 45000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
+    if (totalChars < 30000) return false; // 上下文尚可接受，不产生无谓 LLM 成本
     const head = msgs.slice(1, end);
     const text = head
-      .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 700))
-      .join('\n').slice(-22000);
+      .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 500))
+      .join('\n').slice(-18000);
     let digest = '';
     try {
       const r = await chatOnce(ctx.__provider || 'deepseek',
         [
-          { role: 'system', content: '你是任务执行归档器。把下面【早期执行轮次】压缩成 ≤260 字中文摘要，必须保留：用户目标、已确认的关键事实/路径/编号、已达成的中间结论、未完成事项与线索。工具级细节省略（可在 DB 查）。只输出摘要本体。' },
+          { role: 'system', content: '你是任务执行归档器。把下面【早期执行轮次】压缩成 ≤260 字中文摘要，必须保留：用户目标、已确认的关键事实/路径/编号、已达成的中间结论、未完成事项与线索。工具级细节省略（可在 DB 查）。只输出摘要本体。注意：凡涉及"已改/已完成/已提交"的结论，摘要中一律只陈述当时动作（如"曾执行 edit_file 改 X"），不得断言"现已生效"——最终状态以当前文件系统/git/DB 实时查询为准。' },
           { role: 'user', content: text },
         ],
         { model: ctx.__model || 'deepseek-v4-flash', maxTokens: 500, timeoutMs: 60000 }, keys);
@@ -231,8 +284,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     msgs.splice(1, end - 1, {
       role: 'system',
       content: digest
-        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 100 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
-        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 100 条）；明细在 DB tool_calls，可用 db_query 查询】',
+        ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 80 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
+        : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 80 条）；明细在 DB tool_calls，可用 db_query 查询】',
     });
     lastCollapseRound = round;
     return true;
@@ -289,6 +342,87 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
       let final = res.content || '';
+      // C4 输出自动续段（2026-09）：单轮输出触到模型 max_tokens 上限(finish_reason=length)时自动续写拼接，
+      // 不再要求用户手动说"继续"。续写上下文=已输出片段+增量指令；只续不重；达上限自动停下并注明。
+      // E3 修正：次数/长度上限从硬编码改为可调常量（防长输出任务被 4 次×24000 硬上限无谓截断——
+      // 现代模型本可完整输出，截断只会让用户反复说"继续"，徒增轮次与往返成本）
+      const C4_MAX_CONT = 8;      // 最多自动续写 8 次（原 4 次；继续延长仍以 finish_reason + 预算护栏收口）
+      const C4_MAX_CHARS = 80000; // 续写累计上限 8 万字符（原 2.4 万，覆盖绝大多数长文档；仍远低于上下文窗口）
+      let frC4 = res.finishReason || '';
+      if (frC4 === 'length') {
+        let contN = 0;
+        while (frC4 === 'length' && contN < C4_MAX_CONT && final.length < C4_MAX_CHARS) {
+          contN++;
+          const contRes = await chatOnce(provider,
+            [...msgs,
+              { role: 'assistant', content: final },
+              { role: 'user', content: '（平台自动续写：你上一条输出触到单次长度上限被截断。请直接从中断处继续输出剩余部分；只输出增量，不得重复已输出内容，不加开场白与总结。）' }],
+            { model: model || provider, maxTokens: 8000, timeoutMs: 120000 }, keys).catch(() => null);
+          if (!contRes || !contRes.content) break;
+          const seg = String(contRes.content).trim();
+          if (!seg) break;
+          final += seg;
+          frC4 = contRes.finishReason || '';
+          const u = contRes;
+          const costSeg = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokensIn || 0) - (u.cache_hit || 0), out: u.tokensOut || 0 });
+          try {
+            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
+              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0]);
+            cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
+          } catch { /* 计量失败不影响续写 */ }
+        }
+        if (frC4 === 'length') final += '\n\n> ⚠️ 本段输出经 ' + contN + ' 次自动续写仍达长度上限；如还需剩余部分可回复"继续"。';
+      }
+      // B6 假完成检测（平台强制，非提示词）：声称"已执行/已完成"但本轮 toolLog 为空（未调用任何工具）→ 打回
+      // 适用：任务语境（用户下达了执行类指令/恢复了挂起任务），模型却直接输出"完成了/提交了/改好了"等完成声称。
+      // 语义：纯问答（知识性/闲聊）不带执行声称词 → 不触发；空答兜底 final 自动生成摘要 → 不触发（final 非模型声称）。
+      if (lim.fakeContinueWarn > 0 && toolLog.length === 0) {
+        const claimRe = /(已(完成|实现|落地|修复|写入|创建|提交|删除|修改|部署|上线|清理)|commit [0-9a-f]{7,}|✅|验收通过|测试通过|全部通过)/;
+        const isClaim = claimRe.test(final);
+        // 任务语境判定（2026-09 修复"假开始"逃逸）：不能只看最后一条用户消息——恢复/催促语境
+        // （"继续验证""又假开始了""不要假开始，这次是不是又"）不含执行动词但显然处于任务流中。
+        // 方案：扫描最近 4 条用户消息，任一含任务/恢复/催促语义即视为任务语境；纯问答不受影响。
+        const _taskishRe = /(继续(任务|执行|验证|修复|检查|优化|推进|做|改|干|写|查)|恢复(任务|执行|工作)|接着(做|改|干|修|查|写)|自检|彻查|复查|重新(来|做|执行|验证)|又(中断|假开始|断了|停了|没做|假)|再来|再(试|做|来|执行|验证)一次|开始执行|开始修复|请(执行|修复|优化|实现|落地|部署|清理|提交|检查|彻查|自检|验证)|帮我(修复|改|写|建|实现|优化|清理|部署|验证|检查)|修复|优化|实现|落地|部署|提交|执行|清理|体检|改造|推进|验证一下|检查一下|测试通过|有没有问题|是否(真实|真的|存在)|核实|确认一下|动手|做一下|查一下|看看|读一下|改一下)/;
+        const _lastUsers = [];
+        for (let _i = msgs.length - 1; _i >= 0 && _lastUsers.length < 4; _i--) {
+          const _m = msgs[_i];
+          if (_m && _m.role === 'user') _lastUsers.push(String(_m.content || ''));
+        }
+        const taskish = _taskishRe.test(_lastUsers.join('\n'));
+        if (isClaim && taskish) {
+          if (fakeWarnCount < lim.fakeContinueWarn) {
+            fakeWarnCount++;
+            msgs.push({ role: 'system', content: '【平台强制检测：本轮声称完成但无工具调用】你上一条回复声称已执行完成（"' + String(final).replace(/\s+/g, ' ').slice(0, 120) + '"），但本轮没有任何工具执行记录。请立即用真实工具完成所述工作并展示结果；若你确实无法执行或本轮仅为说明，请明确说明"本轮未实际执行任何工具操作"，不要声称完成。' });
+            continue; // 打回重答
+          }
+          // 已达打回上限：放行但强制标注"未经验证"，避免假完成直接以可信姿态收尾
+          final = '⚠️【平台检测：本回复声称已执行完成，但本轮无任何工具调用记录，内容未经工具验证】\n' + final;
+          emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型声称完成但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
+        }
+        // B6b 假开始检测 v2（A+D 反转，2026-09 二次实证）：v1 把「承诺词表命中」当必要条件 → 模型措辞漂移即可逃逸
+        // （658/660 实测样本：无 v1 承诺词变体照样零工具收尾；且 v1 hasSubstance 把「承诺中提到的文件名/路径」
+        // 误当产出锚点放行——承诺文"先读取 agent.js"也含路径，无区分力）。反转：
+        // 判定 = 任务语境(taskish) + 本轮零工具 + 无实质产出锚点 → 假开始。不依赖穷举承诺措辞（结构性检测）。
+        // 误伤防线：纯问答 taskish=false 不触发；真正给了结论/根因/行号/哈希/完成式陈述的不触发（hasSubstance 放行）；
+        // 打回是软性的（continue 让模型重答一次，连续 2 次才加注放行）——偶发误伤可自愈，漏网假开始代价更高。
+        const promiseRe = /(开始执行|现在(立即|就|直接|动手)|马上(用|行动|动手|核实|查|看|读)|用可验证的行动|我来(查|看|核实|确认|做|写|改|修|读|检查|验证|跑|动手|取证)|让我先|我先(查|看|确认|核实|读|检查|跑|验证|动手|取证|读取|打开)|这就(去|开始|动手|执行)|立即(用|查|看|核实|动手|开始|执行|读取)|准备(开始|执行|动手)|接下来我(要|会|将)|先(取证|确认|核实|查|看|检查|跑|读|读取|打开)(一下|一遍)?|本条回复即开始|现在就开始|落地(开始|中|推进)|动手(做|改|修|查)?|开始(落地|执行|修复|自检|彻查))/;
+        const isPromise = promiseRe.test(final);
+        // D: 实质产出锚点（证明"已产出"而非"将要做"）：commit+哈希/完成式/结论式/行号/消息引用/数据。
+        // 注意：① 不再把「裸文件名/路径」当锚点——承诺文也提文件名，无区分力（v1 漏网根因之一）；
+        // ② 裸哈希(如 0e0a598)也不算——承诺/道歉文可能提及目标 commit，仅"commit xxxxxxx"带动词才算（652 实证）。
+        const hasSubstance = /(commit [0-9a-f]{7,}|✅|结论|根因|原因是|问题(出在|在于)|方案[:：]|已(读取|写入|修复|完成|创建|提交|删除|修改|验证)|测试通过|验证通过|验收|本回复为最终总结|`[^`]+`|L\d+|第\s*\d+\s*行|#\d+|消息\s*\d+|[0-9]+(\.[0-9]+)?\s*(轮|次|个|条|元|%|commit|秒|分钟|token))/;
+        // 弱结构信号：回复以"好/收到/可以…+现在/马上/这就"开头（承诺开场形态）——词表兜底，防措辞漂移逃逸
+        const leadingPromise = /^(好的?|收到|明白|行|可以|没问题|嗯|OK|好嘞)[，,。!！\s]*?(现在|马上|这就|开始|我先|让我|准备|立即|直接|先)/.test(final.trim());
+        if (taskish && !hasSubstance.test(final) && (isPromise || isClaim || leadingPromise)) {
+          if (fakeWarnCount < lim.fakeContinueWarn) {
+            fakeWarnCount++;
+            msgs.push({ role: 'system', content: '【平台强制检测：本轮只输出行动承诺、未调用任何工具】你上一条回复（"' + String(final).replace(/\s+/g, ' ').slice(0, 120) + '"）只说了"将要做什么"，但没有任何工具执行记录。执行类任务请【直接在本轮调用工具动手】：先做一步真实的读/查/改/写再说话；开场说明压缩到一句即可，不要单独输出一整段"我将要做…"。' });
+            continue; // 打回重答：必须带工具调用重新生成
+          }
+          final = '⚠️【平台检测：本回复只承诺行动、无任何工具调用记录，内容未经工具验证】\n' + final;
+          emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型只输出行动承诺但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
+        }
+      }
       // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
       if (!final.trim() && toolLog.length > 0) {
         const names = {};
@@ -333,7 +467,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       };
     }
     // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
-    msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: c.function })) });
+    // C1：回填上下文用瘦身版 arguments（原始 calls 仍用于执行与落库，见下方 execOne）
+    msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
     const maxPar = lim.maxParallelT > 0 ? lim.maxParallelT : 1; // 0=关闭并行（串行）
     const results = new Array(calls.length);
     const execOne = async (call, idx) => {

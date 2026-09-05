@@ -208,6 +208,16 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     updated_at DATETIME DEFAULT NOW()
   )`,
+  // ---- 后台长任务注册表持久化（D2/D5：jobs Map 仅内存态，重启/超 TTL 后 pid↔日志映射丢失 → DB 持久索引，job_list/job_output/kill_process 重启后仍可查；启动时清理陈旧 running） ----
+  `CREATE TABLE IF NOT EXISTS long_jobs (
+    job_id VARCHAR(40) PRIMARY KEY,
+    cmd TEXT,
+    log_file VARCHAR(255),
+    started_at DATETIME DEFAULT NOW(),
+    status VARCHAR(16) DEFAULT 'running',
+    code INT,
+    updated_at DATETIME DEFAULT NOW()
+  )`,
   // ---- 会话已载入技能（F15：技能名持久化，文件内容每次请求实时读取） ----
   `CREATE TABLE IF NOT EXISTS conv_skills (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -284,6 +294,9 @@ export async function initSchema() {
     "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
     'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
     'ALTER TABLE usage_stats ADD COLUMN cache_miss_tokens INT DEFAULT 0',
+    // 2026-09 对话内模型：conversations 记录每会话选中的 provider/model（前端打开会话时恢复、切换即保存）
+    "ALTER TABLE conversations ADD COLUMN provider VARCHAR(32)",
+    "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

@@ -48,7 +48,7 @@ function childEmit(parentEmit, subId, label, seqBase) {
   };
 }
 
-export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 1.0, depth = 0, seedMessages = [], noSubagentOverride = false }) {
+export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 0.4, depth = 0, seedMessages = [], noSubagentOverride = false }) {
   pruneSubs();
   const id = makeSubId();
   const seqBase = nextSeqBase();

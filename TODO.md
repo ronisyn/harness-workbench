@@ -1,4 +1,4 @@
-# Roni Workbench · 迭代状态（更新于 v0.2-platform-layer）
+# Roni Workbench · 迭代状态（更新于 v0.2-platform-layer；自 2026-09 起每日自我进化记录见 docs/daily-evolve-log.md）
 
 > 本文件记录历史反馈与最新状态；详细分轮审计见 docs/平台层差距清单.md，验收指南见 docs/880实测指南.md，
 > 证据汇总见 docs/最终自审报告.md。里程碑 tag：v0.2-platform-layer（22 项平台能力全上线并 E2E 验证）。

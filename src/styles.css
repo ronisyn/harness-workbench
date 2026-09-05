@@ -272,3 +272,181 @@ body {
 .rw-toolgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 8px; max-height: 46vh; overflow: auto; padding: 4px 2px; }
 .rw-toolgrid .rw-cap-item { font-size: 12px; gap: 4px; }
 .rw-tool-tier { font-style: normal; opacity: 0.45; font-size: 10px; margin-left: auto; }
+
+.rw-err { color: #c0392b; background: rgba(192,57,43,.08); border: 1px solid rgba(192,57,43,.25); border-radius: 8px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; }
+.rw-emptynote { color: var(--rw-muted); font-size: 13px; font-style: italic; }
+
+/* ============================================================
+   交互增强 v2（2026-09）：多行输入/输入队列/会话重命名/
+   对话内模型/设置独立页/审批恢复横幅/错误边界
+   ============================================================ */
+
+/* --- 输入条：textarea 多行 + 队列提示 --- */
+.rw-inputbar { align-items: stretch; }
+.rw-inputbox { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rw-inputrow { display: flex; gap: 8px; align-items: flex-end; }
+.rw-inputbar textarea.rw-input { flex: 1; resize: vertical; min-height: 58px; max-height: 200px;
+  line-height: 1.55; font-family: inherit; }
+.rw-inputbar textarea.rw-input::placeholder { color: var(--rw-muted); }
+.rw-inputbtns { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+.rw-inputbtns .rw-btn { white-space: nowrap; }
+.rw-queuepanel { font-size: 12px; color: var(--rw-muted);
+  background: rgba(201, 139, 46, .08);
+  border: 1px solid rgba(201, 139, 46, .4); border-radius: 8px;
+  padding: 6px 10px; line-height: 1.6; display: flex; flex-direction: column; gap: 4px; }
+.rw-queuehead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rw-queuestate { font-weight: 700; }
+.rw-queuestate.on { color: var(--rw-red); }
+.rw-queuecnt b { color: var(--rw-yellow); }
+.rw-queueops { margin-left: auto; display: flex; gap: 6px; }
+.rw-queueops .rw-btn { padding: 2px 10px; font-size: 12px; }
+.rw-queuelist { display: flex; flex-direction: column; gap: 2px; max-height: 120px; overflow-y: auto; }
+.rw-queueitem { display: flex; align-items: center; gap: 8px; background: #fffdf8;
+  border: 1px solid var(--rw-border); border-radius: 6px; padding: 3px 8px; }
+.rw-queueidx { color: var(--rw-yellow); font-weight: 700; font-size: 11px; flex-shrink: 0; }
+.rw-queuetxt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--rw-ink); }
+.rw-queuedel { border: none; background: none; color: var(--rw-muted); cursor: pointer;
+  font-size: 13px; padding: 0 2px; flex-shrink: 0; }
+.rw-queuedel:hover { color: var(--rw-red); }
+.rw-queuenote { font-size: 11px; color: var(--rw-muted); font-style: italic; }
+
+/* --- 会话重命名（✎ 或双击标题；inline 编辑） --- */
+.rw-conv-rename { border: none; background: none; color: var(--rw-muted); cursor: pointer;
+  font-size: 12px; padding: 0 2px; opacity: 0; flex-shrink: 0; }
+.rw-conv:hover .rw-conv-rename { opacity: 1; }
+.rw-conv-rename:hover { color: var(--rw-yellow); }
+.rw-rename-input { flex: 1; min-width: 0; height: 24px; padding: 2px 6px; font-size: 12px; }
+
+/* --- 设置抽屉 → 独立全屏设置页（mask 不透明 + 面板铺满，点「← 返回对话」退出） --- */
+.rw-mask { background: var(--rw-bg); justify-content: center; }
+.rw-drawer { width: 100%; border-left: none; box-shadow: none; max-width: 1240px;
+  border-right: 1px solid var(--rw-border); }
+.rw-drawer-head { background: var(--rw-panel); }
+@media (max-width: 1280px) { .rw-drawer { max-width: 100%; } }
+
+/* --- 待处理审批/问询横幅（断连/刷新恢复入口） --- */
+.rw-pendbar { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px;
+  background: #fff8e6; border-bottom: 1px solid rgba(201, 139, 46, .5); font-size: 12px; }
+.rw-pend-title { color: var(--rw-yellow); font-weight: 700; font-size: 12px; }
+.rw-pend-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rw-pend-item.col { align-items: flex-start; flex-direction: column; gap: 4px; }
+.rw-pend-tag { font-size: 10px; background: var(--rw-yellow); color: #fff; border-radius: 4px;
+  padding: 1px 6px; font-weight: 700; flex-shrink: 0; }
+.rw-pend-code { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--rw-ink);
+  background: #fff; border: 1px solid var(--rw-border); border-radius: 5px; padding: 2px 6px;
+  max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rw-pend-q { line-height: 1.5; }
+.rw-pend-opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.rw-pendbar .rw-btn { padding: 2px 10px; font-size: 12px; }
+
+/* --- 渲染崩溃兜底（App.jsx ErrorBoundary） --- */
+.rw-fatal { height: 100%; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 14px; padding: 40px; text-align: center; background: var(--rw-bg); }
+.rw-fatal h3 { color: var(--rw-red); }
+.rw-fatal pre { max-width: 720px; overflow: auto; text-align: left; background: #fdecea;
+  border: 1px solid var(--rw-red); border-radius: 8px; padding: 12px; font-size: 12px;
+  color: #7a1f0e; white-space: pre-wrap; word-break: break-all; }
+/* ========== 阅读体验 v3（2026-09） ========== */
+/* 1) 修复白字 bug：markdown 深色 pre 规则误伤轨迹/文件详情浅底 pre（米白底+米白字不可读） */
+.rw-msg-c .rw-trace-line pre,
+.rw-msg-c .rw-trace-filedetail pre {
+  background: #f4ecdc;
+  color: #2b2215;
+}
+.rw-trace-line pre,
+.rw-trace-filedetail pre {
+  max-height: 340px;
+}
+
+/* 2) 工具过程折叠面板：默认一行摘要，点开才看明细 */
+.rw-tracebox {
+  border: 1px solid var(--rw-border);
+  border-radius: 10px;
+  margin: 6px 0;
+  background: var(--rw-panel);
+  overflow: hidden;
+}
+.rw-tracebox > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12.5px;
+  color: var(--rw-ink);
+  user-select: none;
+}
+.rw-tracebox > summary::-webkit-details-marker {
+  display: none;
+}
+.rw-tracebox > summary:hover {
+  background: var(--rw-tint);
+}
+
+.rw-tracebox-sum {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.rw-tracebox-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2e8b57;
+  flex-shrink: 0;
+}
+.rw-tracebox-dot.run {
+  background: #e05b4a;
+  animation: rwpulse 1s ease-in-out infinite;
+}
+.rw-tracebox-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rw-tracebox-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rw-muted);
+  font-size: 12px;
+}
+.rw-tracebox-arrow {
+  color: var(--rw-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.rw-tracebody {
+  border-top: 1px dashed var(--rw-border);
+}
+@keyframes rwpulse {
+  50% { opacity: 0.35; }
+}
+
+/* 3) 思考区：更大可滚动（最多近半屏），结束仍可开合细读 */
+.rw-think > div {
+  max-height: 46vh;
+}
+.rw-think summary {
+  font-size: 12.5px;
+  color: #8a6d1a;
+}
+/* 4) 行内阅读细节：动词高亮 / 目标路径加粗 / 代码细节字号适中 */
+.rw-trace-tool {
+  color: #a03b2e;
+  font-weight: 600;
+}
+.rw-trace-line pre {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.rw-chat-modelbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--rw-border); background: var(--rw-panel); flex-wrap: wrap; }
+.rw-chat-modelbar .rw-select { width: auto; max-width: 220px; }
+.rw-chat-model-lb { font-size: 12px; color: var(--rw-red); font-weight: 600; margin-right: 4px; }
+.rw-chat-model-note { font-size: 11px; color: var(--rw-dim); }

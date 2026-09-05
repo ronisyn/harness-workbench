@@ -1,9 +1,9 @@
 // server/tools/meta.js - 工具契约元数据（WS1；施工图 docs/tool-contracts-v1.md 转录）
 // tier: core|pro|expert（toolDefs(expose) 过滤用；过滤只影响暴露不影响 execTool 执行）
 // when/not/ex：拼进 function calling description，帮模型在正确时刻选对工具（X1 评审）
-// 注意：conv_summarize 为 WS5 预留（尚未注册进 TOOLS），tier=pro
+// 注意：conv_summarize 已注册进 TOOLS（index.js），tier=pro；下方注释仅为工具使用提醒，注册状态以 tools/index.js 为准
 export const TOOL_META = {
-  // ===== core(21) =====
+  // ===== core(22) =====
   read_file: { tier: 'core', when: '读文本内容、改前先读、查实现细节', not: '大文件超限用 read_file_range；列目录用 list_dir', ex: 'read_file {path:"/srv/harness-workbench/server/agent.js"}' },
   read_file_range: { tier: 'core', when: '大文件按 offset/length 分段读', not: '小文件直接用 read_file', ex: 'read_file_range {path, offset:10000, length:5000}' },
   write_file: { tier: 'core', when: '新建文件或整体覆盖', not: '局部小改用 edit_file；追加用 append_file', ex: 'write_file {path, content}' },
@@ -27,6 +27,7 @@ export const TOOL_META = {
   set_goal: { tier: 'core', when: '用户要求持续推进的跨轮大目标', not: '一次性任务用 plan_tasks', ex: 'set_goal {objective}' },
   get_goal: { tier: 'core', when: '查看当前活动目标与进度', not: '—', ex: 'get_goal {}' },
   update_goal: { tier: 'core', when: '汇报目标进展/标记完成/放弃', not: '—', ex: 'update_goal {progress, status:"done"}' },
+  repo_map: { tier: 'core', when: '大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）', not: '小目录直接 list_dir；找符号位置用 grep_search', ex: 'repo_map {dir:"/srv/harness-workbench"}' },
   // ===== pro(31) =====
   ocr_image: { tier: 'pro', when: '图片含文字需提取（截图/扫描件）', not: '图片理解用 view_image', ex: 'ocr_image {path}' },
   view_image: { tier: 'pro', when: '视觉理解图片内容', not: '纯文字提取用 ocr_image', ex: 'view_image {path}' },
@@ -59,7 +60,7 @@ export const TOOL_META = {
   feishu_doc_read: { tier: 'pro', when: '读飞书云文档/知识库内容', not: '非飞书用 fetch_url', ex: 'feishu_doc_read {url}' },
   feishu_sheet_read: { tier: 'pro', when: '读飞书电子表格', not: '—', ex: 'feishu_sheet_read {url, range}' },
   feishu_bitable_read: { tier: 'pro', when: '读飞书多维表格', not: '—', ex: 'feishu_bitable_read {appToken, tableId}' },
-  conv_summarize: { tier: 'pro', when: '长会话收尾/跨周 resume 前归档摘要（WS5 注册）', not: '短会话不需要', ex: 'conv_summarize {}' },
+  conv_summarize: { tier: 'pro', when: '长会话收尾/跨周 resume 前归档摘要（已注册）', not: '短会话不需要', ex: 'conv_summarize {}' },
   // ===== expert(9) =====
   delete_file: { tier: 'expert', when: '删除文件/目录（确认过；高危留痕）', not: '保留内容用 copy_move 移走', ex: 'delete_file {path}' },
   db_write: { tier: 'expert', when: '数据库写入/迁移（非 SELECT）', not: '读用 db_query；写前先 SELECT 复核影响面', ex: 'db_write {sql, params}' },
@@ -80,7 +81,7 @@ export const DEFAULT_TOOLSET = [
   'db_query', 'git_status', 'git_commit',
   'plan_tasks', 'plan_done', 'finish_task', 'ask_user', 'set_goal',
   'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
-  'undo_checkpoint', 'hooks_list',
+  'undo_checkpoint', 'hooks_list', 'repo_map',
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
 export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
-import { activeProviders, allProviders, findProvider } from './llm/providers.js';
+import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
 import { chatStream, calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS } from './tools/index.js';
@@ -16,6 +16,7 @@ import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { startDriver } from './driver.js';
+import { autoTitle } from './autotitle.js';
 import { decideApproval, listPending } from './approval.js';
 import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
@@ -137,27 +138,35 @@ app.put('/api/toolset', requireAuth, async (req, res) => {
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
   const rows = await db.query(
-    'SELECT id, channel, permission, preset, title, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
+    'SELECT id, channel, permission, preset, title, provider, model, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
   res.json({ ok: true, conversations: rows });
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
-  const { title, permission, preset } = req.body || {};
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset) VALUES (?,?,?,?)',
-    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all']);
+  const { title, permission, preset, provider, model } = req.body || {};
+  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model) VALUES (?,?,?,?,?,?)',
+    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
+      provider || null, model || null]);
   res.json({ ok: true, id: r.insertId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
-  const { title, permission, preset } = req.body || {};
+  const { title, permission, preset, provider, model } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
   if (permission !== undefined) { set.push('permission=?'); params.push(permission); }
   if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
+  if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
+  if (model !== undefined) { set.push('model=?'); params.push(model || null); }
   if (!set.length) return res.json({ ok: true });
   params.push(req.params.id, req.user.id);
   await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
   res.json({ ok: true });
+});
+
+app.post('/api/conversations/:id/autotitle', requireAuth, async (req, res) => {
+  try { res.json(await autoTitle(req.params.id, req.user.id, !!req.body?.force)); }
+  catch (e) { res.status(500).json({ ok: false, message: String(e.message) }); }
 });
 
 app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
@@ -212,13 +221,16 @@ app.get('/api/conversations/:id/activity', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
-// 已接入厂商 + 模型（设置页展示）
+// 已接入厂商 + 模型（设置页展示；connected=该厂商 key 是否已配置，前端据此区分"已接入"与"未配置 Key"）
 app.get('/api/providers', requireAuth, async (req, res) => {
-  const providers = await db.query('SELECT id, provider_key, name, base_url, enabled FROM providers ORDER BY sort_order, id');
+  const providers = await db.query('SELECT id, provider_key, name, base_url, api_key_env, enabled FROM providers ORDER BY sort_order, id');
   const models = await db.query('SELECT id, provider_id, model_id, name, capabilities, enabled FROM models ORDER BY provider_id, model_id');
   const byProvider = {};
   for (const m of models) (byProvider[m.provider_id] = byProvider[m.provider_id] || []).push(m);
-  res.json({ ok: true, providers: providers.map((p) => ({ ...p, models: byProvider[p.id] || [] })) });
+  res.json({
+    ok: true,
+    providers: providers.map((p) => ({ ...p, connected: Boolean(p.api_key_env && config.keys[p.api_key_env]), models: byProvider[p.id] || [] })),
+  });
 });
 
 // ---------- 对话（双路径） ----------
@@ -265,9 +277,9 @@ async function getSetting(key, def) {
     try { return JSON.parse(r[0].svalue); } catch { return r[0].svalue; } // 兼容已 JSON 序列化与裸文本
   } catch { return def; }
 }
-async function setSetting(key, val) {
+async function setSetting(key, val, noBump) {
   await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
-  await bumpPolicyRev(); // 政策版本自增：运行时快照据此提示模型"规则已更新"
+  if (!noBump) await bumpPolicyRev(); // 政策版本自增：仅护栏/政策类键（运行时快照提示模型"规则已更新"）；普通参数高频调整不应使版本抖动
 }
 
 // ---------- 模型路由（F11 自动路由） ----------
@@ -295,8 +307,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const route = resolveRoute(content, provider || 'deepseek', model);
   provider = route.provider;
   model = route.model;
-  // F12 高级参数：读全局温度设置（settings 表，默认 1.0）
-  const temperature = await getSetting('temperature', 1.0);
+  // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
+  const temperature = await getSetting('temperature', 0.4);
   // 并发限制：同账号同时在跑的对话超过上限(3)则直接拒绝（先于写库）
   const curInflight = inflight.get(req.user.id) || 0;
   if (curInflight >= 3) {
@@ -313,6 +325,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
   await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conversationId]);
+  // 会话自动命名：标题仍为默认「新对话」时用首条用户消息自动起名（已手动重命名的跳过）
+  await db.query('UPDATE conversations SET title=LEFT(?,24) WHERE id=? AND (title IS NULL OR title=? OR title=?)',
+    [content.replace(/\s+/g, ' ').trim().slice(0, 40), conversationId, '新对话', '']);
 
   // 组装历史（长对话压缩 P1-F8：>40 条用摘要 + 最近 30 条；摘要异步懒生成不阻塞对话）
   let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
@@ -328,7 +343,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   }
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
-  for (const m of hist) messages.push({ role: m.role, content: m.content });
   // F10 目标注入：会话存在 active 目标时提醒持续推进（目标由 set_goal 工具创建；表缺失等异常不阻断对话）
   try {
     const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
@@ -358,6 +372,19 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
     }
   } catch { /* 知识表不可用时静默跳过 */ }
+  // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
+  // 2026-09 C1 修复：git 块原位于 hist 之前=消息前缀中部，自改场景有新 commit 时该块内容变化
+  // → 其后全部历史（含最近 30 条）前缀缓存击穿（DeepSeek miss/hit 价差 27 倍）。
+  // 改为 append 到消息末尾（hist 之后）：前缀=固定注入+增长历史稳定，git 变化仅影响尾部少量 token。
+  const buildGitBlock = async () => {
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const gLines = gitLog.trim().split('\n').filter(Boolean);
+      if (gLines.length) return '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n');
+    } catch { /* git 不可用/非仓库时静默跳过 */ }
+    return null;
+  };
   // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
   try {
     const sp = await getSetting('systemPrompt', '');
@@ -392,6 +419,24 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     });
   }
 
+  // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
+  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化；
+  // assistant 超长文逐条截断（保留头+尾，DB messages 表仍有全文，不影响 UI 回看）
+  for (const m of hist) {
+    let c = String(m.content || '');
+    if (m.role === 'assistant' && c.length > 4000) {
+      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
+    }
+    messages.push({ role: m.role, content: c });
+  }
+
+  // F19b git 块 append 到消息末尾（C1 修复：git 内容随 commit 变化，放 hist 之前会击穿其后全部历史的前缀缓存；
+  // 放末尾则 git 变化只影响自身尾部，前缀 = 固定注入 + 增长历史保持稳定命中）
+  try {
+    const gb = await buildGitBlock();
+    if (gb) messages.push({ role: 'system', content: gb });
+  } catch { /* git 不可用/非仓库时静默跳过 */ }
+
   // SSE 头
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -407,7 +452,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
   // SSE 断连即中止：客户端关页/断网 → Agent 停止继续（避免无人监听的循环烧 token/改动服务器）
-  const onDisconnect = () => actrl.abort();
+  // 2026-09 中断原因区分：abort(reason) 传 'user'(点停止按钮) / 'disconnect'(断连)，收尾时据此标记 run 与占位消息
+  const onDisconnect = () => actrl.abort('disconnect');
   req.on('close', onDisconnect);
   res.on('close', onDisconnect);
   let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
@@ -467,7 +513,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 收尾：按结果登记现场状态（completed/paused/interrupted+原因）
       if (run) {
         try {
-          if (result.stopped) await markRun(run.id, 'interrupted', '用户点击停止');
+          if (result.stopped) {
+            // 2026-09：区分中断来源——用户点停止(user) vs SSE 断连(disconnect)，现场都保留可恢复
+            const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
+            await markRun(run.id, 'interrupted', why);
+          }
           else if (result.guard === 'budget') await markRun(run.id, 'interrupted', '时间预算达到（可 set_limits 调大/关闭）');
           else if (result.guard === 'cap') await markRun(run.id, 'interrupted', '轮次上限达到（可调大/关闭）');
           else if (result.paused) await markRun(run.id, 'paused', result.reason || '循环无进展挂起');
@@ -524,9 +574,20 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
+      // 2026-09：占位消息带中断原因 + 已执行进度（run.checkpoint 落库），避免"中断=看起来啥也没干"
       try {
+        let prog = '';
+        if (agentRunId) {
+          const rr = (await db.query('SELECT rounds, tool_counts, last_step FROM agent_runs WHERE id=?', [agentRunId]))[0];
+          if (rr) {
+            const cts = (() => { try { return JSON.parse(rr.tool_counts || '{}'); } catch { return {}; } })();
+            const cText = Object.entries(cts).map(([k, v]) => k + '×' + v).join('、');
+            prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
+          }
+        }
+        const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
         await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
-          [conversationId, 'assistant', '（任务已停止 / 会话中断：现场已保存。回复"继续任务"可恢复，或给我新指令。）']);
+          [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
       } catch { /* 忽略 */ }
     }
   } catch (e) {
@@ -584,7 +645,7 @@ app.post('/api/asks/:id', requireAuth, async (req, res) => {
 app.post('/api/chat/stop', requireAuth, (req, res) => {
   const { conversationId } = req.body || {};
   const c = conversationId ? abortMap.get(req.user.id + ':' + conversationId) : null;
-  if (c) c.abort();
+  if (c) c.abort('user'); // 2026-09：区分用户主动停止(user) 与 SSE 断连(disconnect)
   res.json({ ok: true, stopped: Boolean(c) });
 });
 
@@ -611,10 +672,11 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 });
 app.put('/api/settings', requireAuth, async (req, res) => {
   const { updates } = req.body || {};
+  const GUARD_KEYS = new Set(SETTINGS_SCHEMA.filter((s) => s.group === 'runtime').map((s) => s.key));
   for (const [k, v] of Object.entries(updates || {})) {
     const chk = validateSetting(k, v);
     if (!chk.ok) return res.status(400).json({ ok: false, message: chk.error });
-    await setSetting(k, chk.value);
+    await setSetting(k, chk.value, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
   }
   res.json({ ok: true });
 });
@@ -810,8 +872,32 @@ async function main() {
       await db.query('UPDATE models SET enabled=0 WHERE provider_id=? AND model_id=?', [dpr[0].id, 'deepseek-chat']);
     }
   } catch { /* 修正失败不阻塞 */ }
+  // 模型目录同步：各厂商 chatModels（主对话模型清单）入库供菜单可选；已存在不覆盖人工开关状态
+  try {
+    const prow = await db.query('SELECT id, provider_key FROM providers');
+    let synced = 0;
+    for (const row of prow) synced += await syncChatModels(db, row);
+    if (synced > 0) console.log(`[catalog] 模型目录同步完成：${synced} 个厂商目录已核对`);
+  } catch (e) { console.error('[catalog] 同步失败:', e.message); }
   // 重启自检：遗留 running 现场 → interrupted（断点恢复外壳）
   try { await interruptStaleOnBoot(); } catch (e) { console.error('[runtrack] 重启自检失败:', e.message); }
+  // D5 启动清理：24h 前仍 running 的后台任务标记 stale（父进程可能已退出/僵尸残留；不 kill 防误伤新 pid，仅显式标记便于 job_list 识别）
+  // E4 修正：先探测日志文件活跃度——若日志 24h 内仍在写入（任务实际仍在产出）则不标 stale，避免误标合法长任务
+  try {
+    const staleCandidates = await db.query("SELECT job_id, log_file FROM long_jobs WHERE status='running' AND started_at < NOW() - INTERVAL 24 HOUR");
+    let staleN = 0, aliveN = 0;
+    for (const row of staleCandidates) {
+      try {
+        const st = await fs.promises.stat(row.log_file);
+        const mtimeMs = st.mtimeMs;
+        const active = Date.now() - mtimeMs < 24 * 3600 * 1000; // 日志 24h 内有新写入 = 仍活跃
+        if (active) { aliveN++; continue; }
+      } catch { /* 日志文件缺失/不可读：无产出依据，按陈旧处理 */ }
+      await db.query("UPDATE long_jobs SET status='stale', updated_at=NOW() WHERE job_id=?", [row.job_id]);
+      staleN++;
+    }
+    if (staleN > 0 || aliveN > 0) console.log(`[jobs] 启动清理：标记 ${staleN} 个陈旧 running 任务为 stale，保留 ${aliveN} 个日志仍活跃的任务`);
+  } catch (e) { console.error('[jobs] 启动清理失败:', e.message); }
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }

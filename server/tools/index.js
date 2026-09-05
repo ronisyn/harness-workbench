@@ -13,6 +13,7 @@ import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
+import { buildRepoMap } from './repomap.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
@@ -24,6 +25,15 @@ const MUTATING_TOOLS = new Set([
   'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
 ]);
 
+// —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
+// "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
+// 等占位符并真实执行，曾静默写坏文件。execTool 入口递归检疫 + 写类工具 run 内二次检疫
+const PH_A='(?:tool_call_id\\s*=\\s*[A-Za-z0-9_\\-]{4,}|db_query 查 tool_calls|job_output\\/read_file\\/查询工具|_archived|原文 \\d+ 字符已截断|已截断\\(原文 \\d+ 字符|原文在 messages 表可按 id=)';
+
+const PH_B='(?:messages 表可按 id=|早期工具调用参数已折叠|早期执行轮次已(?:折叠|归档)|早期过程说明已压缩归档|早期步骤结果已压缩归档|已压缩归档；需要细节可用 db_query|上下文已裁剪中段 \\d+ 字符|历史消息过长已截断 \\d+ 字符)';
+const PH_RE = new RegExp(PH_A + '|' + PH_B + '|\\[(?:内容已截断|参数已省略|上下文已裁剪中段|历史消息过长已截断|原文 \\d+ 字符已截断)[^\\]]*\\]');
+function hasPh(v) { if (typeof v === 'string') return PH_RE.test(v); if (Array.isArray(v)) return v.some(hasPh); if (v && typeof v === 'object') return Object.keys(v).some((k) => hasPh(v[k])); return false; }
+function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new Error(l + ' 参数疑似含截断/裁剪/归档占位符污染（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加，或把关键词转义/拼接后再写入。'); }
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -50,7 +60,14 @@ function inside(p, root) {
 function runCmd(cmd, args, opts = {}, timeout = 30000) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 8000), err: String(stderr || '').slice(0, 2000) });
+      const pr = (s, cap) => {
+        const t = String(s || '');
+        if (t.length <= cap) return t;
+        const head = Math.floor(cap * 0.7);
+        const tail = Math.floor(cap * 0.2);
+        return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
+      };
+      resolve({ ok: !err, code: err?.code ?? 0, out: pr(stdout, 8000), err: pr(stderr, 2000) });
     });
   });
 }
@@ -75,6 +92,25 @@ function pruneJobs() {
     for (const [id] of finished.slice(0, doneCount - JOB_MAX)) jobs.delete(id);
   }
 }
+// D2/D5 后台任务 DB 持久化：jobs Map 是内存态，重启/超 TTL 后 pid↔日志映射丢失；
+// 这里把 job 同步到 long_jobs 表（fire 后任何 DB 失败都不阻断任务主流程）
+async function jobDbUpsert(job) {
+  try {
+    await db.run('INSERT INTO long_jobs (job_id, cmd, log_file, started_at, status, code, updated_at) VALUES (?,?,?,FROM_UNIXTIME(?/1000),?,?,NOW()) ON DUPLICATE KEY UPDATE cmd=VALUES(cmd), log_file=VALUES(log_file), status=VALUES(status), code=VALUES(code), updated_at=NOW()',
+      [String(job.pid), job.cmd, job.log, job.started, job.status, job.code ?? null]);
+  } catch { /* DB 不可用不影响任务运行 */ }
+}
+async function jobDbGet(id) {
+  try { const r = await db.query('SELECT * FROM long_jobs WHERE job_id=?', [String(id)]); return r[0] || null; } catch { return null; }
+}
+async function jobDbSetStatus(id, status, code) {
+  try { await db.run('UPDATE long_jobs SET status=?, code=?, updated_at=NOW() WHERE job_id=?', [status, code ?? null, String(id)]); } catch { /* ignore */ }
+}
+async function jobDbList() {
+  try {
+    return await db.query("SELECT job_id, cmd, log_file, started_at, status, code FROM long_jobs WHERE status IN ('running','exited') ORDER BY started_at DESC LIMIT 50");
+  } catch { return []; }
+}
 // 会话任务清单（F9：plan_tasks/plan_done 使用；key=conversationId）
 export const plans = new Map();
 
@@ -85,20 +121,22 @@ function planOf(ctx) {
 }
 
 export const TOOLS = [
-  // ---------- B1-B10 文件 ----------
+
+// ---------- B1-B10 文件 ----------
   { name: 'read_file', description: '读取文本文件内容（max 50KB）', permission: 'read',
     params: { path: { type: 'string', required: true, desc: '文件绝对路径' } },
     run: async (a) => ({ content: readTxt(a.path).slice(0, 50000) }) },
   { name: 'write_file', description: '写入文件（创建/覆盖）', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('write_file', a.content); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
   { name: 'append_file', description: '追加内容到文件', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('append_file', a.content); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
   { name: 'edit_file', description: '精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）', permission: 'write',
     params: { path: { type: 'string', required: true, desc: '文件路径' }, old: { type: 'string', required: true, desc: '要替换的原文（必须完全匹配文件内容）' }, new: { type: 'string', desc: '新内容（默认删除 old）' } },
     run: async (a, ctx) => {
       if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区');
+      rejectPh('edit_file.new', a.new); rejectPh('edit_file.old', a.old);
       const content = fs.readFileSync(a.path, 'utf8');
       if (!content.includes(a.old)) throw new Error('未找到要替换的原文（old 须与文件内容完全匹配，可用 read_file 先确认）');
       const updated = content.split(a.old).join(a.new ?? '');
@@ -135,7 +173,14 @@ export const TOOLS = [
     } },
   { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）', permission: 'read',
     params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
-    run: async (a) => { const c = readTxt(a.path); const off = a.offset || 0; return { content: c.slice(off, off + (a.length || 10000)) }; } },
+    run: async (a) => {
+      const c = readTxt(a.path);
+      const off = a.offset == null ? 0 : Number(a.offset);
+      const len = a.length == null ? 10000 : Number(a.length);
+      if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + a.offset);
+      if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + a.length);
+      return { content: c.slice(off, off + len), offset: off, length: len, total: c.length };
+    } },
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
   { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
@@ -191,23 +236,50 @@ export const TOOLS = [
       const fd = fs.openSync(logFile, 'a');
       const child = spawn(cmd, args, { detached: true, stdio: ['ignore', fd, fd] });
       child.unref();
-      jobs.set(String(child.pid), { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' });
-      child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } });
+      const jobRec = { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' };
+      jobs.set(String(child.pid), jobRec);
+      await jobDbUpsert(jobRec); // D2：pid↔cmd↔日志映射落库，重启后仍可按 jobId 查
+      child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } jobDbSetStatus(String(child.pid), 'exited', code); });
       return { jobId: String(child.pid), cmd: a.cmd, log: logFile };
     } },
   { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
-    run: async (a) => { try { process.kill(a.pid, 'SIGTERM'); return { killed: true }; } catch (e) { throw new Error('终止失败: ' + e.message); } } },
+    run: async (a) => {
+      try {
+        process.kill(a.pid, 'SIGTERM');
+        jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
+        return { killed: true };
+      }
+      catch (e) {
+        // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可去 /tmp/rw-jobs 按时间找
+        if (e.code === 'ESRCH') { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 /tmp/rw-jobs 下可查' }; }
+        throw new Error('终止失败: ' + e.message);
+      }
+    } },
   { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
     params: {},
-    run: async () => ({ jobs: [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log })) }) },
+    run: async () => {
+      const mem = [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log }));
+      // D2：内存 Map 之外补 DB 持久化记录（服务器重启后进程表重建，任务仍可列出；jobId 唯一不重复）
+      const dbRows = await jobDbList();
+      const dbJobs = dbRows.filter((d) => !jobs.has(String(d.job_id))).map((d) => ({ jobId: String(d.job_id), cmd: d.cmd, status: d.status, code: d.code ?? null, started: d.started_at ? new Date(d.started_at).toISOString() : null, log: d.log_file, persisted: true }));
+      return { jobs: [...mem, ...dbJobs] };
+    } },
   { name: 'job_output', description: '查看后台任务输出日志（最近 8000 字符）', permission: 'full',
     params: { jobId: { type: 'string', required: true } },
     run: async (a) => {
       const j = jobs.get(String(a.jobId));
-      if (!j) throw new Error('job 不存在: ' + a.jobId + '（可用 job_list 查看）');
-      let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
-      return { jobId: a.jobId, status: j.status, output: out.slice(-8000) };
+      if (j) {
+        let out = ''; try { out = fs.readFileSync(j.log, 'utf8'); } catch { /* ignore */ }
+        return { jobId: a.jobId, status: j.status, output: out.slice(-8000), log: j.log };
+      }
+      // D2：内存 Map miss → DB 持久化记录兜底（重启后仍可按 jobId 读到原日志文件）
+      const dj = await jobDbGet(a.jobId);
+      if (dj) {
+        let out = ''; try { out = fs.readFileSync(dj.log_file, 'utf8'); } catch { /* ignore */ }
+        return { jobId: String(dj.job_id), status: dj.status, output: out.slice(-8000), log: dj.log_file, persisted: true };
+      }
+      return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表与持久化记录中（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 /tmp/rw-jobs/job-<时间戳>.log 下，可按时间戳查找。' };
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
@@ -504,15 +576,36 @@ export const TOOLS = [
 
   // ---------- 知识库（F19：global 全会话可见 / conv 仅本会话；正文大段用 kb_search 取） ----------
   { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
-    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' } },
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = a.scope === 'global' ? 'global' : 'conv';
       const title = String(a.title || '').trim().slice(0, 200);
+      const body = String(a.body || '').slice(0, 8000);
       if (!title) throw new Error('title 必填');
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)',
-        [ctx.accountId, scope, scope === 'conv' ? (ctx.conversationId || null) : null, title, String(a.body || '').slice(0, 8000)]);
-      return { saved: true, id: r.insertId, scope, title };
+      // D1 去重：同账号+同 scope(+同会话) 下 title 已存在 → 覆盖更新（同名条目不重复堆积；精确 title 匹配防误并）
+      // E2 防激进覆盖：同名且新旧内容差异显著（字符集合 Jaccard 相似度 <0.35 且新旧均非空）时，
+      // 默认拒绝覆盖并回显旧内容片段，让调用方确认（overwrite:true 显式覆盖）或换 title——避免无意冲掉高价值旧记忆
+      const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
+      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, title]);
+      if (exist.length) {
+        const oldB = String(exist[0].body || '');
+        const jac = (() => {
+          if (!oldB || !body) return 1; // 一侧为空不算差异冲突（覆盖空值/旧值缺失可放行）
+          const sa = new Set(oldB), sb = new Set(body);
+          let inter = 0;
+          for (const ch of sa) if (sb.has(ch)) inter++;
+          return inter / Math.max(1, sa.size + sb.size - inter);
+        })();
+        if (!a.overwrite && jac < 0.35) {
+          return { saved: false, conflict: true, id: exist[0].id, scope, title,
+            reason: '同名条目已存在且新旧内容差异显著（相似度 ' + jac.toFixed(2) + ' < 0.35），已拒绝覆盖以防误冲高价值旧记忆。请确认：若确为同主题更新请在调用中加 overwrite:true 覆盖；否则请改用不同 title 新增。现有内容片段：' + oldB.slice(0, 300) + (oldB.length > 300 ? '…' : '') };
+        }
+        await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
+        return { saved: true, id: exist[0].id, updated: true, scope, title };
+      }
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)', [ctx.accountId, scope, convId, title, body]);
+      return { saved: true, id: r.insertId, updated: false, scope, title };
     } },
   { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=自己scope=conv + 全部global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
     params: { q: { type: 'string', required: true, desc: '关键词' } },
@@ -847,6 +940,7 @@ export async function execTool(name, args, ctx) {
   const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
     let blocked = null;
+    if (hasPh(args)) blocked = '工具 ' + name + ' 参数疑似含截断/裁剪/归档占位符（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加后重试，勿把历史中的占位符文本复制进写参数。';
     // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
     if (eff.limitPath && tool.permission === 'read') {
       const key = ['path', 'file', 'dir', 'base', 'src'].find((k) => args[k] !== undefined);
@@ -973,5 +1067,20 @@ TOOLS.push({
   run: async () => {
     const hooks = listHooks();
     return { hooks, note: '内置钩子为平台强制安全纪律（fail-closed：danger_command_guard 拦破坏性命令、system_write_guard 拦系统关键区写入）；before 钩子可拦截工具或浅合并改写参数，after 钩子为观察/审计。平台管理员可在配置/代码中用 registerHook 追加（模型侧只读）' };
+  },
+});
+
+// P2-3 repo_map：代码库结构地图（借鉴 Aider tree-sitter repo map 的轻量版——目录树+行数+imports+顶层符号摘要）
+// 价值：长代码库任务先取一张"地图"，少做盲目 list_dir/find/grep 探测；容量受控（repomap.js 内 MAX_TEXT 截断）
+TOOLS.push({
+  name: 'repo_map',
+  description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
+  permission: 'read',
+  params: { dir: { type: 'string', required: false, desc: '目标目录，缺省=当前工作区' } },
+  run: async (a, ctx) => {
+    const dir = a.dir || ctx.root || '/srv/rw-workspace';
+    const r = buildRepoMap(dir);
+    if (!r.ok) return { error: r.error };
+    return { ok: true, root: r.root, summary: r.summary, text: r.text, files: r.files };
   },
 });
