@@ -227,6 +227,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
   let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
+  let consecutiveFail = 0; // F4 连续失败轮计数（本轮工具全失败累计；任一成功清零）
+  let failWarned = false;  // F4 软提示只发一次（到 N 次后提示换策略，再 N 次才挂起）
   const t0 = Date.now();
   let cumTin = 0, cumTout = 0, cumCost = 0, cumHit = 0, cumMiss = 0; // WS2 本任务累计钱包；P8 cache hit 率测量（hit/(hit+miss)）
 
@@ -548,6 +550,23 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
         msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(rawResults[k]), msgCap) });
       });
+    }
+    // F4 连续失败轮计数（2026-09 批1）：本轮工具全失败（无任一成功）→ 计数+1；有成功→清零。
+    // 到 N 次（默认3）先软提示换策略一次；再连败 N 次仍失败 → 挂起 paused（现场保留可恢复），防无脑重试烧 token。
+    // 与 loopGuard（连续相同调用）互补：loopGuard 防"重复同调用"，F4 防"反复换路仍失败"。
+    if (toolLog.length && lim.failGuardN > 0) {
+      const thisRound = toolLog.slice(-calls.length);
+      const anyOk = thisRound.some((t) => t.status === 'done');
+      if (!anyOk) consecutiveFail += 1; else consecutiveFail = 0;
+      if (consecutiveFail >= lim.failGuardN && consecutiveFail < lim.failGuardN * 2 && !failWarned) {
+        failWarned = true;
+        msgs.push({ role: 'system', content: '⚠️ 已连续 ' + consecutiveFail + ' 轮工具执行全部失败。请【停止原样重试】：先诊断失败根因（读错误信息→查环境/参数/依赖→换实现思路或换工具），确认可行再动手；若你判断需要用户决策（如权限/配置/外部依赖），把问题与建议作为阶段性总结告诉用户。' });
+      } else if (consecutiveFail >= lim.failGuardN * 2) {
+        return {
+          content: `（任务已挂起：连续 ${consecutiveFail} 轮工具执行全部失败。现场已保存，回复"继续任务"可恢复——但请先说明你接下来要尝试的新策略，或请用户介入诊断）`,
+          toolLog, usage: res.usage, paused: true, reason: '连续失败无进展',
+        };
+      }
     }
     // 目标完成度评估提示：让模型判断"干完没"，未完成则继续
     // 5.8 消息卫生：每轮只保留一条最新 COMPLETION_HINT（旧版逐轮堆积会稀释注意力并浪费 token）
