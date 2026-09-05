@@ -16,7 +16,7 @@
 | 行为纪律/流程 | ✅ 能 | docs/ 准则 + skills/ 技能 + kb 知识 |
 | 观测与自我审计 | ✅ 能 | kpi.mjs、self-audit 技能、复盘 kb_add |
 
-结论：**RW 已具备完整的自我进化闭环**（证据：docs/平台层差距清单.md 22 项能力全上线、git log batch0-9、技能库 6 个、记忆四层架构）。
+结论：**RW 已具备完整的自我进化闭环**（证据：docs/archive/平台层差距清单.md 22 项能力全上线、git log batch0-9、技能库 6 个、记忆四层架构）。
 下面清单是"下一批可从外部 CLI 借鉴的机制"，按价值×成本排序。
 
 ## 1. 已对齐项（Codex/Claude Code/Aider 有的，RW 已有 ✅）
@@ -26,7 +26,7 @@
 | Agent 循环 + 护栏（Codex） | runAgent 循环、时间/轮次/循环检测护栏、并行上限 | server/agent.js |
 | 上下文压缩 compaction（Claude Code/Codex） | >40 条摘要 + 运行中 >170 归档 + 工具结果 head/tail 修剪 | agent.js archiveEarlyContext/contextResultPrune |
 | plan mode 只读规划（Codex/Claude Code） | conversations.mode=plan + plan_mode/exit_plan_mode + 改动门禁 | archive/3080机制对照 §2 |
-| subagents（Claude Code） | subagent sync/async/join/fanout/fork/list/report | 平台层差距清单 F16-F18 |
+| subagents（Claude Code） | subagent sync/async/join/fanout/fork/list/report | 平台层差距清单（archive）F16-F18 |
 | skills（Anthropic agent skills） | skills/<名>/SKILL.md + skill_load 跨轮注入 | F15 + 技能库 6 个 |
 | 分层记忆 CLAUDE.md/AGENTS.md | ENV_MAP（平台级）+ projects/<p>/AGENTS.md（项目级）+ kb（用户级）+ 会话摘要 | 记忆架构 v1、index.js:331 |
 | 目标/任务清单（Codex/Claude） | set_goal + plan_tasks/plan_done + 实时 PlanCard | F9/F10 |
@@ -34,7 +34,7 @@
 | 会话恢复 resume（Codex --resume） | runtrack checkpoint + resumeHint + "现场已保存" | server/runtrack.js |
 | 结构化问询（Codex/Claude） | ask_user 选项卡片 + 裁决 API | 3080对照 §2 |
 | 外部驱动器/验收契约 | create_contract + 验收 shell DSL + finish_task | archive/3080机制对照 §5 |
-| ralph 多轮独立视角 | 新 agent 共享工作区记忆文件推进目标 | 平台层差距清单 Parity Batch5 |
+| ralph 多轮独立视角 | 新 agent 共享工作区记忆文件推进目标 | 平台层差距清单（archive）Parity Batch5 |
 
 ## 2. 真实差距（外部 CLI 有、RW 暂无，建议按批次落地）
 

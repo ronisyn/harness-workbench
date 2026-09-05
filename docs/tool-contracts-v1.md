@@ -1,6 +1,6 @@
-# 附录D · 工具契约施工图 v1（WS1 实施图纸 · 撑竿跳方案 1.0）
+﻿# 附录D · 工具契约施工图 v1（WS1 实施图纸 · 撑竿跳方案 1.0）
 
-> 依据：docs/RW撑竿跳方案.md §1 WS1 + §1.5 X1（Anthropic《Seeing like an agent》：工具是 agent 的眼与手）。
+> 依据：docs/archive/RW撑竿跳方案-执行史-v1.0.md §1 WS1 + §1.5 X1（已归档；决策已并入蓝图 C 域）· Anthropic《Seeing like an agent》：工具是 agent 的眼与手。
 > 范围：61 个现存工具（实测 server/tools/index.js TOOLS）+ conv_summarize（WS5 新增）= **62**。
 > 每工具字段：tier（core/pro/expert）· when（何时用=它给 agent 什么信息/能力）· not（何时不用+替代）· ex（真实示例）· 备注（参数 schema 建议 enum/items/min/max、门禁、实施注意）。
 > 每条过 X1 三问：①这工具是"眼"还是"手"？②描述是否让 agent 在正确时刻选它？③参数能否表达意图（enum/items/长度上限）？

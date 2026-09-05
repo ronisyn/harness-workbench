@@ -1,4 +1,4 @@
-# RW 发行物与调教包设计 v1（发布设计文档）
+﻿# RW 发行物与调教包设计 v1（发布设计文档）
 
 > 前置：体检优化全绿（5.1-5.8 + 界面实时 + conv 自动归档 + schema UI，服务器 8df007b 已加载）。
 > 目标（用户确认）：**把调教好的 RW 制作成可复制的发行物**——每个工作台（code/media/book）独立部署一份 RW 实例，
@@ -33,7 +33,7 @@ server/（agent 循环/工具 62/驱动器/调度/渠道/网关）· src+web/（
 | 信任契约 | docs/信任契约-v1.md | 实例 docs/ |
 | 记忆架构 | docs/记忆架构.md | 实例 docs/ |
 | 权限与沙箱 | docs/权限与沙箱-服务器版.md | 实例 docs/ |
-| 撑竿跳方案（活文档） | docs/RW撑竿跳方案.md | 实例 docs/ |
+| 平台设计蓝图（唯一总纲） | docs/平台开发全集清单-v1.md | 实例 docs/ |
 | 复盘/验收模板 | docs/复盘模板.md、docs/templates/验收模板.md | 实例 docs/ |
 | 工具契约施工图 | docs/tool-contracts-v1.md（62 条 when/not/ex） | 实例 docs/（施工参照） |
 | 技能（SKILL.md×5） | packs/rw-core/skills/{explore-discipline,self-audit,task-approach,subagent-prompt,acceptance-builder}/SKILL.md | 实例 $RW_SKILLS/（运行时技能目录） |
