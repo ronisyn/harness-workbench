@@ -25,7 +25,7 @@
 |---|---|---|
 | Agent 循环 + 护栏（Codex） | runAgent 循环、时间/轮次/循环检测护栏、并行上限 | server/agent.js |
 | 上下文压缩 compaction（Claude Code/Codex） | >40 条摘要 + 运行中 >170 归档 + 工具结果 head/tail 修剪 | agent.js archiveEarlyContext/contextResultPrune |
-| plan mode 只读规划（Codex/Claude Code） | conversations.mode=plan + plan_mode/exit_plan_mode + 改动门禁 | archive/3080机制对照 §2 |
+| plan mode 只读规划（Codex/Claude Code） | plan=意图挡位：请求级只读约束 + 高成本自荐先给≤4行方案；plan_mode/exit_plan_mode 工具已退役（2026-09 批1/P4） | docs/RW行为准则-服务器版.md §3.3 |
 | subagents（Claude Code） | subagent sync/async/join/fanout/fork/list/report | 平台层差距清单（archive）F16-F18 |
 | skills（Anthropic agent skills） | skills/<名>/SKILL.md + skill_load 跨轮注入 | F15 + 技能库 6 个 |
 | 分层记忆 CLAUDE.md/AGENTS.md | ENV_MAP（平台级）+ projects/<p>/AGENTS.md（项目级）+ kb（用户级）+ 会话摘要 | 记忆架构 v1、index.js:331 |
