@@ -18,7 +18,7 @@ import { buildRepoMap } from './repomap.js';
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
 
-// 计划模式（plan_mode）禁用的改动类工具：会话 mode=plan 时直接拒绝（只读）
+// P4 只读意图禁用的改动类工具：请求级只读规划（ctx.__readonlyIntent）时直接拒绝（只读）
 const MUTATING_TOOLS = new Set([
   'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
   'run_command', 'run_long_task', 'kill_process', 'db_write',
@@ -655,22 +655,10 @@ export const TOOLS = [
       summary: String(a.summary || '').slice(0, 2000),
     }) },
 
-  // ---------- 计划模式（plan_mode / exit_plan_mode，会话级只读规划） ----------
-  { name: 'plan_mode', description: '进入会话级计划模式（只读）：此后所有写/改/执行类工具会被平台拒绝，直到调用 exit_plan_mode 提交计划成功。用于用户要求"先规划、只调研、别动手"的场景', permission: 'read',
-    params: {},
-    run: async (a, ctx) => {
-      if (!ctx.conversationId) throw new Error('无会话上下文');
-      await db.query('UPDATE conversations SET mode="plan" WHERE id=?', [ctx.conversationId]);
-      return { plan_mode: true, tip: '已进入只读规划模式；探索完成后调用 exit_plan_mode 提交计划' };
-    } },
-  { name: 'exit_plan_mode', description: '提交计划并退出计划模式（模式回到普通对话，改动类工具恢复可用）。plan=完整计划 Markdown（目标/步骤/涉及文件/风险/验证）；提交后请把计划原文作为你的最终回答完整展示给用户等待批准', permission: 'read',
-    params: { plan: { type: 'string', required: true, desc: '完整实施计划（Markdown）' } },
-    run: async (a, ctx) => {
-      if (!ctx.conversationId) throw new Error('无会话上下文');
-      await db.query('UPDATE conversations SET mode="chat" WHERE id=?', [ctx.conversationId]);
-      const plan = String(a.plan || '').slice(0, 12000);
-      return { exited: true, tip: '已退出计划模式。请把上面的计划作为最终回答展示给用户；用户批准（说"开始/按计划执行"）后即可实施。', planLength: plan.length };
-    } },
+  // ---------- P4 退役：plan_mode/exit_plan_mode（2026-09 批1）----------
+  // C3/P4：plan 不再是会话模式而是意图挡位。只读规划=请求级（ctx.__readonlyIntent，见 execTool 门禁），
+  // 无需持久会话 mode 与切换工具；原 DB conversations.mode='plan' 语义废弃（存量 mode 值忽略）。
+  // 保留 plan_tasks/plan_done（意图挡位内的任务清单载体，行为准则 1.4 使用）。
 
   // ---------- ralph 循环（多轮全新 Agent 共享工作区记忆推进同一目标，至完成/阻塞/达轮次上限） ----------
   { name: 'ralph', description: '对同一目标运行多轮"全新视角"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。', permission: 'read',
@@ -977,9 +965,10 @@ export async function execTool(name, args, ctx) {
     if (!blocked && ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
       blocked = `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。`;
     }
-    // 计划模式门禁：会话 mode=plan 时改动类工具一律只读拒绝
-    if (!blocked && eff.mode === 'plan' && MUTATING_TOOLS.has(name)) {
-      blocked = '计划模式（只读）：工具 ' + name + ' 已被禁用。规划完成后请调用 exit_plan_mode 提交计划；用户批准并切回普通模式后再执行。';
+    // P4 意图挡位门禁（2026-09 批1，替代会话 mode=plan）：用户本轮请求只读规划（"先规划/只调研/别动手"）时，
+    // 请求级只读意图（ctx.__readonlyIntent=true）生效——本轮改动类工具一律拒绝；用户放行/新指令自然解除（无持久会话 mode）。
+    if (!blocked && ctx.__readonlyIntent && MUTATING_TOOLS.has(name)) {
+      blocked = '只读规划意图（本轮）：工具 ' + name + ' 已被禁用。规划阶段只用只读工具（read/list/grep/find/web/db_query）；把方案作为回答展示，等用户批准后再执行改动。';
     }
     // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队
     if (!blocked && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {

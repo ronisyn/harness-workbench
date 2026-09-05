@@ -69,8 +69,6 @@ export const TOOL_META = {
   kill_process: { tier: 'expert', when: '终止失控/废弃后台任务', not: '正常任务等它自己结束', ex: 'kill_process {jobId}' },
   reload_platform: { tier: 'expert', when: '自改代码生效（先 syntax_check+git commit）', not: '仅改配置/数据不需要', ex: 'reload_platform {}' },
   set_limits: { tier: 'expert', when: '用户要求调整护栏（0=不限；先解释再改）', not: '未经请求不要自行放宽', ex: 'set_limits {minutes:0}' },
-  plan_mode: { tier: 'expert', when: '用户要求"先规划只读、别动手"', not: '普通任务不要进入', ex: 'plan_mode {}' },
-  exit_plan_mode: { tier: 'expert', when: '规划查证完成，提交完整计划并退出只读', not: '未查证完不要提交', ex: 'exit_plan_mode {plan}' },
 };
 
 // 5.3c/5.4 默认工具启用集（harness 标准 25：日常开发/运维高频；其余在 设置→工具 按需勾选）
@@ -83,8 +81,8 @@ export const DEFAULT_TOOLSET = [
   'kb_add', 'kb_search', 'skill_load', 'skill_save', 'subagent',
   'undo_checkpoint', 'hooks_list', 'repo_map',
 ];
-// 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
-export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];
+// 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束；P4 后 plan_mode/exit_plan_mode 已退役移除）
+export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits'];
 
 // P1 轻量工具集（2026-09 批1）：普通问答统一通道的轻量 schema——覆盖高频日常任务（读写文件/查库/检索/搜网/测试/知识），
 // 不含高危与重型工具（delete_file/db_write/git_pull_push/run_command/kill_process/reload/set_limits/plan_mode/子代理族）。

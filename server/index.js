@@ -404,18 +404,31 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const hint = await resumeHint(conversationId);
     if (hint) messages.push({ role: 'system', content: hint });
   } catch { /* 忽略 */ }
-  // 计划模式（plan_mode）：会话处于只读规划中 → 注入计划模式行为约束
-  if (convMode === 'plan') {
+  // P4 意图挡位（2026-09 批1）：不再有会话级 plan mode——"先规划/只调研/别动手"是本轮请求级只读意图
+  // （无持久状态：本轮生效，用户放行/下一条新指令自然解除）。命中则本轮注入只读约束。
+  const READONLY_INTENT_RE = /(?:只(?:规划|调研|研究|分析|设计|查证|评估|看看|读一下|查一下|先别改|先别执行)|先(?:规划|调研|设计|分析|出方案|评估|查证|看看|看一下方案|别动手)|别动手|不要动手|只读规划|先别改|先别执行|先别做|出个方案|出方案|先出方案|只读)/i;
+  const readonlyIntent = READONLY_INTENT_RE.test(String(content).slice(0, 60));
+  if (readonlyIntent) {
     messages.push({
       role: 'system',
       content: [
-        '【计划模式】你处于只读规划状态（会话级），直到调用 exit_plan_mode 成功为止：',
-        '- 先用只读工具探索（read_file/list_dir/grep/find/web_search/db_query 等），把方案查证清楚；',
-        '- 写类/改动类工具已被平台禁用（write/append/edit/delete/run_command/db_write/git/skill_save 等会返回拒绝），不要反复尝试；',
-        '- 规划完成时调用 exit_plan_mode 提交完整计划（目标、步骤、涉及文件、风险、验证方式），并把它作为你的最终回答展示给用户；',
-        '- 用户批准（如说"开始/按计划执行"）后，在普通模式下再实施。',
+        '【只读规划意图（本轮）】你正处只读规划：只用只读工具（read_file/list_dir/find_file/grep_search/web_search/fetch_url/db_query/kb_search）把方案查证清楚；',
+        '- 写/改/执行类工具本轮已被平台禁用（会返回拒绝），不要反复尝试；',
+        '- 规划完成把完整方案（目标/步骤/涉及文件/风险/验证）作为你的回答展示给用户，等待批准；',
+        '- 用户说"开始/按计划执行/做吧"等放行后，下一条消息即恢复全部工具能力（无需退出任何模式）。',
       ].join('\n'),
     });
+  } else if (!needsTools(content)) {
+    // P4 高成本自荐（2026-09 批1）：任务型指令（含执行动词）若带"大/长/重构/迁移/全部"等高成本信号，
+    // 模型先给简短执行方案（≤4 行：做什么/几步/涉及文件）再动手——用户可据此提前叫停，避免闷头烧钱；
+    // 纯问答（无执行动词）不加，防干扰闲聊。自荐是软约束（方案后继续执行），非审批门禁。
+    const HIGH_COST_RE = /(重构|迁移|从零|整个|全部|大规模|重写|搭建|部署|完整项目|一次性|统筹|全面|彻底|大改|多文件|几十|上百|跨模块)/;
+    if (HIGH_COST_RE.test(content)) {
+      messages.push({
+        role: 'system',
+        content: '【高成本自荐】本任务规模较大（重构/迁移/批量/大改类）。开工前先用 ≤4 行说明执行方案（做什么→分几步→涉及哪些文件/区域→验证方式），然后直接按方案动手推进；不要在方案处停下等确认（除非你判断风险极高需要用户拍板）。',
+      });
+    }
   }
 
   // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
@@ -492,7 +505,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
         if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
       } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __light: light, mode: convMode, preset: convPreset };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {

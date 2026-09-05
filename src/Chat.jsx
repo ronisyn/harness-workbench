@@ -1049,7 +1049,7 @@ const TRACE_LABEL = {
   git_commit: '提交 Git', git_status: '查看 Git 状态', undo_checkpoint: '撤销快照',
   kb_add: '写入记忆', kb_search: '搜索记忆', skill_load: '载入技能', skill_save: '保存技能',
   subagent: '子代理执行', ask_user: '向你提问', set_limits: '调整护栏', set_goal: '设定目标',
-  plan_mode: '进入计划模式', exit_plan_mode: '提交计划', reload_platform: '重载平台', hooks_list: '查看钩子',
+  reload_platform: '重载平台', hooks_list: '查看钩子',
   read_file_range: '分段读取', extract_pdf: '解析 PDF', extract_docx: '解析 Word', view_image: '查看图片',
   ocr_image: '识别图片'
 };

@@ -239,7 +239,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       + '（每轮读 settings，变更最快 5s 生效；set_limits 可调，0=不限）'
       + ' | 本任务累计: token in ' + cumTin + ' / out ' + cumTout + ' ≈ ¥' + cumCost.toFixed(3)
       + ' | cache hit ' + ((cumHit + cumMiss) > 0 ? Math.round(cumHit / (cumHit + cumMiss) * 100) : 100) + '%'
-      + ' | 会话 mode=' + (ctx.mode || 'chat') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
+      + ' | 会话 mode=' + (ctx.mode || 'chat') + (ctx.__readonlyIntent ? '（本轮只读规划）' : '') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
       + ' | 政策版本 rev ' + lim.rev + resume
       + '\n以本快照为准；政策版本变化=规则已更新，丢弃旧理解。';
     msgs.push({ role: 'system', content: snap });
