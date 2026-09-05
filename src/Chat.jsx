@@ -358,6 +358,12 @@ export default function Chat({ user, onLogout }) {
     if (abortRef.current) { const ac = abortRef.current; setTimeout(() => { try { ac.abort(); } catch { /* ignore */ } }, 300); }
     setBusy(false); busyConvRef.current = null;
     setMsgs((m) => m.map((x) => ({ ...x, streaming: false })));
+    // 停止后：队列不会自动续发，明确告知状态（否则用户不知道排队消息是否还会执行）
+    if (queueRef.current.length) {
+      setToast('⏸ 任务已停止：' + queueRef.current.length + ' 条排队消息保留，可点「▶ 开始发送」或逐条移除/清空');
+    } else {
+      setToast('已停止当前任务');
+    }
     // 停止后拉库对齐（服务端占位消息带中断原因+已执行进度），避免本地半截流内容与库不一致
     setTimeout(() => { if (curRef.current === convId) { loadMessages(convId).catch(() => {}); } }, 800);
   };
@@ -484,6 +490,17 @@ export default function Chat({ user, onLogout }) {
     setToast('▶ 自动发送排队消息（剩 ' + queueRef.current.length + ' 条）');
     await runText(curRef.current, next);
   }
+
+  // 队列管理：逐条移除 / 全部清空（停止后队列保留，用户可自主决定续发或丢弃）
+  const removeQueueAt = (i) => {
+    const q = queueRef.current.filter((_, idx) => idx !== i);
+    queueRef.current = q; setQueue(q);
+    if (!q.length) setToast('队列已清空');
+  };
+  const clearQueue = () => {
+    queueRef.current = []; setQueue([]);
+    setToast('已清空全部排队消息');
+  };
 
   // 活动轮询（旁观/断连兜底）：当前会话每 2.5s 拉事件环增量；
   // 本页 busy（SSE 直连渲染中）只推进 seq 不重复渲染；静默>6s 视为本轮结束→自动刷新最新结果
@@ -787,7 +804,26 @@ export default function Chat({ user, onLogout }) {
           <div className="rw-inputbar">
             <div className="rw-inputbox">
               {queue.length > 0 && (
-                <div className="rw-queuebar">⏳ 任务执行中，已排队 <b>{queue.length}</b> 条，完成后自动发送（可继续输入排队；点「发送」加入队列、点「■ 停止」只中止当前任务）</div>
+                <div className="rw-queuepanel">
+                  <div className="rw-queuehead">
+                    <span className={'rw-queuestate' + (busy ? ' on' : '')}>{busy ? '⏳ 任务执行中' : '⏸ 已停止'}</span>
+                    <span className="rw-queuecnt">排队 <b>{queue.length}</b> 条</span>
+                    <span className="rw-queueops">
+                      {!busy && <button className="rw-btn" onClick={flushQueue} title="按顺序发送全部排队消息">▶ 开始发送</button>}
+                      <button className="rw-btn" onClick={clearQueue} title="丢弃全部排队消息">🗑 清空</button>
+                    </span>
+                  </div>
+                  <div className="rw-queuelist">
+                    {queue.map((q, i) => (
+                      <div className="rw-queueitem" key={i}>
+                        <span className="rw-queueidx">{i + 1}</span>
+                        <span className="rw-queuetxt">{q}</span>
+                        <button className="rw-queuedel" onClick={() => removeQueueAt(i)} title="移除该条">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rw-queuenote">{busy ? '当前任务结束后自动按序发送；点「■ 停止」中止后队列保留，可手动续发/清空' : '任务已停止：队列不会自动发送，可点「▶ 开始发送」续发，或移除/清空不需要的消息'}</div>
+                </div>
               )}
               <div className="rw-inputrow">
                 <textarea className="rw-input" rows="2" placeholder="输入消息：Enter 发送，Shift+Enter 换行；任务执行中也可输入，会自动排队…" value={input}
