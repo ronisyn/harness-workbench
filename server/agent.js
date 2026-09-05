@@ -184,7 +184,7 @@ const COMPLETION_HINT = [
   '- 若未完成或还需验证（如：写码后未测试、查询后未给结论、任务只做了一部分）：继续调用工具把任务做完，直到目标真正完成再总结。',
 ].join('\n');
 
-export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 1.0 }) {
+export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
   const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
   // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
   const sysContent = () => {
@@ -399,15 +399,21 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           final = '⚠️【平台检测：本回复声称已执行完成，但本轮无任何工具调用记录，内容未经工具验证】\n' + final;
           emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型声称完成但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
         }
-        // B6b 假开始检测（B6 的逃逸形态，2026-09 实测根因）：B6 只打回"声称已完成"，模型规避方式=改为输出
-        // 纯承诺性开场（"开始执行——…""你说得对，现在立即…"）同样零工具调用 → 用户视角"说了开始就停"（假开始）。
-        // 判定：任务语境 + 本轮零工具 + 文本呈承诺性（开始/立即/先确认/我来核实等）+ 无实质内容（无 commit/路径/结论）→ 打回强制动手。
-        // 误伤防线：纯问答（taskish=false）不触发；真正给了结论/方案/数据的回复不触发（hasSubstance 排除）；
-        // 道歉认错但无行动词的也放行（promiseRe 要求具体行动承诺词）。
-        const promiseRe = /(开始执行|现在立即|马上(用|行动|动手|核实|查|看)|用可验证的行动|我来(查|看|核实|确认|做|写|改|修|读|检查|验证|跑)|让我先|我先(查|看|确认|核实|读|检查|跑|验证|动手)|这就(去|开始|动手|执行)|立即(用|查|看|核实|动手|开始|执行)|准备(开始|执行|动手)|接下来我(要|会|将)|先(确认|核实|查|看|检查|跑)(一下|一遍)?|本条回复即开始|现在就开始)/;
+        // B6b 假开始检测 v2（A+D 反转，2026-09 二次实证）：v1 把「承诺词表命中」当必要条件 → 模型措辞漂移即可逃逸
+        // （658/660 实测样本：无 v1 承诺词变体照样零工具收尾；且 v1 hasSubstance 把「承诺中提到的文件名/路径」
+        // 误当产出锚点放行——承诺文"先读取 agent.js"也含路径，无区分力）。反转：
+        // 判定 = 任务语境(taskish) + 本轮零工具 + 无实质产出锚点 → 假开始。不依赖穷举承诺措辞（结构性检测）。
+        // 误伤防线：纯问答 taskish=false 不触发；真正给了结论/根因/行号/哈希/完成式陈述的不触发（hasSubstance 放行）；
+        // 打回是软性的（continue 让模型重答一次，连续 2 次才加注放行）——偶发误伤可自愈，漏网假开始代价更高。
+        const promiseRe = /(开始执行|现在(立即|就|直接|动手)|马上(用|行动|动手|核实|查|看|读)|用可验证的行动|我来(查|看|核实|确认|做|写|改|修|读|检查|验证|跑|动手|取证)|让我先|我先(查|看|确认|核实|读|检查|跑|验证|动手|取证|读取|打开)|这就(去|开始|动手|执行)|立即(用|查|看|核实|动手|开始|执行|读取)|准备(开始|执行|动手)|接下来我(要|会|将)|先(取证|确认|核实|查|看|检查|跑|读|读取|打开)(一下|一遍)?|本条回复即开始|现在就开始|落地(开始|中|推进)|动手(做|改|修|查)?|开始(落地|执行|修复|自检|彻查))/;
         const isPromise = promiseRe.test(final);
-        const hasSubstance = /(commit [0-9a-f]{7,}|✅|结论|根因|原因是|问题(出在|在于)|方案[:：]|已读取|已写入|已修复|路径[:：]|\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+\.(js|jsx|ts|tsx|md|json|css|py|sh)|测试通过|验证通过|验收|本回复为最终总结)/.test(final);
-        if (isPromise && !hasSubstance) {
+        // D: 实质产出锚点（证明"已产出"而非"将要做"）：commit+哈希/完成式/结论式/行号/消息引用/数据。
+        // 注意：① 不再把「裸文件名/路径」当锚点——承诺文也提文件名，无区分力（v1 漏网根因之一）；
+        // ② 裸哈希(如 0e0a598)也不算——承诺/道歉文可能提及目标 commit，仅"commit xxxxxxx"带动词才算（652 实证）。
+        const hasSubstance = /(commit [0-9a-f]{7,}|✅|结论|根因|原因是|问题(出在|在于)|方案[:：]|已(读取|写入|修复|完成|创建|提交|删除|修改|验证)|测试通过|验证通过|验收|本回复为最终总结|`[^`]+`|L\d+|第\s*\d+\s*行|#\d+|消息\s*\d+|[0-9]+(\.[0-9]+)?\s*(轮|次|个|条|元|%|commit|秒|分钟|token))/;
+        // 弱结构信号：回复以"好/收到/可以…+现在/马上/这就"开头（承诺开场形态）——词表兜底，防措辞漂移逃逸
+        const leadingPromise = /^(好的?|收到|明白|行|可以|没问题|嗯|OK|好嘞)[，,。!！\s]*?(现在|马上|这就|开始|我先|让我|准备|立即|直接|先)/.test(final.trim());
+        if (taskish && !hasSubstance.test(final) && (isPromise || isClaim || leadingPromise)) {
           if (fakeWarnCount < lim.fakeContinueWarn) {
             fakeWarnCount++;
             msgs.push({ role: 'system', content: '【平台强制检测：本轮只输出行动承诺、未调用任何工具】你上一条回复（"' + String(final).replace(/\s+/g, ' ').slice(0, 120) + '"）只说了"将要做什么"，但没有任何工具执行记录。执行类任务请【直接在本轮调用工具动手】：先做一步真实的读/查/改/写再说话；开场说明压缩到一句即可，不要单独输出一整段"我将要做…"。' });

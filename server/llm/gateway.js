@@ -68,7 +68,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
     res = await fetch(p.base + '/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
-      body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, temperature: opts.temperature ?? 1.0, stream: true, stream_options: { include_usage: true } }),
+      body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, temperature: opts.temperature ?? 0.4, stream: true, stream_options: { include_usage: true } }),
       signal: ac.signal,
     });
   } catch (e) {
@@ -121,14 +121,14 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
 }
 
 // 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage, reasoning }
-export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 1.0) {
+export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 0.4) {
   const p = resolve(providerId, keys);
   const body = {
     model: model || p.defaultModel,
     messages,
     tools: tools || [],
     tool_choice: 'auto',
-    max_tokens: 8000,
+    max_tokens: 12000, // C 方案(2026-09)：原 8000 在 reasoning+长计划+工具调用同轮输出时可能被 content 耗尽致 tool_calls 未发出（假开始物理成因）；12000 只作上限不留计费差异
     temperature,
     stream: false,
   };

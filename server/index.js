@@ -304,8 +304,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const route = resolveRoute(content, provider || 'deepseek', model);
   provider = route.provider;
   model = route.model;
-  // F12 高级参数：读全局温度设置（settings 表，默认 1.0）
-  const temperature = await getSetting('temperature', 1.0);
+  // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
+  const temperature = await getSetting('temperature', 0.4);
   // 并发限制：同账号同时在跑的对话超过上限(3)则直接拒绝（先于写库）
   const curInflight = inflight.get(req.user.id) || 0;
   if (curInflight >= 3) {
