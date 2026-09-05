@@ -84,3 +84,47 @@
 3. scheduler.js 文件头补「周字段 0=周一」注释；确认 KPI周报意图。
 4. 新特性回归：草稿隔离、fail-loud 占位符、阅读体验 v3。
 5. 核实 09-05 是否双次执行同一 daily 任务（复触发幂等性）。
+
+---
+
+## 2026-09-06（约定任务执行，北京 05:02-05:1x）
+
+### 一、只读侦察摘要
+- 基线：git status 干净；HEAD 为 batch1 收尾 `7622728`（批1/P1 统一工具通道、P4 意图挡位、P8 缓存成本入账等已在主会话凌晨落地）。
+- 健康：`node scripts/selfcheck.mjs` 12/12 通过；src/ 无 console.log/debugger 残留；server 中 plan_mode/exit_plan_mode 仅剩"退役说明"注释（tools/index.js:658、meta.js:84/88），非死代码。
+- 用量（usage_stats，近 24h @05:05，会话时区口径）：633 次、¥55.07、均 ¥0.087/次；缓存命中 7.7%（hit 1.78M/总 23.2M）。分模型：DeepSeek V4 Flash ¥48.54/468 次/hit 5.7%、glm-5.3-flash ¥0.88/32 次/hit 41%。hit 较 09-05（2.5–3.9%）回升，批1/P8 与上下文精简初显收益；但 miss 输入仍 21.45M/24h，仍为最大可省成本项（延续主会话 O 域，本会话不重复介入）。
+
+### 二、自我检视发现
+| # | 类别 | 现象 | 证据位置 | 原因推测 | 处置 |
+|---|---|---|---|---|---|
+| 1 | 路径漂移 | daily-evolve-log 已随 036c6c2 移入 docs/archive/，但活引用仍指根路径 docs/daily-evolve-log.md，照旧执行会在根目录新建同名文件 → 日志分叉 | scheduled_tasks#4 prompt 步骤4；TODO.md:1 | 治理提交只移文件、未同步更新引用方 | 修复：两处引用统一到 docs/archive/ |
+| 2 | docs 断链 | TODO.md 引用的差距清单/880实测指南/最终自审报告均已入 archive | TODO.md:3-4 | 同上（move 未改引用） | 修复：改 archive 路径 |
+| 3 | docs 过期 | TODO.md#2"双路径：普通对话不带工具"与 Codex清单 §1 plan 行"conversations.mode=plan + plan_mode 工具"均已被批1/P1（统一工具通道）、P4（意图挡位、退役 plan_mode）取代 | TODO.md#2；docs/Codex与主流CLI-机制借鉴清单-v1.md §1 | 文档滞后于凌晨批1 落地 | 修复：同步为新机制语义 |
+| 4 | 注释缺失 | scheduler.js 文件头未注明 cron 周字段非标准语义（0=周一） | server/scheduler.js:3-4 | 09-05 日志"明日建议#3"遗留未修 | 修复：头注释补一行（纯注释） |
+| 5 | TZ 口径不一 | conversations/messages.created_at 存 UTC ISO（datetime），usage_stats.created_at 为 TIMESTAMP 随会话时区显示 → 跨表按时间过滤易误判（今日"是否复触发"核查因此无法一锤定音） | 表实测（messages vs usage_stats） | 演进期未统一存时区约定 | 仅记录：建议主会话统一为 UTC 存储或列注释显式标注 |
+
+适配性判断：本批修复全部落在"文档/引用/注释"层面，零运行时行为变更；**外部 CLI 的"归档即冻结"惯例不适合本环境**——daily-evolve-log 是活文档需每日追加，故采用"改引用、不动文件位置"的最小动作，并在 archive/README 将该文件标注为活文档防误清理。
+
+### 三、改动与验证
+| 改动 | 文件/数据 | 验证 | commit |
+|---|---|---|---|
+| TODO.md 头行/归档引用/对话自然度条目同步批1 语义 | TODO.md | diff 读回一致 | `1932d6a` |
+| Codex清单 §1 plan mode 行 → plan=意图挡位 | docs/Codex与主流CLI-机制借鉴清单-v1.md | diff 读回一致 | `1932d6a` |
+| archive/README 标注 daily-evolve-log 为活文档 | docs/archive/README.md | diff 读回一致 | `1932d6a` |
+| scheduler.js 头注释补 cron 周字段 0=周一 | server/scheduler.js | node --check 通过（纯注释） | `1932d6a` |
+| scheduled_tasks#4 prompt 日志路径 → docs/archive/ | DB（REPLACE 幂等） | SELECT 复核 archive_refs=1/root_refs=0 | —（非 git 数据） |
+
+commit `1932d6a`：4 files changed, +8/-6（原 750c629 经 --amend 补全消息含 scheduler 项）。
+
+### 四、成本估算
+- 本会话累计 ≈ ¥2.5（快照：token in≈1.0M/out≈22.6K）；全平台 24h ¥55.07 / 633 次（口径：usage_stats 行求和）。批1 开发与 E2E 属正常开发强度。
+
+### 五、明日（09-07）建议
+1. 明晨执行应直接追加 docs/archive/daily-evolve-log.md（本会话已改 DB prompt），观察是否仍出现根路径分叉/双文件。
+2. 缓存命中跟踪：hit 7.7% 较昨日回升但绝对值仍低；若持续 <15%，主会话继续评估前缀稳定性与输入精简（O 域，延续）。
+3. 复触发核查收尾：先统一 conversations/messages 与 usage_stats 时区口径，再以 scheduled_tasks.last_run 对照会话 created_at(UTC) 一锤定音 09-05 是否双跑。
+4. 待重启项汇总后交主会话：edc4ac6（autotitle）与批1 P1/P4/P8 等 server 改动，人工时段 reload_platform + E2E 回归。
+
+### 六、需重启项（留档）
+- 本会话**无**代码行为改动（仅注释+docs+DB prompt），无需重启。
+- edc4ac6 与批1 各项 server 改动是否已生效：请主会话比对进程加载时间与 git 时间后决定 reload（无人值守时段不自行重启）。
