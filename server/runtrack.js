@@ -2,7 +2,26 @@
 // 每个会话一条 agent_runs：running → completed | interrupted | paused
 // 服务启动时把遗留 running 标为 interrupted（重启自检）；下次用户消息注入"上次任务现场"提醒，
 // 模型基于持久化历史 + 现场信息从断点继续；循环检测不再杀任务而是 soft 提示→仍无效则 paused 挂起
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { db } from './db.js';
+
+// P16 唤醒包（2026-09 批1）：恢复任务时注入工作区 git 状态摘要——模型知道"改到哪、脏区在哪、HEAD 在哪"，
+// 避免恢复后盲目重读/重做或误判现场。工作区非 git 仓库/不可读时静默返回空（不阻塞恢复）。
+function gitStateSummary() {
+  const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+  try {
+    if (!fs.existsSync(ws)) return '';
+    const run = (args) => execFileSync('git', ['-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const head = run(['rev-parse', '--short', 'HEAD']);
+    const status = run(['status', '--short']);
+    const lines = status.split('\n').filter(Boolean).slice(0, 15); // 脏区最多列 15 行，防摘要过长
+    const parts = ['工作区 git 状态（' + ws + '）：HEAD=' + head];
+    if (lines.length) parts.push('未提交改动 ' + lines.length + ' 项：\n' + lines.map((l) => '  ' + l.slice(0, 100)).join('\n'));
+    else parts.push('工作区干净（无未提交改动）');
+    return parts.join('\n');
+  } catch { return ''; } // 非 git 仓库 / git 不可用 / 超时 → 静默跳过
+}
 
 export async function latestRun(conversationId) {
   const rows = await db.query('SELECT * FROM agent_runs WHERE conversation_id=? ORDER BY id DESC LIMIT 1', [conversationId]);
@@ -43,15 +62,17 @@ export async function interruptStaleOnBoot() {
   if (n[0]?.c) console.log('[runtrack] 重启自检：' + n[0].c + ' 个任务现场标记为 interrupted（可恢复）');
 }
 
-// 会话有可恢复现场时生成提醒（注入下一轮）
+// 会话有可恢复现场时生成提醒（注入下一轮；P16 唤醒包含工作区 git 状态摘要）
 export async function resumeHint(conversationId) {
   const r = await latestRun(conversationId);
   if (!r || !['interrupted', 'paused'].includes(r.status)) return null;
   const counts = (() => { try { return JSON.parse(r.tool_counts || '{}'); } catch { return {}; } })();
   const cText = Object.entries(counts).map(([k, v]) => k + '×' + v).join('、');
+  const git = gitStateSummary();
   return '【上次任务现场】目标：' + String(r.goal || '').slice(0, 300)
     + '\n状态：' + r.status + (r.reason ? '（' + r.reason + '）' : '')
     + '；已执行 ' + (r.rounds || 0) + ' 轮工具调用' + (cText ? '：' + cText : '')
     + (r.last_step ? '\n最后步骤：' + String(r.last_step).slice(0, 300) : '')
-    + '\n若用户要"继续任务"，基于以上现场和历史从断点接着推进；若是新指令则执行新指令。';
+    + (git ? '\n' + git : '')
+    + '\n若用户要"继续任务"，基于以上现场/历史/git 状态从断点接着推进（先看未完成步骤与工作区现状再动手）；若是新指令则执行新指令。';
 }
