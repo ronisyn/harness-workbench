@@ -25,9 +25,15 @@ const MUTATING_TOOLS = new Set([
   'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
 ]);
 
-  const PH_RE=/\[(?:内容已截断|原文 \d+ 字符已截断|上下文已裁剪中段)[^\]]*\]|全文可按 tool_call_id=/;
-function rejectPh(l,s){ if(typeof s==='string'&&PH_RE.test(s)) throw new Error(l+' 内容疑似被截断占位符污染(含"已截断/tool_call_id"标记)，拒绝写盘防损坏；请拆成 ≤400 字符小步写入或 append_file 分段追加'); }
+// —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
+// "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
+// 等占位符并真实执行，曾静默写坏文件。execTool 入口递归检疫 + 写类工具 run 内二次检疫
+const PH_A='(?:tool_call_id\\s*=\\s*[A-Za-z0-9_\\-]{4,}|db_query 查 tool_calls|job_output\\/read_file\\/查询工具|_archived|原文 \\d+ 字符已截断|已截断\\(原文 \\d+ 字符|原文在 messages 表可按 id=)';
 
+const PH_B='(?:messages 表可按 id=|早期工具调用参数已折叠|早期执行轮次已(?:折叠|归档)|早期过程说明已压缩归档|早期步骤结果已压缩归档|已压缩归档；需要细节可用 db_query|上下文已裁剪中段 \\d+ 字符|历史消息过长已截断 \\d+ 字符)';
+const PH_RE = new RegExp(PH_A + '|' + PH_B + '|\\[(?:内容已截断|参数已省略|上下文已裁剪中段|历史消息过长已截断|原文 \\d+ 字符已截断)[^\\]]*\\]');
+function hasPh(v) { if (typeof v === 'string') return PH_RE.test(v); if (Array.isArray(v)) return v.some(hasPh); if (v && typeof v === 'object') return Object.keys(v).some((k) => hasPh(v[k])); return false; }
+function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new Error(l + ' 参数疑似含截断/裁剪/归档占位符污染（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加，或把关键词转义/拼接后再写入。'); }
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -934,6 +940,7 @@ export async function execTool(name, args, ctx) {
   const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
     let blocked = null;
+    if (hasPh(args)) blocked = '工具 ' + name + ' 参数疑似含截断/裁剪/归档占位符（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加后重试，勿把历史中的占位符文本复制进写参数。';
     // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
     if (eff.limitPath && tool.permission === 'read') {
       const key = ['path', 'file', 'dir', 'base', 'src'].find((k) => args[k] !== undefined);
