@@ -495,7 +495,7 @@ export default function Chat({ user, onLogout }) {
   const removeQueueAt = (i) => {
     const q = queueRef.current.filter((_, idx) => idx !== i);
     queueRef.current = q; setQueue(q);
-    if (!q.length) setToast('队列已清空');
+    setToast(q.length ? '已移除该条排队消息' : '队列已清空');
   };
   const clearQueue = () => {
     queueRef.current = []; setQueue([]);
