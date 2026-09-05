@@ -85,3 +85,13 @@ export const DEFAULT_TOOLSET = [
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束）
 export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'plan_mode', 'exit_plan_mode'];
+
+// P1 轻量工具集（2026-09 批1）：普通问答统一通道的轻量 schema——覆盖高频日常任务（读写文件/查库/检索/搜网/测试/知识），
+// 不含高危与重型工具（delete_file/db_write/git_pull_push/run_command/kill_process/reload/set_limits/plan_mode/子代理族）。
+// 纯问答时模型可零工具直接答；带任务的短指令也能用本集动手 → 结构性消除"无工具路径假开始"（O-1）。
+export const LIGHT_TOOLSET = [
+  'read_file', 'read_file_range', 'write_file', 'append_file', 'edit_file', 'list_dir', 'find_file', 'grep_search', 'mkdir', 'copy_move',
+  'web_search', 'fetch_url', 'db_query', 'syntax_check', 'run_test', 'git_status', 'git_commit',
+  'kb_search', 'kb_add', 'skill_load', 'skills_list', 'repo_map',
+  'ask_user', 'finish_task', 'plan_tasks', 'plan_done', 'view_image', 'ocr_image',
+];

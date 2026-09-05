@@ -7,6 +7,7 @@ import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
+import { LIGHT_TOOLSET } from './tools/meta.js';
 
 // 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
 // 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）
@@ -341,7 +342,12 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     archiveEarlyContext(msgs); // 轻压缩：早期超长项置占位
     await maybeCollapseEarly(round); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩
     const llmT0 = Date.now();
-    const res = await chatOnceWithTools(provider, model, msgs, toolDefs(ctx.preset, ctx.__enabledTools), keys, temperature);
+    // P1 统一通道：轻量模式（普通问答/无明确任务词）→ 只暴露 LIGHT_TOOLSET 只读工具（模型可零工具直接答，也可单轮只读查询）；
+    // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
+    const defs = ctx.__light
+      ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
+      : toolDefs(ctx.preset, ctx.__enabledTools);
+    const res = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature);
     const llmMs = Date.now() - llmT0;
     // 全量计量（账本=真实消耗，三档计费 hit/miss/out）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id）
     try {

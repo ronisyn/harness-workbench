@@ -7,7 +7,6 @@ import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
-import { chatStream, calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
@@ -459,17 +458,22 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
   let skipStore = false; // stopped 时跳过落库/统计（但仍走统一清理）
   try {
-    const useTools = needsTools(content);
+    // P1 统一工具通道（2026-09 批1）：删除 needsTools 双路径——所有对话统一走 runAgent 执行循环，
+    // needsTools 仅降级为 schema 宽度选择：任务词命中 → 全量工具；纯问答 → LIGHT_TOOLSET 轻量 schema
+    // （模型可零工具直接答，也可用轻量工具单轮查询；结构性消除"无工具路径假开始"O-1）。
+    const light = !needsTools(content);
     let answer = '';
     let usage = {};
     let thinkBuf = ''; // 本轮的思考过程（reasoning）累积，落库供历史回看
-    if (useTools) {
-      // Agent 路径：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
+    {
+      // Agent 执行循环（统一通道）：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
       const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
-      // 长任务现场：登记/复用 run（断点恢复外壳）
+      // 长任务现场：登记/复用 run（断点恢复外壳）；纯问答（light）不登记现场（问答无断点恢复需求，省 run 噪音）
       let run = null;
-      try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
+      if (!light) {
+        try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
+      }
       agentRunId = run ? run.id : null;
       // 5.7 预算融合：会话 24h 总账剩余（usage_stats 按会话归集，含子代理同会话计入；总预算 task_budget_total）
       let budgetRemain = null;
@@ -488,7 +492,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
         if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
       } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, mode: convMode, preset: convPreset };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __light: light, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -533,27 +537,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         answer = result.content || '（无输出）';
         usage = result.usage || {};
         if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-        // Agent 路径分块模拟流式
+        // 统一路径分块模拟流式（真实逐字流式对工具模式不适用；分块保持近实时体验）
         const chunkSize = 8;
         for (let i = 0; i < answer.length; i += chunkSize) {
           if (!firstTokenMs) firstTokenMs = Date.now() - t0;
           send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
         }
       }
-    } else {
-      // 普通对话路径：不带 tools，真实流式（模型自然回答，保持出厂认知）；思考过程实时透出
-      const ctx = { usage: null, onThink: (txt) => { thinkBuf += txt; send({ type: 'think', text: txt }); } };
-      for await (const delta of chatStream(provider, messages, { model, temperature }, config.keys, ctx)) {
-        if (actrl.signal.aborted) break; // 服务端停止：普通路径也支持中断（保留已生成部分）
-        if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-        answer += delta;
-        send({ type: 'delta', delta });
-      }
-      if (ctx.finishReason === 'length' && answer) {
-        answer += TRUNC_NOTE;
-        for (let i = 0; i < TRUNC_NOTE.length; i += 16) send({ type: 'delta', delta: TRUNC_NOTE.slice(i, i + 16) }); // 标注也实时送达
-      }
-      usage = ctx.usage || {};
     }
     if (!skipStore) {
       send({ type: 'done', usage });
@@ -562,16 +552,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
       // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
       await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
-      // 用量统计：普通对话路径按请求计（kind=request）；Agent 路径已在 agent.js 按每一轮 LLM 调用计量（kind=round）
-      if (!useTools) {
-        const tin = usage.tokens_in || 0;
-        const tout = usage.tokens_out || 0;
-        const chit = usage.cache_hit || 0;
-        const cmiss = usage.cache_miss != null ? usage.cache_miss : Math.max(0, tin - chit);
-        const cost = calcCost(provider, { hit: chit, miss: cmiss, out: tout });
-        await db.query('INSERT INTO usage_stats (account_id, conversation_id, message_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, first_token_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW(),"request")',
-          [req.user.id, conversationId, r.insertId, provider, model || provider, tin, tout, chit, cmiss, cost, Date.now() - t0, firstTokenMs]);
-      }
+      // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
+      // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
       // 2026-09：占位消息带中断原因 + 已执行进度（run.checkpoint 落库），避免"中断=看起来啥也没干"
