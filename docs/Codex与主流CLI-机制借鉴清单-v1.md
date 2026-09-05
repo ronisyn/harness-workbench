@@ -1,4 +1,4 @@
-# Codex 与主流 CLI · 机制借鉴清单 v1（RW 自我进化路线图）
+﻿# Codex 与主流 CLI · 机制借鉴清单 v1（RW 自我进化路线图）
 
 > 性质：回答"RW 能否学习 Codex / 其他 CLI 长处优化自己"的施工蓝图。
 > 依据：Codex CLI（OpenAI 开源，Apache-2.0）官方 README 与公开机制、Claude Code（Anthropic）工程实践、
@@ -25,7 +25,7 @@
 |---|---|---|
 | Agent 循环 + 护栏（Codex） | runAgent 循环、时间/轮次/循环检测护栏、并行上限 | server/agent.js |
 | 上下文压缩 compaction（Claude Code/Codex） | >40 条摘要 + 运行中 >170 归档 + 工具结果 head/tail 修剪 | agent.js archiveEarlyContext/contextResultPrune |
-| plan mode 只读规划（Codex/Claude Code） | conversations.mode=plan + plan_mode/exit_plan_mode + 改动门禁 | docs/3080机制对照 §2 |
+| plan mode 只读规划（Codex/Claude Code） | conversations.mode=plan + plan_mode/exit_plan_mode + 改动门禁 | archive/3080机制对照 §2 |
 | subagents（Claude Code） | subagent sync/async/join/fanout/fork/list/report | 平台层差距清单 F16-F18 |
 | skills（Anthropic agent skills） | skills/<名>/SKILL.md + skill_load 跨轮注入 | F15 + 技能库 6 个 |
 | 分层记忆 CLAUDE.md/AGENTS.md | ENV_MAP（平台级）+ projects/<p>/AGENTS.md（项目级）+ kb（用户级）+ 会话摘要 | 记忆架构 v1、index.js:331 |
@@ -33,7 +33,7 @@
 | 审批/权限分层（Codex approval modes） | read/write/full/guard 预设 + 审批卡 + plan 只读门禁 | F20 |
 | 会话恢复 resume（Codex --resume） | runtrack checkpoint + resumeHint + "现场已保存" | server/runtrack.js |
 | 结构化问询（Codex/Claude） | ask_user 选项卡片 + 裁决 API | 3080对照 §2 |
-| 外部驱动器/验收契约 | create_contract + 验收 shell DSL + finish_task | docs/3080机制对照 §5 |
+| 外部驱动器/验收契约 | create_contract + 验收 shell DSL + finish_task | archive/3080机制对照 §5 |
 | ralph 多轮独立视角 | 新 agent 共享工作区记忆文件推进目标 | 平台层差距清单 Parity Batch5 |
 
 ## 2. 真实差距（外部 CLI 有、RW 暂无，建议按批次落地）
@@ -67,7 +67,7 @@
 ### P3（低价值/成本高，暂缓）
 5. **⬜ MCP 生态接入（Codex/Claude Code 支持 MCP 工具服务器）**
    - 价值大但工程重（需 MCP 客户端+工具动态注册+鉴权），暂缓到 P1/P2 完成后再评估。
-6. **⬜ watch 文件变更广播（3080 skills watch）**：服务器版价值低，不做（docs/3080机制对照已注）。
+6. **⬜ watch 文件变更广播（3080 skills watch）**：服务器版价值低，不做（archive/archive/3080机制对照已注）。
 
 ## 3. 文档-实现差异（自查发现，顺手可修）
 - ~~docs/记忆架构.md §4 写"自动触发（P2）：scheduler 扫 24h 无消息会话调用 conv_summarize"，~~
