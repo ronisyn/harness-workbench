@@ -23,9 +23,10 @@ async function rows(sql, p) {
 const mid = (arr) => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2 * 100) / 100; };
 const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 100) / 100 : 0;
 
-// ---------- 基础：期内用量 ----------
-const usage = await rows('SELECT COUNT(*) c, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cost),0) cost FROM usage_stats WHERE created_at > NOW() - INTERVAL ? DAY', [DAYS]);
-out.usage = { llmRounds: usage[0].c, tokensIn: Number(usage[0].tin), tokensOut: Number(usage[0].tout), cost: Number(usage[0].cost) };
+// ---------- 基础：期内用量（P8：含 cache hit 率，验证快照移位后前缀缓存收益） ----------
+const usage = await rows('SELECT COUNT(*) c, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cost),0) cost, COALESCE(SUM(cache_hit_tokens),0) chit, COALESCE(SUM(cache_miss_tokens),0) cmiss FROM usage_stats WHERE created_at > NOW() - INTERVAL ? DAY', [DAYS]);
+const chit = Number(usage[0].chit), cmiss = Number(usage[0].cmiss);
+out.usage = { llmRounds: usage[0].c, tokensIn: Number(usage[0].tin), tokensOut: Number(usage[0].tout), cost: Number(usage[0].cost), cacheHitTokens: chit, cacheMissTokens: cmiss, cacheHitRate: (chit + cmiss) > 0 ? Math.round(chit / (chit + cmiss) * 1000) / 10 : null };
 
 // ---------- KPI2 任务级步数/成本（按 agent_runs 归集；WS0 挂 run 后生效） ----------
 const runs = await rows(
@@ -125,7 +126,7 @@ if (AS_JSON) { console.log(JSON.stringify(out, null, 2)); }
 else {
   const L = [];
   L.push(`=== RW KPI（近 ${DAYS} 天）===`);
-  L.push(`用量: ${out.usage.llmRounds} LLM轮 / in ${out.usage.tokensIn} / out ${out.usage.tokensOut} / ¥${out.usage.cost.toFixed(4)}`);
+  L.push(`用量: ${out.usage.llmRounds} LLM轮 / in ${out.usage.tokensIn} / out ${out.usage.tokensOut} / ¥${out.usage.cost.toFixed(4)}` + (out.usage.cacheHitRate === null ? '' : ` / cache hit ${out.usage.cacheHitRate}%`));
   L.push(`KPI1 打回率: ${out.kpi1.rejected}/${out.kpi1.submissions} = ${out.kpi1.rate}%`);
   L.push(`KPI2 任务(${out.kpi2.tasks}): 轮数中位 ${out.kpi2.medianRounds} / 均 ${out.kpi2.avgRounds}；成本中位 ¥${out.kpi2.medianCost} / 均 ¥${out.kpi2.avgCost}`);
   L.push(`     状态分布: ${JSON.stringify(out.kpi2.statusDist)}${out.orphanRounds.convs ? `；未挂run会话 ${out.orphanRounds.convs} 个（成本 top: ${out.orphanRounds.topByCost.map((x) => '#' + x.conversationId + ' ¥' + x.cost.toFixed(3)).join(' ') }）` : ''}`);

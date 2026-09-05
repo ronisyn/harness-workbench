@@ -221,7 +221,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let loopWarned = false;  // soft 换策略提示只发一次
   let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
   const t0 = Date.now();
-  let cumTin = 0, cumTout = 0, cumCost = 0; // WS2 本任务累计钱包（每轮计量后累加）
+  let cumTin = 0, cumTout = 0, cumCost = 0, cumHit = 0, cumMiss = 0; // WS2 本任务累计钱包；P8 cache hit 率测量（hit/(hit+miss)）
 
   // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
   // 2026-09 token 优化（缓存友好）：快照内容每轮变化（轮次/用时/累计 token），若插在历史前（splice(1,0)）
@@ -237,6 +237,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const snap = '【运行时快照】第 ' + (round + 1) + ' 轮 | 已用 ' + mins + ' 分钟 | 护栏现值: 预算 ' + (lim.budgetMin || '不限') + ' 分钟 / 轮次 ' + (lim.roundCap || '不限') + ' / 循环检测 ' + (lim.loopGuard || '关') + ' / 并行 ' + (lim.maxParallelT || '串行')
       + '（每轮读 settings，变更最快 5s 生效；set_limits 可调，0=不限）'
       + ' | 本任务累计: token in ' + cumTin + ' / out ' + cumTout + ' ≈ ¥' + cumCost.toFixed(3)
+      + ' | cache hit ' + ((cumHit + cumMiss) > 0 ? Math.round(cumHit / (cumHit + cumMiss) * 100) : 100) + '%'
       + ' | 会话 mode=' + (ctx.mode || 'chat') + ' permission=' + (ctx.permission || 'full') + ' preset=' + (ctx.preset || 'all')
       + ' | 政策版本 rev ' + lim.rev + resume
       + '\n以本快照为准；政策版本变化=规则已更新，丢弃旧理解。';
@@ -349,6 +350,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
         [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs]);
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += cost;
+      cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
     } catch { /* 计量失败不影响执行 */ }
     // WS7.4/5.7 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
     if (effBudgetYuan > 0 && cumCost > effBudgetYuan) {
@@ -387,6 +389,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
             await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
               [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0]);
             cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
+            cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
           } catch { /* 计量失败不影响续写 */ }
         }
         if (frC4 === 'length') final += '\n\n> ⚠️ 本段输出经 ' + contN + ' 次自动续写仍达长度上限；如还需剩余部分可回复"继续"。';
