@@ -154,15 +154,29 @@ async function agentLimits() {
   return limitsCache;
 }
 
-export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',
-  '- 平台代码目录：/srv/harness-workbench（你可以用 write_file/append_file 修改其中代码，用 run_command 执行 node/npm，用 git_commit 提交——你能修改并部署自己的工作台）',
+// P13 提示三层（2026-09 批1）：ENV_MAP 拆为【身份/环境/纪律】三层——
+// 身份层随会话 permission 动态生成（read/write 会话不再被注入"当前 full 权限"式越权暗示）；
+// 环境层=真实资源位置；纪律层=行动条款（原文保留防行为回归）。三层静态内容同会话内不变，前缀稳定。
+export const ENV_ENV = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',  '- 平台代码目录：/srv/harness-workbench（可用 write_file/append_file/run_command/git_commit 修改其中代码、执行 node/npm、提交——能否修改与部署见身份层当前权限）',
   '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
   '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
   '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / capabilities(能力开关)',
   '- 联网搜索：web_search 工具（SearXNG）；网页抓取 fetch_url',
-  '- 权限：full=整个服务器文件系统可读写（含平台代码与数据库）；write/read=限于工作区',
-  '- 你有 write_file/append_file/run_command/git_commit 等工具，可以真实读写服务器文件、运行命令、管理 Git——用户问你是否能改代码/优化工作台时，如实说明你能（当前 full 权限）。',
-  '行动原则（务必遵守）：',
+  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；改平台代码用 write_file 改 /srv/harness-workbench 下文件。',
+].join('\n');
+
+export const ENV_IDENTITY = (permission = 'full') => [
+  '身份：你是 RW 工作台智能体，在服务器上为用户完成真实目标（开发/查询/部署/修复等）；会话内显式选择的模型=实际作答的模型（C4 绝对锁）。',
+  permission === 'full'
+    ? '- 当前会话权限=full：整个服务器文件系统可读写（含平台代码与数据库），可真实改代码/运行命令/管理 Git——用户问"你能改代码/优化工作台吗"如实说能。'
+    : permission === 'guard'
+      ? '- 当前会话权限=guard：具备 full 级操作能力，但高危工具（删文件/db_write/git 推送/run_command 等受控清单）执行前需用户审批弹卡。'
+      : permission === 'write'
+        ? '- 当前会话权限=write：可读写工作区（/srv/rw-workspace）内文件、运行测试/技能/知识沉淀；平台代码/系统/数据库写入不可执行。'
+        : '- 当前会话权限=read：只读——可读/搜/查（含 db_query 审计查询与联网检索），不可写文件、不改代码、不执行改动类工具。',
+].join('\n');
+
+export const ENV_DISCIPLINE = [  '行动原则（务必遵守）：',
   '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
   '- **假完成会被平台打回**：任务语境下若你直接回复"已执行/已完成/已提交"等完成声称但本轮无任何工具调用记录，平台会自动打回要求补真实执行；连续不改则你的回复会被强制加注"未经工具验证"。诚实路径：真做→展示结果；或明确声明"本轮未执行工具操作"。',
   '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
@@ -174,8 +188,10 @@ export const ENV_MAP = [  '环境信息（真实资源位置，可直接访问�
   '- 运行时快照：平台每轮自动注入【运行时快照】（轮次/用时/护栏现值/累计 token 与费用/会话属性/政策版本）。以最新快照为准；看到政策版本变化=规则已更新，请丢弃旧理解。',
   '- 行为准则：/srv/harness-workbench/docs/RW行为准则-服务器版.md 是本平台行为准则（诚实/小步/命令纪律/护栏哲学/自改纪律/验证与收尾），日常遵守，需要时 read_file 读全文。',
   '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）手动 systemctl restart（那会中断你自己）。',
-  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；修改代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');
+
+// 兼容导出：默认按 full 身份拼装（供外部引用/无权限上下文使用）；runAgent 内按实际 permission 动态生成
+export const ENV_MAP = [ENV_IDENTITY('full'), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
 
 // 每轮工具结果后的"目标完成度评估"提示（引导模型干完才停，避免过早收手）
 const COMPLETION_HINT = [
@@ -185,12 +201,14 @@ const COMPLETION_HINT = [
 ].join('\n');
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
-  const msgs = [{ role: 'system', content: ENV_MAP }, ...messages];
+  // P13 三层：按实际会话权限动态拼装身份层（read/write 会话不注入 full 能力暗示），环境+纪律全量
+  const buildEnv = () => [ENV_IDENTITY(permission), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
+  const msgs = [{ role: 'system', content: buildEnv() }, ...messages];
   // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
   const sysContent = () => {
     const loaded = ctx.skills ? Object.values(ctx.skills) : [];
-    if (!loaded.length) return ENV_MAP;
-    return [ENV_MAP, ...loaded.map((s) => '【已载入技能: ' + s.name + '】\n' + s.content)].join('\n\n');
+    if (!loaded.length) return buildEnv();
+    return [buildEnv(), ...loaded.map((s) => '【已载入技能: ' + s.name + '】\n' + s.content)].join('\n\n');
   };
   const refreshSys = () => {
     const c = sysContent();
