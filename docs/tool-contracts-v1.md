@@ -1,4 +1,4 @@
-﻿# 附录D · 工具契约施工图 v1（WS1 实施图纸 · 撑竿跳方案 1.0）
+# 附录D · 工具契约施工图 v1（WS1 实施图纸 · 撑竿跳方案 1.0）
 
 > 依据：docs/archive/RW撑竿跳方案-执行史-v1.0.md §1 WS1 + §1.5 X1（已归档；决策已并入蓝图 C 域）· Anthropic《Seeing like an agent》：工具是 agent 的眼与手。
 > 范围：61 个现存工具（实测 server/tools/index.js TOOLS）+ conv_summarize（WS5 新增）= **62**。
@@ -77,8 +77,7 @@
 | git_pull_push | 拉取/推送远程 | 提交用 git_commit | `git_pull_push {dir, action:"push"}` | GUARDED；push 前先 pull 防分叉 |
 | reload_platform | 自改代码生效（先 syntax_check+commit） | 仅改配置/数据不需要 | `reload_platform {}` | 回复结束后 3-4s 重启（已有） |
 | set_limits | 用户要求调护栏（0=不限） | 不要未经请求自行放宽 | `set_limits {minutes, rounds, loop, parallel}` | 护栏=保险丝可调可关（WS2 哲学）；走 WS4 validate |
-| plan_mode | 用户要求先规划只读 | 普通任务不要进入 | `plan_mode {}` | 写类工具全拒（已有） |
-| exit_plan_mode | 提交计划并退出只读 | 未查证完不要提交 | `exit_plan_mode {plan}` | 计划全文作为回答展示 |
+| plan_tasks/plan_done | 多步任务清单（意图挡位载体，保留） | 单步小任务直接做 | plan_tasks→plan_done | P4 批1 退役 plan_mode/exit_plan_mode（意图=请求级只读，无会话模式） |
 
 ## 四、实施检查清单（批2b 用）
 1. toolDefs() 描述拼接：`description + ' 何时用:…；勿用:…；例:…'`（when/not/ex 存于 TOOLS 条目，description 保留原句防破坏性变更）。
