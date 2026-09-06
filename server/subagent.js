@@ -48,7 +48,7 @@ function childEmit(parentEmit, subId, label, seqBase) {
   };
 }
 
-export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 0.4, depth = 0, seedMessages = [], noSubagentOverride = false }) {
+export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 0.4, depth = 0, seedMessages = [], noSubagentOverride = false, contract = null }) {
   pruneSubs();
   const id = makeSubId();
   const seqBase = nextSeqBase();
@@ -63,9 +63,20 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
     noSubagent: noSubagentOverride || (parentCtx.depth || 0) + 1 >= 3,
   };
   const t0 = Date.now();
+  // P10 子代理输出契约（2026-09 批4）：默认注入结构化输出模板（调用方可传 contract 覆盖/关闭）。
+  // 目的：子代理返回"可消费的结构化结果"而非自由散文——父代理/驱动器可稳定解析（结论/产物/验证/遗留）。
+  const SUB_CONTRACT = [
+    '【子代理输出契约】任务完成后按以下结构返回（markdown，简洁）：',
+    '## 结论（1-3 句直接回答）',
+    '## 做了什么（要点列表，含关键文件/路径/命令）',
+    '## 结果与验证（实测证据：输出/测试/截图，区分"已验证"与"推断"）',
+    '## 遗留/风险（未完成事项、假设、需父代理注意点；无则写"无"）',
+    '只返回上述结构内容，不要额外寒暄。',
+  ].join('\n');
+  const effContract = contract === null ? SUB_CONTRACT : (contract ? String(contract) : '');
   const runPromise = runAgent({
     provider, model, permission,
-    messages: [...(seedMessages || []), { role: 'user', content: prompt }],
+    messages: [...(seedMessages || []), { role: 'user', content: prompt + (effContract ? '\n\n' + effContract : '') }],
     ctx: childCtx, keys, temperature,
     emit: childEmit(parentCtx.__emit, id, record.name, seqBase),
   });

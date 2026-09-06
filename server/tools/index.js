@@ -639,16 +639,41 @@ export const TOOLS = [
         [ctx.accountId ?? null, String(a.title || goal.slice(0, 40)).slice(0, 200), goal, JSON.stringify(acc.slice(0, 10)), String(a.boundaries || '').slice(0, 1000), runAt]);
       return { contract_id: r.insertId, status: 'queued', note: (runAt ? ('将于 ' + runAt.toISOString() + ' 执行') : '已排队，驱动器将尽快无人值守执行') + '；完成后会生成你的复测任务等待确认。' };
     } },
-  { name: 'finish_task', description: '任务完成自检提交：把任务标记为"已完成候选"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入"待用户复测"。', permission: 'read',
+  { name: 'finish_task', description: '任务完成自检提交：把任务标记为"已完成候选"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入"待用户复测"。若工作区是 git 仓库且非平台代码目录，将自动提交未提交改动（P5 auto-commit 业务区）。', permission: 'read',
     params: {
       summary: { type: 'string', required: true, desc: '完成总结（做了什么、结果如何）' },
       selfCheck: { type: 'string', desc: '对照验收标准的自检说明' },
     },
-    run: async (a) => ({
-      accepted: true,
-      note: '已登记完成自检。驱动器将运行验收钩子核验；全部通过后任务进入【待复测】等待你确认，未通过会被打回。',
-      summary: String(a.summary || '').slice(0, 2000),
-    }) },
+    run: async (a, ctx) => {
+      const summary = String(a.summary || '').slice(0, 2000);
+      let autoCommit = null;
+      // P5 auto-commit（2026-09 批4）：业务/工作区 git 仓库自动提交（非平台代码目录——平台走 C5 手动+提案）。
+      // 判定：root（工作区根）非平台目录 /srv/harness-workbench，且该目录是 git 仓库，且有未提交改动。
+      try {
+        const ws = ctx?.root || process.env.RW_WORKSPACE || '/srv/rw-workspace';
+        const platformDir = process.env.RW_PLATFORM_DIR || '/srv/harness-workbench';
+        const isPlatform = ws === platformDir || ws.startsWith(platformDir + '/');
+        if (!isPlatform && ctx && !ctx.__skipAutoCommit) {
+          const fsx = await import('node:fs');
+          if (fsx.existsSync(path.join(ws, '.git'))) {
+            const st = await runCmd('git', ['-C', ws, 'status', '--porcelain']);
+            const dirty = String(st.out || '').trim();
+            if (dirty) {
+              const msg = 'auto: ' + (summary.replace(/\s+/g, ' ').slice(0, 60) || 'task completed');
+              await runCmd('git', ['-C', ws, 'add', '-A']);
+              const cr = await runCmd('git', ['-C', ws, 'commit', '-m', msg]);
+              autoCommit = { ok: cr.ok, dirtyFiles: dirty.split('\n').length, message: msg };
+            } else { autoCommit = { ok: true, dirtyFiles: 0, note: '工作区干净无改动' }; }
+          } else { autoCommit = { ok: true, skipped: '非 git 仓库，跳过 auto-commit' }; }
+        } else { autoCommit = { ok: true, skipped: isPlatform ? '平台目录走 C5 手动提交' : '无上下文' }; }
+      } catch (e) { autoCommit = { ok: false, error: String(e && e.message || e).slice(0, 200) }; }
+      return {
+        accepted: true,
+        note: '已登记完成自检。驱动器将运行验收钩子核验；全部通过后任务进入【待复测】等待你确认，未通过会被打回。',
+        summary,
+        autoCommit,
+      };
+    } },
 
   // ---------- P4 退役：plan_mode/exit_plan_mode（2026-09 批1）----------
   // C3/P4：plan 不再是会话模式而是意图挡位。只读规划=请求级（ctx.__readonlyIntent，见 execTool 门禁），
