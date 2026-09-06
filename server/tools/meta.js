@@ -82,7 +82,9 @@ export const DEFAULT_TOOLSET = [
   'undo_checkpoint', 'hooks_list', 'repo_map',
 ];
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束；P4 后 plan_mode/exit_plan_mode 已退役移除）
-export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits'];
+// O-6（2026-09 批2）：hooks_list/undo_checkpoint 属平台纪律工具——拦截提示引导用 hooks_list 排查，若受启用集约束则被拦后无法自诊；
+// undo_checkpoint 是写坏文件的安全网回滚端，二者均应恒可用（不依赖用户勾选）。
+export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'hooks_list', 'undo_checkpoint'];
 
 // P1 轻量工具集（2026-09 批1）：普通问答统一通道的轻量 schema——覆盖高频日常任务（读写文件/查库/检索/搜网/测试/知识），
 // 不含高危与重型工具（delete_file/db_write/git_pull_push/run_command/kill_process/reload/set_limits/plan_mode/子代理族）。
