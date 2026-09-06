@@ -1004,6 +1004,17 @@ async function main() {
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // 任务契约驱动器（外部驱动：无人值守责任循环）
   try { startDriver(); } catch (e) { console.error('[driver] 启动失败:', e.message); }
+  // P11 MCP client（2026-09 批5）：按 settings mcp_servers 连接外部 MCP server（异步不阻塞启动）
+  (async () => {
+    try {
+      const mcp = await import('./mcp.js');
+      const { syncMcpExtras } = await import('./tools/index.js');
+      const r = await mcp.connectConfiguredMcps();
+      const clients = mcp.listMcpClients();
+      const n = syncMcpExtras(clients);
+      console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');
+    } catch (e) { console.error('[mcp] 启动连接失败(可稍后配置 mcp_servers):', e.message); }
+  })();
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));

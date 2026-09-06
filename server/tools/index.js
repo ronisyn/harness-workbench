@@ -917,6 +917,31 @@ export function checkPerm(tool, sessionPerm) {
 
 // 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行；
 // enabled=账号工具启用集 Set（5.3c），null=全部启用（驱动器等无人值守场景）；expert 平台豁免工具不受启用集限制）
+// P11 MCP 补充工具（2026-09 批5）：connectConfiguredMcps 后由 syncMcpExtras() 填充——
+// 每工具描述来自 MCP tools/list 的 inputSchema；暴露名 mcp_<serverId>_<toolName>，execTool 有 fallback 转发。
+const MCP_EXTRA = [];
+export function syncMcpExtras(clients) {
+  MCP_EXTRA.length = 0;
+  for (const cl of clients || []) {
+    for (const t of (cl.tools || [])) {
+      const input = (t && t.inputSchema) || { type: 'object', properties: {} };
+      MCP_EXTRA.push({
+        type: 'function',
+        function: {
+          name: 'mcp_' + cl.id + '_' + t.name,
+          description: '[MCP:' + cl.id + '] ' + (t.description || t.name),
+          parameters: {
+            type: 'object',
+            properties: (input.properties || {}),
+            required: (input.required || []),
+          },
+        },
+      });
+    }
+  }
+  return MCP_EXTRA.length;
+}
+
 export function toolDefs(expose = 'all', enabled = null) {
   const allow = expose === 'minimal' ? ['core'] : expose === 'standard' ? ['core', 'pro'] : ['core', 'pro', 'expert'];
   const PKEYS = ['enum', 'items', 'min', 'max']; // 参数 schema 白名单透传（防任意键注入）
@@ -946,11 +971,28 @@ export function toolDefs(expose = 'all', enabled = null) {
         },
       },
     };
-  });
+  }).concat(MCP_EXTRA); // P11：拼接已连接 MCP server 的工具（expose 不限层级——MCP 工具由管理员配置信任）;
 }
 
 // 执行工具并留痕
 export async function execTool(name, args, ctx) {
+  // P11 MCP fallback（2026-09 批5）：mcp_<serverId>_<toolName> 调用 → 转发到 MCP client（权限按 write 级评估）
+  const mcpMatch = /^mcp_([a-zA-Z0-9_-]+)_(.+)$/.exec(name);
+  if (mcpMatch) {
+    const { callMcpTool } = await import('./mcp.js');
+    const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
+    const t0m = Date.now();
+    let result;
+    try {
+      const r = await callMcpTool(srvId, mcpTool, args);
+      result = { content: (r && r.content) || JSON.stringify(r || {}) };
+    } catch (e) { result = { error: String(e && e.message || e) }; }
+    try {
+      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
+        [ctx.conversationId, ctx.messageId || null, name, JSON.stringify(args).slice(0, 2000), JSON.stringify(result).slice(0, 2000), Date.now() - t0m, result.error ? 'fail' : 'done']);
+    } catch { /* 留痕失败忽略 */ }
+    return result;
+  }
   const tool = findTool(name);
   if (!tool) throw new Error('未知工具: ' + name);
   if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
