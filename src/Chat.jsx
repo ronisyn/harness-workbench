@@ -157,6 +157,10 @@ export default function Chat({ user, onLogout }) {
   const [caps, setCaps] = useState([]);
   const [toolList, setToolList] = useState([]); // 5.3c 工具启用集（设置→工具）
   const [rules, setRules] = useState([]); // P6 allow/deny 规则层（设置→规则）
+  const [proposals, setProposals] = useState([]); // P3 提案面板（设置→提案）
+  const [propContent, setPropContent] = useState(''); // 查看中的提案内容
+  const [propTitle, setPropTitle] = useState(''); // 新建提案标题
+  const [propDraft, setPropDraft] = useState(''); // 新建提案正文
   const [provList, setProvList] = useState([]);
   const [market, setMarket] = useState([]);
   const [marketBusy, setMarketBusy] = useState(false);
@@ -578,6 +582,20 @@ export default function Chat({ user, onLogout }) {
     if (tab === 'tasks') { const t = await api.tasks(); setTasks(t.tasks || []); }
     if (tab === 'tools') { const t = await api.getToolset(); setToolList(t.tools || []); }
     if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
+    if (tab === 'proposals') { try { const p = await api.proposals(); setProposals(p.proposals || []); setPropContent(''); } catch { setProposals([]); } }
+  };
+
+  // P3 提案查看/新建
+  const viewProposal = async (file) => { try { const d = await api.proposalContent(file); setPropContent(d.content || ''); } catch (e) { setToast(e.message); } };
+  const submitProposal = async () => {
+    if (!propTitle.trim() || !propDraft.trim()) { setToast('标题与正文必填'); return; }
+    try {
+      const body = '# 提案：' + propTitle + '\n\n> 状态：🆕 待审\n\n' + propDraft;
+      const d = await api.createProposal(propTitle, body);
+      setToast('提案已创建：' + d.file + '（用户审阅后按 C5 合入）');
+      setPropTitle(''); setPropDraft(''); setPropContent('');
+      const p = await api.proposals(); setProposals(p.proposals || []);
+    } catch (e) { setToast(e.message); }
   };
 
   // P6 规则管理：JSON 文本编辑 + 保存/加示例
@@ -867,6 +885,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => openDrawer('market')}>模型市场</button>
                 <button className={'rw-dtab' + (drawerTab === 'tools' ? ' sel' : '')} onClick={() => openDrawer('tools')}>工具</button>
                 <button className={'rw-dtab' + (drawerTab === 'rules' ? ' sel' : '')} onClick={() => openDrawer('rules')}>规则</button>
+                <button className={'rw-dtab' + (drawerTab === 'proposals' ? ' sel' : '')} onClick={() => openDrawer('proposals')}>提案</button>
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
                 <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
@@ -1003,6 +1022,29 @@ export default function Chat({ user, onLogout }) {
                     <button className="rw-btn" onClick={() => { setRuleText('[]'); }}>清空</button>
                   </div>
                   <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>当前规则 {rules.length} 条；保存后下轮工具调用生效。</div>
+                </div>
+              )}
+
+              {drawerTab === 'proposals' && (
+                <div className="rw-trace">
+                  <div className="rw-cap-gtitle">平台改动提案（P3/C5）——平台 main 合入前先写提案供你审阅；业务项目不受此限</div>
+                  {proposals.length ? proposals.map((p) => (
+                    <div key={p.file} className="rw-trace-item" style={{ cursor: 'pointer' }} onClick={() => viewProposal(p.file)}>
+                      <div className="rw-trace-head"><b>{p.title}</b> <span className={'rw-trace-status ' + (p.status === '待审' ? 'pending' : 'done')}>{p.status}</span></div>
+                      <div className="rw-trace-res">{p.file}（{p.size} 字符）</div>
+                    </div>
+                  )) : <div className="rw-empty">暂无提案（平台改动时 RW 会先写提案）</div>}
+                  {propContent && (
+                    <details open style={{ marginTop: 8 }}><summary>提案内容</summary>
+                      <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: '#f6f6f6', padding: 8, borderRadius: 4 }}>{propContent}</pre>
+                    </details>
+                  )}
+                  <div className="rw-cap-gtitle" style={{ marginTop: 12 }}>新建提案</div>
+                  <input className="rw-input" style={{ marginBottom: 6 }} placeholder="标题（如：批5 增加 MCP client 框架）" value={propTitle} onChange={(e) => setPropTitle(e.target.value)} />
+                  <textarea className="rw-input" rows="5" placeholder="正文：背景/改动/影响/验证（可用 docs/templates/提案模板.md 结构）" value={propDraft} onChange={(e) => setPropDraft(e.target.value)} />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button className="rw-btn" onClick={submitProposal}>提交提案（存档 proposals/）</button>
+                  </div>
                 </div>
               )}
 

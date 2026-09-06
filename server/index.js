@@ -741,6 +741,47 @@ app.put('/api/access-rules', requireAuth, async (req, res) => {
   res.json({ ok: true, count: rules.length });
 });
 
+// P3 proposals 提案 API（2026-09 批4）：平台 main 改动前先写提案（C5 受控合入配套）。
+// 存储：<ROOT>/proposals/<YYYYMMDD-主题>.md（git 仓库内版本化）；模板 docs/templates/提案模板.md。
+const PROPOSALS_DIR = path.join(ROOT, 'proposals');
+function ensureProposalsDir() { try { fs.mkdirSync(PROPOSALS_DIR, { recursive: true }); } catch { /* ignore */ } }
+app.get('/api/proposals', requireAuth, async (req, res) => {
+  try {
+    ensureProposalsDir();
+    const files = fs.readdirSync(PROPOSALS_DIR).filter((f) => f.endsWith('.md')).sort().reverse();
+    const list = files.map((f) => {
+      try {
+        const raw = fs.readFileSync(path.join(PROPOSALS_DIR, f), 'utf8');
+        const title = (String(raw).split('\n').find((l) => l.startsWith('# ')) || '# ' + f).replace(/^#\s*/, '').slice(0, 80);
+        const status = (String(raw).match(/状态：([^·\n]+)/) || [])[1] || '待审';
+        return { file: f, title: title.trim(), status: status.trim(), size: raw.length };
+      } catch { return { file: f, title: f, status: '?', size: 0 }; }
+    });
+    res.json({ ok: true, proposals: list });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.get('/api/proposals/:file', requireAuth, async (req, res) => {
+  try {
+    const safe = path.basename(String(req.params.file || '')).replace(/[\\/]/g, '_');
+    const p = path.join(PROPOSALS_DIR, safe);
+    if (!fs.existsSync(p)) return res.status(404).json({ ok: false, message: '提案不存在' });
+    res.json({ ok: true, file: safe, content: fs.readFileSync(p, 'utf8').slice(0, 60000) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.post('/api/proposals', requireAuth, async (req, res) => {
+  try {
+    const { title, content } = req.body || {};
+    if (!title || !content) return res.status(400).json({ ok: false, message: 'title/content 必填' });
+    ensureProposalsDir();
+    const d = new Date();
+    const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    const safe = (String(title).replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 50) || 'proposal');
+    const file = stamp + '-' + safe + '.md';
+    fs.writeFileSync(path.join(PROPOSALS_DIR, file), String(content), 'utf8');
+    res.json({ ok: true, file });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 读文件（轨迹"打开文件"查看内容用） ----------
 app.get('/api/file', requireAuth, async (req, res) => {
   const p = req.query.path;
