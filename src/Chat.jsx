@@ -161,6 +161,8 @@ export default function Chat({ user, onLogout }) {
   const [propContent, setPropContent] = useState(''); // 查看中的提案内容
   const [propTitle, setPropTitle] = useState(''); // 新建提案标题
   const [propDraft, setPropDraft] = useState(''); // 新建提案正文
+  const [mcpText, setMcpText] = useState(''); // P11 MCP 配置 JSON（设置→MCP）
+  const [mcpStatus, setMcpStatus] = useState(''); // MCP 连接状态
   const [provList, setProvList] = useState([]);
   const [market, setMarket] = useState([]);
   const [marketBusy, setMarketBusy] = useState(false);
@@ -583,6 +585,23 @@ export default function Chat({ user, onLogout }) {
     if (tab === 'tools') { const t = await api.getToolset(); setToolList(t.tools || []); }
     if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
     if (tab === 'proposals') { try { const p = await api.proposals(); setProposals(p.proposals || []); setPropContent(''); } catch { setProposals([]); } }
+    if (tab === 'mcp') {
+      try { const s = await api.getSettings(); setMcpText(JSON.stringify((s.settings?.mcp_servers || []), null, 2)); } catch { setMcpText('[]'); }
+      try { const m = await api.mcpStatus(); setMcpStatus('已配置 ' + (m.configured || []).length + ' 个 server；已连接 ' + (m.clients || []).length + ' 个：' + (m.clients || []).map((c) => c.id).join(', ')); } catch { setMcpStatus('查询失败'); }
+    }
+  };
+
+  // P11 MCP 配置保存 + 重连
+  const saveMcp = async () => {
+    let parsed = [];
+    try { parsed = JSON.parse(mcpText || '[]'); if (!Array.isArray(parsed)) throw new Error('需为数组'); }
+    catch (e) { setToast('MCP 配置格式错误：' + e.message); return; }
+    try {
+      await api.setSettings({ mcp_servers: parsed });
+      const r = await api.mcpReload();
+      setMcpStatus('已保存并重连：' + (r.results || []).map((x) => (x.ok ? '✅' : '❌') + x.id).join(' ') + '；注册工具 ' + (r.registeredTools || 0) + ' 个');
+      setToast('MCP 配置已保存并重连');
+    } catch (e) { setToast('保存失败：' + e.message); }
   };
 
   // P3 提案查看/新建
@@ -886,6 +905,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'tools' ? ' sel' : '')} onClick={() => openDrawer('tools')}>工具</button>
                 <button className={'rw-dtab' + (drawerTab === 'rules' ? ' sel' : '')} onClick={() => openDrawer('rules')}>规则</button>
                 <button className={'rw-dtab' + (drawerTab === 'proposals' ? ' sel' : '')} onClick={() => openDrawer('proposals')}>提案</button>
+                <button className={'rw-dtab' + (drawerTab === 'mcp' ? ' sel' : '')} onClick={() => openDrawer('mcp')}>MCP</button>
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
                 <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
@@ -1045,6 +1065,21 @@ export default function Chat({ user, onLogout }) {
                   <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                     <button className="rw-btn" onClick={submitProposal}>提交提案（存档 proposals/）</button>
                   </div>
+                </div>
+              )}
+
+              {drawerTab === 'mcp' && (
+                <div className="rw-trace">
+                  <div className="rw-cap-gtitle">MCP 外部工具接入（P11）——连接 MCP server 后，其工具以 mcp_serverId_tool 名提供给模型</div>
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>{`配置格式（数组）：[ { id, command, args: [], env: { KEY: 值 } } ]。示例（GitHub MCP server）：
+[ { "id": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "你的token" } } ]`}</div>
+                  <textarea className="rw-input" rows="10" style={{ fontFamily: 'monospace', fontSize: 12 }}
+                    value={mcpText} onChange={(e) => setMcpText(e.target.value)} placeholder='[]' />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button className="rw-btn" onClick={saveMcp}>保存并连接</button>
+                  </div>
+                  {mcpStatus && <div style={{ marginTop: 8, fontSize: 12 }}>{mcpStatus}</div>}
+                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>提示：token 仅存于服务器 settings（不写入前端存储）；server 需服务器上可执行（npx/docker 等）。</div>
                 </div>
               )}
 

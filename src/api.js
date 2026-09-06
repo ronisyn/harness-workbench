@@ -38,6 +38,8 @@ export const api = {
   proposals: () => request('/api/proposals'),
   proposalContent: (file) => request('/api/proposals/' + encodeURIComponent(file)),
   createProposal: (title, content) => request('/api/proposals', { method: 'POST', body: JSON.stringify({ title, content }) }),
+  mcpStatus: () => request('/api/mcp'),
+  mcpReload: () => request('/api/mcp/reload', { method: 'POST' }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),
   marketList: () => request('/api/market/list'),
   marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),

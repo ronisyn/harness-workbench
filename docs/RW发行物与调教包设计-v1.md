@@ -1,4 +1,4 @@
-﻿# RW 发行物与调教包设计 v1（发布设计文档）
+# RW 发行物与调教包设计 v1（发布设计文档）
 
 > 前置：体检优化全绿（5.1-5.8 + 界面实时 + conv 自动归档 + schema UI，服务器 8df007b 已加载）。
 > 目标（用户确认）：**把调教好的 RW 制作成可复制的发行物**——每个工作台（code/media/book）独立部署一份 RW 实例，
@@ -57,7 +57,8 @@ server/（agent 循环/工具 62/驱动器/调度/渠道/网关）· src+web/（
 2. `node scripts/apply-pack.mjs <instanceRoot>`：把 packs/rw-core 展开（docs 复制、skills 复制到 RW_SKILLS、校验 settingsSchema/默认值一致）→ 输出校验单。
 3. `npm run build && node server/index.js`（systemd unit 参照 scripts/PROD-DEPLOY.md 改端口/库名）。
 4. 自检：`node scripts/selfcheck.mjs`（HTTP 冒烟 12 项）+ `node scripts/kpi.mjs`（首次基线）+ 三档 preset 断言（rw-verify-preset 逻辑）。
-5. 行为等价抽查单：快照含成本/rev；工具默认 25+4；预算键 3 个可见；技能 skills_list=5；准则文件存在且 grep 无 windows 残留；会话级 preset 切换生效。
+5. 发布流水线（批5/P15）：`node scripts/security-check.mjs`（安全基线 11 项）→ `node scripts/release.mjs`（工作区/语法/构建/安全全检）→ C5 受控部署。
+6. 行为等价抽查单：快照含成本/rev；工具默认 25+4；预算键 3 个可见；技能 skills_list=5；准则文件存在且 grep 无 windows 残留；会话级 preset 切换生效。
 
 ## 4. 工作台壳指南（领域层模式）
 每个工作台实例的定制物：
