@@ -705,10 +705,38 @@ app.post('/api/approvals/:id', requireAuth, async (req, res) => {
 });
 
 // ---------- 设置 API（F12 温度等高级参数） ----------
+// P11 密钥脱敏（2026-09 批5 安全修复）：mcp_servers 的 env 含 token/key——响应给前端前替换为占位符，
+// 前端编辑框不显示明文；PUT 收到占位符时保留 DB 原值（用户未改动的键不覆盖）。token 永不出服务器。
+const REDACT = '__REDACTED__';
+const SECRET_KEY_RE = /(token|secret|key|password|passwd|apikey)/i;
+function redactMcpServers(cfg) {
+  if (!Array.isArray(cfg)) return cfg;
+  return cfg.map((s) => {
+    if (!s || typeof s !== 'object' || !s.env || typeof s.env !== 'object') return s;
+    const env = {};
+    for (const [k, v] of Object.entries(s.env)) env[k] = SECRET_KEY_RE.test(k) && v ? REDACT : v;
+    return { ...s, env };
+  });
+}
+function unredactMcpServers(nextCfg, prevCfg) {
+  // 前端传 REDACT 占位 → 用 DB 原值（prevCfg）对应键；否则用前端新值
+  if (!Array.isArray(nextCfg) || !Array.isArray(prevCfg)) return nextCfg;
+  return nextCfg.map((s) => {
+    if (!s || typeof s !== 'object' || !s.env || typeof s.env !== 'object') return s;
+    const prev = prevCfg.find((p) => p && p.id === s.id);
+    const env = {};
+    for (const [k, v] of Object.entries(s.env)) {
+      if (v === REDACT && prev && prev.env && prev.env[k] !== undefined) env[k] = prev.env[k]; // 未改：保留原值
+      else env[k] = v; // 新值/非敏感
+    }
+    return { ...s, env };
+  });
+}
 app.get('/api/settings', requireAuth, async (req, res) => {
   const rows = await db.query('SELECT skey, svalue FROM settings');
   const out = {};
   for (const r of rows) { try { out[r.skey] = JSON.parse(r.svalue); } catch { out[r.skey] = r.svalue; } }
+  if (out.mcp_servers) out.mcp_servers = redactMcpServers(out.mcp_servers); // 密钥脱敏
   res.json({ ok: true, settings: out, schema: SETTINGS_SCHEMA });
 });
 app.put('/api/settings', requireAuth, async (req, res) => {
@@ -717,7 +745,9 @@ app.put('/api/settings', requireAuth, async (req, res) => {
   for (const [k, v] of Object.entries(updates || {})) {
     const chk = validateSetting(k, v);
     if (!chk.ok) return res.status(400).json({ ok: false, message: chk.error });
-    await setSetting(k, chk.value, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
+    let val = chk.value; // 常规键：chk.value 已做类型归一（number 字符串→Number）
+    if (k === 'mcp_servers') val = unredactMcpServers(chk.value, await getSetting('mcp_servers', [])); // 占位还原
+    await setSetting(k, val, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
   }
   res.json({ ok: true });
 });
@@ -787,7 +817,7 @@ app.get('/api/mcp', requireAuth, async (req, res) => {
   try {
     const mcp = await import('./mcp.js');
     const cfg = await getSetting('mcp_servers', []);
-    res.json({ ok: true, configured: Array.isArray(cfg) ? cfg : [], clients: mcp.listMcpClients() });
+    res.json({ ok: true, configured: redactMcpServers(cfg), clients: mcp.listMcpClients() }); // env 密钥脱敏
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 app.post('/api/mcp/reload', requireAuth, async (req, res) => {
