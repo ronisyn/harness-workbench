@@ -9,7 +9,7 @@ import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
 import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
-import { SKILLS_ROOT, TOOLS } from './tools/index.js';
+import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -207,10 +207,23 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
 // 对话导出（Markdown，含思考/轨迹；前端亦可用本地 Blob 导出）
 app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
   try {
-    const conv = (await db.query('SELECT title FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    const conv = (await db.query('SELECT title, provider, model FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
-    const ms = await db.query('SELECT id, role, content, reasoning, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
-    const tc = await db.query('SELECT message_id, tool_name, args, result_summary, status FROM tool_calls WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    const ms = await db.query('SELECT id, role, content, reasoning, model, provider, tokens_in, tokens_out, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    const tc = await db.query('SELECT message_id, tool_name, args, result_summary, status, duration_ms FROM tool_calls WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    // P26：?format=jsonl 机器可读导出（对齐 harness JSONL：消息+工具调用逐行 JSON，可回放/审计/迁移）
+    if (req.query.format === 'jsonl') {
+      const byMsg = {};
+      for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
+      const rows = ms.map((m) => ({
+        type: 'message', id: m.id, role: m.role, content: m.content,
+        ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+        ...(m.model ? { model: m.model, provider: m.provider || null, tokens_in: m.tokens_in || 0, tokens_out: m.tokens_out || 0 } : {}),
+        created_at: m.created_at,
+        tool_calls: (byMsg[m.id] || []).map((t) => ({ tool: t.tool_name, args: safeJson(t.args), result: safeJson(t.result_summary), status: t.status, duration_ms: t.duration_ms || 0 })),
+      }));
+      return res.json({ ok: true, filename: (conv.title || '对话') + '.jsonl', content: rows.map((r) => JSON.stringify(r)).join('\n') });
+    }
     const byMsg = {};
     for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
     const lines = [];
@@ -225,6 +238,19 @@ app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
       lines.push(String(m.content || '') + '\n\n---\n');
     }
     res.json({ ok: true, filename: (conv.title || '对话') + '.md', content: '# ' + (conv.title || '对话') + '\n\n' + lines.join('\n') });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
+
+// P26(O-30)：审计查询 API（audit_log 只写不读缺口）——单管理员场景默认返回全部；detail 再脱敏一次防残留
+app.get('/api/audit', requireAuth, async (req, res) => {
+  try {
+    const n = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+    const q = String(req.query.q || '').trim();
+    const cond = q ? ' WHERE action LIKE ? OR detail LIKE ?' : '';
+    const p = q ? ['%' + q + '%', '%' + q + '%', n] : [n];
+    const rows = await db.query('SELECT id, account_id, action, detail, created_at FROM audit_log' + cond + ' ORDER BY id DESC LIMIT ?', p);
+    res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })) });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 

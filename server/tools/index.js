@@ -122,9 +122,13 @@ function planOf(ctx) {
 export const TOOLS = [
 
 // ---------- B1-B10 文件 ----------
-  { name: 'read_file', description: '读取文本文件内容（max 50KB）', permission: 'read',
-    params: { path: { type: 'string', required: true, desc: '文件绝对路径' } },
-    run: async (a) => ({ content: readTxt(a.path).slice(0, 50000) }) },
+  { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '文件绝对路径' }, numbered: { type: 'boolean', desc: 'true=输出带行号前缀' } },
+    run: async (a) => {
+      const raw = readTxt(a.path).slice(0, 50000);
+      if (!a.numbered) return { content: raw };
+      return { content: raw.split('\n').map((l, i) => `${i + 1}| ${l}`).join('\n') };
+    } },
   { name: 'write_file', description: '写入文件（创建/覆盖）', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('write_file', a.content); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
@@ -162,13 +166,18 @@ export const TOOLS = [
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else if (it.name.includes(a.name)) out.push(f); } };
       walk(root); return { matches: out.slice(0, 100) };
     } },
-  { name: 'grep_search', description: '在目录中按正则搜索文件内容', permission: 'read',
+  { name: 'grep_search', description: '在目录中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）', permission: 'read',
     params: { path: { type: 'string', required: false }, pattern: { type: 'string', required: true } },
     run: async (a, ctx) => {
-      const root = a.path || ctx.root; const re = new RegExp(a.pattern); const out = [];
+      const root = a.path || ctx.root; const re = new RegExp(a.pattern); const matches = []; const files = [];
       const walk = (d) => { let items = []; try { items = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-        for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else if (/\.(js|ts|jsx|tsx|md|json|yaml|yml|txt|html|css)$/.test(it.name)) { try { if (re.test(fs.readFileSync(f, 'utf8'))) out.push(f); } catch { } } } };
-      walk(root); return { matches: out.slice(0, 100) };
+        for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); }
+          else if (/\.(js|ts|jsx|tsx|md|json|yaml|yml|txt|html|css)$/.test(it.name)) {
+            try { const lines = fs.readFileSync(f, 'utf8').split('\n'); let fileHit = false;
+              for (let i = 0; i < lines.length; i++) { if (re.test(lines[i])) { if (matches.length < 100) matches.push({ file: f, line: i + 1, text: lines[i].slice(0, 200) }); fileHit = true; } }
+              if (fileHit && files.length < 100) files.push(f); } catch { }
+          } } };
+      walk(root); return { matches, files };
     } },
   { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）', permission: 'read',
     params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
@@ -987,6 +996,27 @@ export function toolDefs(expose = 'all', enabled = null) {
 }
 
 // 执行工具并留痕
+// P26(O-新增) 通用参数校验：执行前按工具 params 契约做 type/required/enum/min/max 一次校验（轻量；缺省/宽松定义跳过）
+function validateArgs(tool, args) {
+  const p = tool.params || {};
+  for (const [k, def] of Object.entries(p)) {
+    if (!def || typeof def !== 'object') continue;
+    const v = args ? args[k] : undefined;
+    if (def.required && (v === undefined || v === null || v === '')) throw new Error(`工具 ${tool.name} 参数 ${k} 必填`);
+    if (v === undefined || v === null) continue;
+    if (def.enum && Array.isArray(def.enum) && !def.enum.includes(v)) throw new Error(`工具 ${tool.name} 参数 ${k} 取值非法（允许: ${def.enum.join('|')}，收到: ${String(v).slice(0, 40)}）`);
+    if (def.type === 'number') {
+      const n = Number(v);
+      if (!Number.isFinite(n)) throw new Error(`工具 ${tool.name} 参数 ${k} 需为数字`);
+      if (def.min != null && n < def.min) throw new Error(`工具 ${tool.name} 参数 ${k} 需 ≥ ${def.min}`);
+      if (def.max != null && n > def.max) throw new Error(`工具 ${tool.name} 参数 ${k} 需 ≤ ${def.max}`);
+    } else if ((def.type === 'string' || def.type === 'boolean') && typeof v !== def.type) {
+      // boolean 允许字符串化（'true'/'false'）；string 仅拒绝对象/数组
+      if (def.type === 'boolean' ? !['true', 'false', true, false].includes(v) : (typeof v !== 'string')) throw new Error(`工具 ${tool.name} 参数 ${k} 需为 ${def.type}`);
+    }
+  }
+  return args;
+}
 export async function execTool(name, args, ctx) {
   // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：不再在权限/纪律检查前提前返回——
   // 合成工具元数据（permission=write 级评估），与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
@@ -1015,6 +1045,8 @@ export async function execTool(name, args, ctx) {
   if (ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
     throw new Error('工具 db_write 需要 write 级及以上权限（当前 read 会话为只读）');
   }
+  // P26 通用参数校验（MCP 伪工具无契约 params 定义，跳过）
+  if (tool.params && Object.keys(tool.params).length) validateArgs(tool, args);
   const t0 = Date.now();
   let result;
   // full 权限不限制路径（limitPath=false）；read/write 级才检查工作区边界（guard=full 级能力+审批，不受限）
@@ -1051,9 +1083,13 @@ export async function execTool(name, args, ctx) {
         if (eff.__needInput) await eff.__needInput(payload);
         blocked = '【无人值守】该操作需要你授权，已排队（' + name + '）。请停止当前任务并输出阶段性总结。';
       } else {
+        // P26 diff/命令预览：run_command 显示命令、edit_file 显示 old→new 片段、write_file 注明目标与大小，让"看清再批"
+        let preview = '';
+        if (name === 'edit_file') preview = `\n替换片段:\n- ${String(args.old || '').slice(0, 200)}\n+ ${String(args.new !== undefined ? args.new : '').slice(0, 200)}`;
+        else if (name === 'write_file' || name === 'append_file') preview = `\n目标: ${args.path}（${String(args.content || '').length} 字符）`;
         const argsDesc = JSON.stringify(args).slice(0, 300);
-        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}`);
-        if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}` });
+        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}`);
+        if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}${preview}` });
         let verdict = null;
         while (!verdict) {
           const race = await Promise.race([
