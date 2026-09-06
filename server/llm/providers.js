@@ -11,6 +11,7 @@ export const PROVIDERS = [
   {
     id: 'glm', name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', keyEnv: 'glm',
     defaultModel: 'glm-4.5', capabilities: ['chat', 'tool', 'image'],
+    timeoutMs: 180000, // O-3（2026-09 批3）：GLM 5.x 是 thinking 模型，reasoning 长（曾 90s 超时）→ 放宽到 180s
     chatModels: ['glm-4.5', 'glm-4.5-air', 'glm-4.6', 'glm-4.7', 'glm-5', 'glm-5-turbo', 'glm-5.1', 'glm-5.2', 'glm-5.3', 'glm-5.3-flash'],
   },
   {

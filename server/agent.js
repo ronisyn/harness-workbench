@@ -472,6 +472,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           emitEv(ctx.conversationId, emit, { type: 'fake_done_warn', text: '模型只输出行动承诺但无工具调用，已强制加注（连续 ' + fakeWarnCount + ' 次）' });
         }
       }
+      // F6a 诚实性（2026-09 批3，O-9）：模型只产出思考（reasoning 长）但 content 空且无工具调用 →
+      // 如实报告"思考未产出正文"，不静默空答/不编造摘要（GLM 5.x thinking 曾 content=0 卡预算，O-9 根因场景）。
+      if (!final.trim() && toolLog.length === 0 && (res.reasoning || '').length > 40) {
+        return {
+          content: '⚠️ 模型本轮只进行了思考（reasoning ' + String(res.reasoning || '').length + ' 字符）但未产出正文或工具调用（finish_reason=' + (res.finishReason || 'unknown') + '）。' +
+            (provider === 'glm' ? '提示：GLM thinking 模型的思考 token 计入输出预算，复杂任务可被思考耗尽致正文为空——可改选 glm-4.5 等非深度思考模型，或把任务拆小。' : '') +
+            '\n思考摘要：' + String(res.reasoning || '').replace(/\s+/g, ' ').slice(0, 200),
+          toolLog, usage: res.usage, finishReason: res.finishReason || '',
+        };
+      }
       // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
       if (!final.trim() && toolLog.length > 0) {
         const names = {};
