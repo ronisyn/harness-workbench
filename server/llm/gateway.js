@@ -127,10 +127,21 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
 // 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage, reasoning }
 export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 0.4) {
   const p = resolve(providerId, keys);
+  // 工具名去重防御（2026-09 批5）：外部源（MCP server）工具可能与本地/自身重复 → deepseek 报
+  // "Tool names must be unique" 400。发送前按 name 去重（保留首个），并记录重名供诊断。
+  const seen = new Set();
+  const uniqTools = [];
+  for (const t of tools || []) {
+    const nm = t && t.function && t.function.name;
+    if (!nm) continue;
+    if (seen.has(nm)) { console.warn('[gateway] 工具名重复已去重: ' + nm); continue; }
+    seen.add(nm);
+    uniqTools.push(t);
+  }
   const body = {
     model: model || p.defaultModel,
     messages,
-    tools: tools || [],
+    tools: uniqTools,
     tool_choice: 'auto',
     max_tokens: 12000, // C 方案(2026-09)：原 8000 在 reasoning+长计划+工具调用同轮输出时可能被 content 耗尽致 tool_calls 未发出（假开始物理成因）；12000 只作上限不留计费差异
     temperature,
