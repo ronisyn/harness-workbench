@@ -782,7 +782,25 @@ app.post('/api/proposals', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
-// ---------- 读文件（轨迹"打开文件"查看内容用） ----------
+// P11 MCP 管理 API（2026-09 批5）：查看/重连 MCP server（配置存 settings mcp_servers，改后调 reload 生效无需重启）
+app.get('/api/mcp', requireAuth, async (req, res) => {
+  try {
+    const mcp = await import('./mcp.js');
+    const cfg = await getSetting('mcp_servers', []);
+    res.json({ ok: true, configured: Array.isArray(cfg) ? cfg : [], clients: mcp.listMcpClients() });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.post('/api/mcp/reload', requireAuth, async (req, res) => {
+  try {
+    const mcp = await import('./mcp.js');
+    const { syncMcpExtras } = await import('./tools/index.js');
+    // 断开全部 → 按配置重连
+    for (const c of mcp.listMcpClients()) { try { mcp.disconnectMcp(c.id); } catch { /* ignore */ } }
+    const r = await mcp.connectConfiguredMcps();
+    const n = syncMcpExtras(mcp.listMcpClients());
+    res.json({ ok: true, results: r, registeredTools: n });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
 app.get('/api/file', requireAuth, async (req, res) => {
   const p = req.query.path;
   if (!p) return res.status(400).json({ ok: false, message: '缺 path 参数' });
@@ -1004,6 +1022,17 @@ async function main() {
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // 任务契约驱动器（外部驱动：无人值守责任循环）
   try { startDriver(); } catch (e) { console.error('[driver] 启动失败:', e.message); }
+  // P11 MCP client（2026-09 批5）：按 settings mcp_servers 连接外部 MCP server（异步不阻塞启动）
+  (async () => {
+    try {
+      const mcp = await import('./mcp.js');
+      const { syncMcpExtras } = await import('./tools/index.js');
+      const r = await mcp.connectConfiguredMcps();
+      const clients = mcp.listMcpClients();
+      const n = syncMcpExtras(clients);
+      console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');
+    } catch (e) { console.error('[mcp] 启动连接失败(可稍后配置 mcp_servers):', e.message); }
+  })();
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));
