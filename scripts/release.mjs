@@ -45,6 +45,13 @@ let syntaxFail = 0;
 for (const f of codeFiles) { if (!run('node', ['--check', f])) { syntaxFail++; console.log('  ❌ syntax ' + path.relative(ROOT, f)); } }
 step('语法全检（server+scripts ' + codeFiles.length + ' 文件）', syntaxFail === 0, syntaxFail ? syntaxFail + ' 失败' : '');
 
+// 2.5 安全基线自检（P15b：密钥/危险面/安全网/绝对锁）
+const secOk = (() => {
+  try { execFileSync(process.execPath, [path.join(ROOT, 'scripts/security-check.mjs')], { cwd: ROOT, stdio: 'inherit' }); return true; }
+  catch { return false; }
+})();
+step('安全基线自检（security-check.mjs）', secOk);
+
 // 3. 前端构建（vite build）
 // 跨平台：直接 node 调 vite 的 js 入口（.cmd 在 Windows execFileSync 会 EINVAL）
 const buildOk = (() => {
