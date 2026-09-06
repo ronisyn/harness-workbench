@@ -504,7 +504,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
         if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
       } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
+      // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
+      let accessRules = null;
+      try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -673,6 +676,25 @@ app.put('/api/settings', requireAuth, async (req, res) => {
     await setSetting(k, chk.value, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
   }
   res.json({ ok: true });
+});
+
+// P6 allow/deny 规则层 API（2026-09 批2）：规则存 settings access_rules（JSON 数组），execTool hooks 消费
+// 规则格式：{ id, pattern: 工具名正则, argPattern?: 参数JSON正则(可空), action: 'allow'|'deny', why }
+app.get('/api/access-rules', requireAuth, async (req, res) => {
+  const rules = await getSetting('access_rules', []);
+  res.json({ ok: true, rules: Array.isArray(rules) ? rules : [] });
+});
+app.put('/api/access-rules', requireAuth, async (req, res) => {
+  const { rules } = req.body || {};
+  if (!Array.isArray(rules)) return res.status(400).json({ ok: false, message: 'rules 需为数组' });
+  // 校验每条：pattern/action 必填，action ∈ {allow,deny}，正则可编译
+  for (const r of rules) {
+    if (!r || typeof r.pattern !== 'string' || !r.pattern) return res.status(400).json({ ok: false, message: '每条规则需含 pattern' });
+    if (!['allow', 'deny'].includes(r.action)) return res.status(400).json({ ok: false, message: 'action 需为 allow|deny' });
+    try { new RegExp(r.pattern); if (r.argPattern) new RegExp(r.argPattern); } catch { return res.status(400).json({ ok: false, message: '正则无法编译: ' + r.pattern }); }
+  }
+  await setSetting('access_rules', rules); // 策略类变更 bump policy rev（模型可见规则更新）
+  res.json({ ok: true, count: rules.length });
 });
 
 // ---------- 读文件（轨迹"打开文件"查看内容用） ----------

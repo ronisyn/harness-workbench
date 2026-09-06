@@ -136,9 +136,11 @@ async function driveContract(c) {
       ].join('\n'),
     });
     // 无人值守上下文：ask/审批排队而非阻塞
+    let accessRules = null;
+    try { const ar = await db.query("SELECT svalue FROM settings WHERE skey='access_rules'"); if (ar[0]) { const v = JSON.parse(ar[0].svalue); if (Array.isArray(v)) accessRules = v; } } catch { accessRules = null; }
     const ctx = {
       permission: 'full', accountId: c.account_id ?? null, conversationId: convId, root: '/',
-      __autonomous: true,
+      __autonomous: true, __accessRules: accessRules,
       __needInput: (payload) => needInput(c, payload),
     };
     const result = await runAgent({ provider: 'deepseek', model: c.model || 'deepseek-v4-flash', messages: msgs, permission: 'full', ctx, keys: config.keys });

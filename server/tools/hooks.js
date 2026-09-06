@@ -42,7 +42,8 @@ export function clearHook(side, tool, name) {
 }
 
 // 触发某 side+工具名的全部钩子。payload 传入 {args, ctx}；钩子可改 payload.args（浅合并语义）。
-// 返回 { stopped:boolean, reason?, by? }——某钩子 stop 后不再执行后续钩子。
+// 返回 { stopped:boolean, reason?, by?, allowed?:boolean }——某钩子 stop 后不再执行后续钩子；
+// allow 短路（P6 规则层）：某钩子返回 {allow:true} 则跳过其余钩子并标记 allowed（调用方免审批/免纪律拦截）。
 export async function emitHooks(side, tool, payload) {
   // P2：把当前工具名注入 payload.ctx.__toolName，供 '*' 纪律钩子（preset/启用集等）按名判定
   if (payload && payload.ctx && typeof payload.ctx === 'object') payload.ctx.__toolName = tool;
@@ -59,11 +60,44 @@ export async function emitHooks(side, tool, payload) {
       console.warn('[hooks] ' + side + ':' + tool + ' 钩子 ' + h.name + ' 抛错已忽略（不阻断主流程）: ' + (e && e.message ? e.message : e));
       continue;
     }
+    if (r.allow) return { stopped: false, allowed: true, by: h.name }; // P6 allow 短路：跳过其余纪律钩子
     if (r.stop) return { stopped: true, reason: r.reason || h.name, by: h.name };
     if (r.args && typeof r.args === 'object') payload.args = { ...(payload.args || {}), ...r.args };
   }
   return { stopped: false };
 }
+
+// ---------------------------------------------------------------------------
+// P6 allow/deny 规则层（2026-09 批2）：管理员级规则（settings access_rules，由 index.js 读入 ctx.__accessRules）
+// 语义：deny 命中 → 无条件拦截；allow 命中 → 短路跳过后续纪律钩子并标记 allowed（调用方免 guard 审批）。
+// 规则顺序=数组序，先匹配先生效；无规则命中 → 走常规纪律/审批。规则格式：
+//   { id, pattern: 工具名正则, argPattern?: 参数 JSON 正则(可空), action: 'allow'|'deny', why }
+// 本钩子最先注册（registry 序），deny 在 allow 前判定——管理员 deny 永远优先于 allow。
+// ---------------------------------------------------------------------------
+registerHook('before', '*', 'access_rules_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  const rules = ctx?.__accessRules;
+  if (!name || !Array.isArray(rules) || !rules.length) return {};
+  let denied = null;
+  for (const r of rules) {
+    if (!r || !r.pattern) continue;
+    let m = null;
+    try { m = new RegExp(r.pattern).test(name); } catch { continue; }
+    if (!m) continue;
+    if (r.argPattern) {
+      let hit = false;
+      try { hit = new RegExp(r.argPattern).test(JSON.stringify(args || {})); } catch { hit = false; }
+      if (!hit) continue;
+    }
+    if (r.action === 'deny') { denied = r; break; }
+    if (r.action === 'allow') {
+      // 该规则显式放行此工具（+参数）：短路后续纪律钩子；调用方据 allowed 免 guard 审批
+      return { allow: true, ruleId: r.id, why: r.why || '' };
+    }
+  }
+  if (denied) return { stop: true, reason: '已被 access 规则拦截：' + (denied.why || 'deny 规则 ' + denied.pattern) + '（规则 id=' + denied.id + '；确需执行可 ask_user 请平台管理员调整规则）' };
+  return {};
+}, { builtin: true, failClosed: false });
 
 // ---------------------------------------------------------------------------
 // 内置纪律钩子（平台强制安全网，fail-closed）

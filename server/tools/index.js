@@ -945,8 +945,9 @@ export async function execTool(name, args, ctx) {
     if (hookStop && hookStop.stopped) {
       blocked = '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）';
     }
-    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队（hooks 未拦才到这一步）
-    if (!blocked && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
+    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队。
+    // P6：access 规则 allow 命中（hookStop.allowed）→ 免审批（规则=管理员显式放行）；hooks 未拦且未被规则放行才弹卡
+    if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
       if (eff.__autonomous) {
         const payload = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
         if (eff.__needInput) await eff.__needInput(payload);
