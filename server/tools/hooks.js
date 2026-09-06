@@ -95,7 +95,7 @@ registerHook('before', '*', 'access_rules_guard', ({ args, ctx }) => {
       return { allow: true, ruleId: r.id, why: r.why || '' };
     }
   }
-  if (denied) return { stop: true, reason: '已被 access 规则拦截：' + (denied.why || 'deny 规则 ' + denied.pattern) + '（规则 id=' + denied.id + '；确需执行可 ask_user 请平台管理员调整规则）' };
+  if (denied) return { stop: true, reason: 'access 规则 deny（id=' + denied.id + '）：' + (denied.why || denied.pattern) + '。确需执行可 ask_user 请平台管理员调整规则' };
   return {};
 }, { builtin: true, failClosed: false });
 
