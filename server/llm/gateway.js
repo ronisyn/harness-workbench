@@ -166,6 +166,164 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
   };
 }
 
+// ---------------------------------------------------------------------------
+// P20 流式工具调用（2026-09，蓝图 P20/P21）：每轮 stream:true + tools，取消总时限改为
+// 空闲看门狗（首字节 90s / 之后 120s 无字节判死），支持外部 signal 贯穿（A5/O-20，覆盖现主路径）。
+// 思考增量经 ctx.onThink 逐块回调（前端折叠区）；正文增量经 opts.onContent 回调（前端真流）；
+// tool_calls 增量由纯函数 accumulateToolDeltas 累积（官方 SDK 同款模式，带单测）；usage 取流末帧（B1）。
+// ---------------------------------------------------------------------------
+
+// OpenAI 兼容流式 tool_calls 累加器（纯函数，可单测）：delta.tool_calls[] 按 index 累积，
+// arguments 为字符串片段按 index 拼接；id/name/type 通常仅首帧携带（重复则覆盖相同值）。
+// 返回新的 acc：{ calls: [{ index, id, name, type, arguments }] }
+export function accumulateToolDeltas(acc, deltaToolCalls) {
+  const calls = (acc && acc.calls ? acc.calls : []).map((c) => ({ ...c }));
+  for (const d of deltaToolCalls || []) {
+    if (!d || typeof d !== 'object') continue;
+    const idx = Number(d.index);
+    if (!Number.isFinite(idx) || idx < 0) continue;
+    let slot = calls.find((c) => c.index === idx);
+    if (!slot) { slot = { index: idx, id: '', name: '', type: '', arguments: '' }; calls.push(slot); }
+    if (d.id) slot.id = d.id;
+    if (d.type) slot.type = d.type;
+    const fn = d.function || {};
+    if (fn.name) slot.name = fn.name;
+    if (typeof fn.arguments === 'string') slot.arguments += fn.arguments; // 增量片段拼接
+  }
+  calls.sort((a, b) => a.index - b.index);
+  return { calls };
+}
+
+// 把累积结果转成 agent 需要的完整 tool_calls（function calling 结构）；arguments JSON 解析失败抛错（调用方一次性回退）
+export function finalizeToolCalls(acc) {
+  const calls = (acc && acc.calls) || [];
+  const out = [];
+  for (const c of calls) {
+    if (!c.name) continue; // 无名片段（异常流）丢弃
+    let parsed = {};
+    try { parsed = c.arguments ? JSON.parse(c.arguments) : {}; }
+    catch (e) { throw new Error('工具 ' + c.name + ' 参数流式累积解析失败: ' + String(e.message || e).slice(0, 120)); }
+    out.push({
+      id: c.id || ('call_' + c.index),
+      type: c.type || 'function',
+      function: { name: c.name, arguments: JSON.stringify(parsed) },
+    });
+  }
+  return out;
+}
+
+// 流式工具轮调用：返回 { content, reasoning, toolCalls, finishReason, usage }
+// opts：{ temperature, signal(外部中止, A5), onThink(思考块), onContent(正文增量), firstByteMs, idleMs, maxTokens }
+export async function chatStreamWithTools(providerId, model, messages, tools, keys, opts = {}) {
+  const p = resolve(providerId, keys);
+  const uniqTools = [];
+  const seen = new Set();
+  for (const t of tools || []) {
+    const nm = t && t.function && t.function.name;
+    if (!nm) continue;
+    if (seen.has(nm)) { console.warn('[gateway] 工具名重复已去重: ' + nm); continue; }
+    seen.add(nm);
+    uniqTools.push(t);
+  }
+  const ac = new AbortController();
+  let abortedBy = null;
+  const kill = () => { try { ac.abort(); } catch { /* ignore */ } };
+  const onExtAbort = () => { abortedBy = 'external'; kill(); };
+  if (opts.signal) {
+    if (opts.signal.aborted) { abortedBy = 'external'; kill(); }
+    else opts.signal.addEventListener('abort', onExtAbort, { once: true });
+  }
+  const firstByteMs = opts.firstByteMs || Math.min(90000, Math.round((p.timeoutMs || 180000) / 2));
+  const idleMs = opts.idleMs || 120000;
+  let idleTimer = setTimeout(() => { abortedBy = 'idle'; kill(); }, firstByteMs);
+  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => { abortedBy = 'idle'; kill(); }, idleMs); };
+  const cleanup = () => { clearTimeout(idleTimer); if (opts.signal) { try { opts.signal.removeEventListener('abort', onExtAbort); } catch { /* ignore */ } } };
+  let res;
+  try {
+    res = await fetch(p.base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
+      body: JSON.stringify({
+        model: model || p.defaultModel,
+        messages,
+        tools: uniqTools,
+        tool_choice: 'auto',
+        max_tokens: opts.maxTokens || 12000,
+        temperature: opts.temperature ?? 0.4,
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    cleanup();
+    const why = abortedBy === 'external' ? '已中止' : (abortedBy === 'idle' ? '空闲超时(' + Math.round(firstByteMs / 1000) + 's 无数据)' : '连接失败');
+    const err = new Error(`${p.name}(${model || p.defaultModel}) 流式${why}: ${String(e.message || e).slice(0, 160)}`);
+    err.aborted = abortedBy === 'external';
+    throw err;
+  }
+  if (!res.ok || !res.body) {
+    cleanup();
+    const text = await res.text().catch(() => '');
+    const err = new Error(`${p.name}(${model || p.defaultModel}) 流式调用失败 ${res.status}: ${text.slice(0, 200)}`);
+    err.status = res.status;
+    throw err;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let content = '';
+  let reasoning = '';
+  let finishReason = '';
+  let usage = null;
+  let acc = { calls: [] };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) armIdle();
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const data = t.slice(5).trim();
+        if (data === '[DONE]') break;
+        let j;
+        try { j = JSON.parse(data); } catch { continue; }
+        const ch = j.choices && j.choices[0];
+        const delta = (ch && ch.delta) || {};
+        if (ch && ch.finish_reason) finishReason = ch.finish_reason;
+        const think = delta.reasoning_content || delta.reasoning || '';
+        if (think) { reasoning += think; if (opts.onThink) opts.onThink(think); }
+        if (typeof delta.content === 'string' && delta.content) {
+          content += delta.content;
+          if (opts.onContent) opts.onContent(delta.content);
+        }
+        if (delta.tool_calls) acc = accumulateToolDeltas(acc, delta.tool_calls);
+        if (j.usage && !usage) {
+          usage = {
+            tokens_in: j.usage.prompt_tokens || 0,
+            tokens_out: j.usage.completion_tokens || 0,
+            ...cacheOf(j.usage),
+          };
+        }
+      }
+    }
+  } catch (e) {
+    if (abortedBy === 'external') { const err = new Error('流式中止'); err.aborted = true; cleanup(); throw err; }
+    cleanup();
+    throw e;
+  }
+  cleanup();
+  try { await reader.cancel().catch(() => {}); } catch { /* ignore */ }
+  let toolCalls = [];
+  try { toolCalls = finalizeToolCalls(acc); }
+  catch (e) { const err = new Error(String(e.message || e)); err.needFallback = true; throw err; }
+  return { content, reasoning, toolCalls, finishReason, usage };
+}
+
 // 拉取厂商模型列表（模型市场「加载模型」按钮用）
 export async function fetchModels(providerId, keys) {
   const p = resolve(providerId, keys);
