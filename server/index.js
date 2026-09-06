@@ -308,10 +308,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   model = route.model;
   // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
   const temperature = await getSetting('temperature', 0.4);
-  // 并发限制：同账号同时在跑的对话超过上限(3)则直接拒绝（先于写库）
+  // P18 并发限制（2026-09 批2）：上限=settings max_concurrent_chats（默认 5；0=不限）——原来硬编码 3。
+  // 同账号同时在跑的对话超过上限则拒绝（先于写库），提示当前排在前面的对话数（队列可见）。
+  const maxConcurrent = Number(await getSetting('max_concurrent_chats', 5)) || 0;
   const curInflight = inflight.get(req.user.id) || 0;
-  if (curInflight >= 3) {
-    return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
+  if (maxConcurrent > 0 && curInflight >= maxConcurrent) {
+    return res.status(429).json({ ok: false, message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
   }
   inflight.set(req.user.id, curInflight + 1);
   const convs = await db.query('SELECT id, permission, mode, preset, project FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
@@ -504,7 +506,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
         if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
       } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
+      // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
+      let accessRules = null;
+      try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -673,6 +678,25 @@ app.put('/api/settings', requireAuth, async (req, res) => {
     await setSetting(k, chk.value, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
   }
   res.json({ ok: true });
+});
+
+// P6 allow/deny 规则层 API（2026-09 批2）：规则存 settings access_rules（JSON 数组），execTool hooks 消费
+// 规则格式：{ id, pattern: 工具名正则, argPattern?: 参数JSON正则(可空), action: 'allow'|'deny', why }
+app.get('/api/access-rules', requireAuth, async (req, res) => {
+  const rules = await getSetting('access_rules', []);
+  res.json({ ok: true, rules: Array.isArray(rules) ? rules : [] });
+});
+app.put('/api/access-rules', requireAuth, async (req, res) => {
+  const { rules } = req.body || {};
+  if (!Array.isArray(rules)) return res.status(400).json({ ok: false, message: 'rules 需为数组' });
+  // 校验每条：pattern/action 必填，action ∈ {allow,deny}，正则可编译
+  for (const r of rules) {
+    if (!r || typeof r.pattern !== 'string' || !r.pattern) return res.status(400).json({ ok: false, message: '每条规则需含 pattern' });
+    if (!['allow', 'deny'].includes(r.action)) return res.status(400).json({ ok: false, message: 'action 需为 allow|deny' });
+    try { new RegExp(r.pattern); if (r.argPattern) new RegExp(r.argPattern); } catch { return res.status(400).json({ ok: false, message: '正则无法编译: ' + r.pattern }); }
+  }
+  await setSetting('access_rules', rules); // 策略类变更 bump policy rev（模型可见规则更新）
+  res.json({ ok: true, count: rules.length });
 });
 
 // ---------- 读文件（轨迹"打开文件"查看内容用） ----------

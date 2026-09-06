@@ -16,14 +16,9 @@ import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
-const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
-
-// P4 只读意图禁用的改动类工具：请求级只读规划（ctx.__readonlyIntent）时直接拒绝（只读）
-const MUTATING_TOOLS = new Set([
-  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
-  'run_command', 'run_long_task', 'kill_process', 'db_write',
-  'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
-]);
+// O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
+// guard 会话调用它们不弹审批卡（曾误写文档为 7 项已改回 5 项，现按契约档位补全为 7 项）。
+const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits']);
 
 // —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
 // "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
@@ -772,7 +767,19 @@ export const TOOLS = [
     } },
   { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
-    run: async (a) => {
+    run: async (a, ctx) => {
+      // F2 reload 防撞（2026-09 批2）：重启会打断服务器上一切进行中会话（agent_runs running 会被标 interrupted）。
+      // 自会话豁免：当前 run/当前会话不算碰撞；但若有【其他】活跃任务（其他会话/定时/驱动在跑）→ 拒绝并告知，
+      // 避免盲目 reload 打断别人（O-3 曾 2 次 reload 撞任务）。无其他活跃任务才调度重启。
+      try {
+        const other = await db.query(
+          `SELECT COUNT(*) c FROM agent_runs WHERE status='running' AND id<>? AND conversation_id<>?`,
+          [ctx.__runId ?? -1, ctx.conversationId ?? -1]
+        );
+        if (Number(other[0]?.c || 0) > 0) {
+          return { error: `reload 防撞：另有 ${other[0].c} 个任务正在运行（其他会话/定时/驱动），重启会中断它们。请等它们结束或让用户点"停止"后再 reload；当前会话不受影响。` };
+        }
+      } catch { /* 查询失败不阻断（保守放行，由 maybeSelfRestart 侧兜底） */ }
       const note = String(a.note || '').slice(0, 300);
       requestRestart(note || 'platform code change');
       return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。' };
@@ -942,36 +949,17 @@ export async function execTool(name, args, ctx) {
         }
       }
     }
-    // WS1 preset 暴露面：非 all 会话调用未暴露层级的工具 → 指引性错误（不静默）
-    if (!blocked && ctx.preset && ctx.preset !== 'all') {
-      const allowT = ctx.preset === 'minimal' ? new Set(['core']) : ctx.preset === 'standard' ? new Set(['core', 'pro']) : null;
-      const metaTier = TOOL_META[name]?.tier;
-      if (allowT && metaTier && !allowT.has(metaTier)) {
-        blocked = `工具 ${name}（${metaTier} 级）不在当前会话 preset=${ctx.preset} 的暴露范围。可 ask_user 请用户把 preset 切到 standard/all，或改用 core 级工具完成。`;
-      }
+    // P2（2026-09 批2）：纪律钩子（preset/启用集/只读意图/命令纪律）先于审批执行——
+    // 未启用/未暴露/只读意图下的调用先被 hooks 拦，不浪费 guard 审批卡；审批只对真正可执行的受控工具弹卡。
+    let hookStop = null;
+    const payload = { args, ctx: eff };
+    try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
+    if (hookStop && hookStop.stopped) {
+      blocked = '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）';
     }
-    // run_command 读型命令门禁（全部会话生效；审计 58% 的 shell 调用本可用专门工具）：
-    // 有专门工具却以 cat/ls/grep/find/sed(-i 除外)/head/cd/echo 开头 → 拦截+指引。
-    // 放行：tail（日志跟随）、sed -i（批量编辑无工具等价）、git/npm/node/curl/ps/awk 管道等系统操作（B 桶）。
-    if (!blocked && name === 'run_command') {
-      const cmdline = String(args.cmd ?? args.command ?? '').trim();
-      const first = cmdline.split(/\s+/)[0];
-      const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
-      if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
-        blocked = `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。`;
-      }
-    }
-    // 5.3c 启用集门禁：账号工具启用集未包含且非平台豁免 → 指引（可恢复：设置→工具 勾选）
-    if (!blocked && ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
-      blocked = `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。`;
-    }
-    // P4 意图挡位门禁（2026-09 批1，替代会话 mode=plan）：用户本轮请求只读规划（"先规划/只调研/别动手"）时，
-    // 请求级只读意图（ctx.__readonlyIntent=true）生效——本轮改动类工具一律拒绝；用户放行/新指令自然解除（无持久会话 mode）。
-    if (!blocked && ctx.__readonlyIntent && MUTATING_TOOLS.has(name)) {
-      blocked = '只读规划意图（本轮）：工具 ' + name + ' 已被禁用。规划阶段只用只读工具（read/list/grep/find/web/db_query）；把方案作为回答展示，等用户批准后再执行改动。';
-    }
-    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队
-    if (!blocked && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
+    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队。
+    // P6：access 规则 allow 命中（hookStop.allowed）→ 免审批（规则=管理员显式放行）；hooks 未拦且未被规则放行才弹卡
+    if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
       if (eff.__autonomous) {
         const payload = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
         if (eff.__needInput) await eff.__needInput(payload);
@@ -997,24 +985,16 @@ export async function execTool(name, args, ctx) {
     if (blocked) {
       result = { error: blocked };
     } else {
-      // P1-1 hooks（借鉴 Claude Code PreToolUse）：工具执行前触发已注册钩子——可拦截（{stop,reason}）或改写参数（{args} 浅合并）。
-      // 内置安全钩子 fail-closed（danger_command_guard / system_write_guard）；钩子抛错不拖垮主流程（emitHooks 内部已兜底）
-      let hookStop = null;
-      const payload = { args, ctx: eff };
-      try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
-      if (hookStop && hookStop.stopped) {
-        result = { error: '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）' };
-      } else {
-        if (payload.args !== args) args = payload.args; // 钩子改写后的参数（浅合并结果）
-        // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
-        try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
-        result = await tool.run(args, eff);
-        // P1-1 hooks after（观察/审计；不阻断已完成的执行，stop 仅留痕到 result.hookAfter）
-        try {
-          const ha = await emitHooks('after', name, { args, result, ctx: eff });
-          if (ha.stopped && result && typeof result === 'object' && !Array.isArray(result)) result.hookAfter = 'stopped:' + (ha.reason || '');
-        } catch { /* after 钩子异常忽略 */ }
-      }
+      // hooks before 已在上方（审批前）执行且未拦；此处若钩子改写过参数则采用（浅合并结果在 payload.args）
+      if (payload.args !== args) args = payload.args;
+      // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
+      try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
+      result = await tool.run(args, eff);
+      // P1-1 hooks after（观察/审计；不阻断已完成的执行，stop 仅留痕到 result.hookAfter）
+      try {
+        const ha = await emitHooks('after', name, { args, result, ctx: eff });
+        if (ha.stopped && result && typeof result === 'object' && !Array.isArray(result)) result.hookAfter = 'stopped:' + (ha.reason || '');
+      } catch { /* after 钩子异常忽略 */ }
     }
   } catch (e) {
     result = { error: e.message };

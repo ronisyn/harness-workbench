@@ -66,7 +66,9 @@ export async function executeScheduledTask(task) {
         const r = await db.query('INSERT INTO conversations (account_id, channel, external_id, permission, title) VALUES (?,"task",?,?,?)', [task.account_id, 'task-' + task.id, task.permission || 'full', '定时任务：' + task.name]);
         conv = { id: r.insertId };
       }
-      const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (process.env.RW_WORKSPACE || '/srv/rw-workspace') };
+      let accessRules = null;
+      try { const ar = await db.query("SELECT svalue FROM settings WHERE skey='access_rules'"); if (ar[0]) { const v = JSON.parse(ar[0].svalue); if (Array.isArray(v)) accessRules = v; } } catch { accessRules = null; }
+      const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (process.env.RW_WORKSPACE || '/srv/rw-workspace'), __accessRules: accessRules };
       const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt }], permission: task.permission || 'full', ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）

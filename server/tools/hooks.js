@@ -5,9 +5,14 @@
 // 任何钩子抛错：内置安全钩子（builtin+failClosed）保守拦截（fail-closed），其余 warn 后忽略——钩子永不拖垮主流程
 // 内置钩子（模块加载即注册，平台级强制纪律）：
 //   1. danger_command_guard（before run_command）—— 破坏性命令（删根/fork bomb/写盘/关机等）fail-closed 拦截
-//   2. system_write_guard（before 全部带 path 的写工具）—— 写系统关键区（/etc /boot /usr/bin 等）fail-closed 拦截
+//   2. system_write_guard（before 写类工具）—— 写系统关键区（/etc /boot /usr/bin 等）fail-closed 拦截
+//   3. preset_tier_guard（before *）—— preset 暴露面（minimal/standard 调 core/pro 级外工具 → 指引）
+//   4. enabled_tools_guard（before *）—— 账号工具启用集未含且非平台豁免 → 指引（可恢复：设置→工具 勾选）
+//   5. readonly_intent_guard（before 改动类）—— 请求级只读规划意图（P4）时禁改动工具
+//   6. shell_readonly_guard（before run_command）—— 读型命令（cat/ls/grep/…）引导用专门工具
+// P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
-import path from 'node:path';
+import { TOOL_META, PLATFORM_EXEMPT } from './meta.js';
 
 const registry = [];
 const MAX_HOOKS = 128;
@@ -37,8 +42,11 @@ export function clearHook(side, tool, name) {
 }
 
 // 触发某 side+工具名的全部钩子。payload 传入 {args, ctx}；钩子可改 payload.args（浅合并语义）。
-// 返回 { stopped:boolean, reason?, by? }——某钩子 stop 后不再执行后续钩子。
+// 返回 { stopped:boolean, reason?, by?, allowed?:boolean }——某钩子 stop 后不再执行后续钩子；
+// allow 短路（P6 规则层）：某钩子返回 {allow:true} 则跳过其余钩子并标记 allowed（调用方免审批/免纪律拦截）。
 export async function emitHooks(side, tool, payload) {
+  // P2：把当前工具名注入 payload.ctx.__toolName，供 '*' 纪律钩子（preset/启用集等）按名判定
+  if (payload && payload.ctx && typeof payload.ctx === 'object') payload.ctx.__toolName = tool;
   for (const h of registry) {
     if (h.side !== side) continue;
     if (h.tool !== tool && h.tool !== '*') continue;
@@ -52,11 +60,44 @@ export async function emitHooks(side, tool, payload) {
       console.warn('[hooks] ' + side + ':' + tool + ' 钩子 ' + h.name + ' 抛错已忽略（不阻断主流程）: ' + (e && e.message ? e.message : e));
       continue;
     }
+    if (r.allow) return { stopped: false, allowed: true, by: h.name }; // P6 allow 短路：跳过其余纪律钩子
     if (r.stop) return { stopped: true, reason: r.reason || h.name, by: h.name };
     if (r.args && typeof r.args === 'object') payload.args = { ...(payload.args || {}), ...r.args };
   }
   return { stopped: false };
 }
+
+// ---------------------------------------------------------------------------
+// P6 allow/deny 规则层（2026-09 批2）：管理员级规则（settings access_rules，由 index.js 读入 ctx.__accessRules）
+// 语义：deny 命中 → 无条件拦截；allow 命中 → 短路跳过后续纪律钩子并标记 allowed（调用方免 guard 审批）。
+// 规则顺序=数组序，先匹配先生效；无规则命中 → 走常规纪律/审批。规则格式：
+//   { id, pattern: 工具名正则, argPattern?: 参数 JSON 正则(可空), action: 'allow'|'deny', why }
+// 本钩子最先注册（registry 序），deny 在 allow 前判定——管理员 deny 永远优先于 allow。
+// ---------------------------------------------------------------------------
+registerHook('before', '*', 'access_rules_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  const rules = ctx?.__accessRules;
+  if (!name || !Array.isArray(rules) || !rules.length) return {};
+  let denied = null;
+  for (const r of rules) {
+    if (!r || !r.pattern) continue;
+    let m = null;
+    try { m = new RegExp(r.pattern).test(name); } catch { continue; }
+    if (!m) continue;
+    if (r.argPattern) {
+      let hit = false;
+      try { hit = new RegExp(r.argPattern).test(JSON.stringify(args || {})); } catch { hit = false; }
+      if (!hit) continue;
+    }
+    if (r.action === 'deny') { denied = r; break; }
+    if (r.action === 'allow') {
+      // 该规则显式放行此工具（+参数）：短路后续纪律钩子；调用方据 allowed 免 guard 审批
+      return { allow: true, ruleId: r.id, why: r.why || '' };
+    }
+  }
+  if (denied) return { stop: true, reason: 'access 规则 deny（id=' + denied.id + '）：' + (denied.why || denied.pattern) + '。确需执行可 ask_user 请平台管理员调整规则' };
+  return {};
+}, { builtin: true, failClosed: false });
 
 // ---------------------------------------------------------------------------
 // 内置纪律钩子（平台强制安全网，fail-closed）
@@ -74,7 +115,8 @@ const DANGER_PATTERNS = [
   { re: /\bchmod\s+-R\s+777\s+(\/|~)/, why: '递归 chmod 777 根/家目录' },
 ];
 registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
-  const cmd = String((args && args.command) || '');
+  // O-4 修复（2026-09 批2）：run_command 实参键是 cmd（tools/index.js params），此前读 args.command → 从未触发
+  const cmd = String((args && (args.cmd ?? args.command)) || '');
   for (const p of DANGER_PATTERNS) {
     if (p.re.test(cmd)) {
       return { stop: true, reason: p.why + '（命中危险模式 ' + p.re + '）。请改用精确/受限目标重试；确需执行须 ask_user 请平台管理员确认' };
@@ -83,13 +125,80 @@ registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
   return {};
 }, { builtin: true, failClosed: true });
 
+// O-5 修复（2026-09 批2）：写类守卫只挂【写类工具】（write_file/append_file/edit_file/copy_move/delete_file/mkdir），
+// 不挂 '*'——此前 '*' 使 read_file 读 /etc 配置也被"写守卫"误拦（读不是写，无写入风险）。
+// 路径判定不做 path.resolve（Windows 下会把 /etc 变 E:\etc 破坏匹配；服务器是 Linux，直接按原样正则判定，
+// 同时把 \ 归一为 / 兜底）。工具实参可能是相对路径（工作区内）——相对路径不在系统区，直接放行。
 const SYSTEM_WRITE_RE = /^\/(etc|boot|bin|sbin|dev|proc|sys|root)(\/|$)|^\/usr\/(bin|sbin|lib(64)?)(\/|$)/;
-registerHook('before', '*', 'system_write_guard', ({ args }) => {
-  const p = args && typeof args.path === 'string' ? args.path : '';
-  if (!p) return {};
-  const abs = path.resolve(p);
-  if (SYSTEM_WRITE_RE.test(abs)) {
-    return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + abs + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
+const WRITE_PATH_TOOLS = ['write_file', 'append_file', 'edit_file', 'copy_move', 'delete_file', 'mkdir'];
+for (const w of WRITE_PATH_TOOLS) {
+  registerHook('before', w, 'system_write_guard', ({ args }) => {
+    // 写位置判定：write/edit/append/delete/mkdir 用 path；copy_move 目标是 dst（写点），src 仅读源不必拦
+    let p = '';
+    if (typeof args.path === 'string') p = args.path;
+    else if (w === 'copy_move' && typeof args.dst === 'string') p = args.dst;
+    else if (typeof args.src === 'string') p = args.src;
+    if (!p) return {};
+    const norm = p.replace(/\\/g, '/');
+    if (norm.startsWith('/') && SYSTEM_WRITE_RE.test(norm)) {
+      return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + p + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
+    }
+    return {};
+  }, { builtin: true, failClosed: true });
+}
+
+// ---------------------------------------------------------------------------
+// P2 纪律统一层（2026-09 批2）：从 execTool 内联门禁迁入的纪律钩子——
+// 纪律集中一处（listHooks 可审计、可动态调整），execTool 只保留权限层（checkPerm/limitPath/审批）与安全网（占位符检疫/快照）。
+// 说明：内置纪律钩子 fail-open（返回 stop 才拦，抛错 warn 不阻断）——纪律是引导，安全网（danger/system_write）才 fail-closed。
+// ---------------------------------------------------------------------------
+
+// 3. preset 暴露面门禁（原 execTool 内联：非 all 会话调用未暴露层级 → 指引）
+registerHook('before', '*', 'preset_tier_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  if (!name) return {};
+  if (ctx.preset && ctx.preset !== 'all') {
+    const allowT = ctx.preset === 'minimal' ? new Set(['core']) : ctx.preset === 'standard' ? new Set(['core', 'pro']) : null;
+    const metaTier = TOOL_META[name]?.tier;
+    if (allowT && metaTier && !allowT.has(metaTier)) {
+      return { stop: true, reason: `工具 ${name}（${metaTier} 级）不在当前会话 preset=${ctx.preset} 的暴露范围。可 ask_user 请用户把 preset 切到 standard/all，或改用 core 级工具完成。` };
+    }
   }
   return {};
-}, { builtin: true, failClosed: true });
+}, { builtin: true, failClosed: false });
+
+// 4. 启用集门禁（原 execTool 内联：账号启用集未含且非平台豁免 → 指引）
+registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  if (!name) return {};
+  if (ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
+    return { stop: true, reason: `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。` };
+  }
+  return {};
+}, { builtin: true, failClosed: false });
+
+// 5. 只读意图门禁（原 execTool 内联 P4：请求级只读规划时禁改动类工具）
+const READONLY_MUTATING = new Set([
+  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
+  'run_command', 'run_long_task', 'kill_process', 'db_write',
+  'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
+]);
+for (const m of READONLY_MUTATING) {
+  registerHook('before', m, 'readonly_intent_guard', ({ args, ctx }) => {
+    if (ctx?.__readonlyIntent) {
+      return { stop: true, reason: '只读规划意图（本轮）：工具 ' + m + ' 已被禁用。规划阶段只用只读工具（read/list/grep/find/web/db_query）；把方案作为回答展示，等用户批准后再执行改动。' };
+    }
+    return {};
+  }, { builtin: true, failClosed: false });
+}
+
+// 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
+registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
+  const cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+  const first = cmdline.split(/\s+/)[0];
+  const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
+  if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
+    return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
+  }
+  return {};
+}, { builtin: true, failClosed: false });

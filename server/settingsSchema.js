@@ -18,6 +18,8 @@ export const SETTINGS_SCHEMA = [
   { key: 'collapse_input_chars', label: '折叠摘要输入截断字符', group: 'context', type: 'number', def: 18000, min: 0, hint: '送折叠 LLM 的早期文本截断上限；0=默认18000' },
   // F4 连续失败轮计数（2026-09 批1）：工具连续失败 N 次软提示换策略，仍失败挂起 paused（0=关闭）
   { key: 'consecutive_fail_guard', label: '连续失败保护次数', group: 'runtime', type: 'number', def: 3, min: 0, hint: '工具连续失败 N 次→软提示换策略一次；再失败→挂起 paused（现场保留可"继续任务"恢复）；0=关闭' },
+  // P18 并发对话上限（2026-09 批2）：同账号同时在跑的对话数上限（默认 5；0=不限）；超限拒绝并提示队列位置
+  { key: 'max_concurrent_chats', label: '并发对话上限', group: 'runtime', type: 'number', def: 5, min: 0, hint: '同账号同时在跑的对话数上限；0=不限。超限时新对话被拒并提示前面还有几轮在跑' },
 ];
 
 export function schemaByKey(key) {

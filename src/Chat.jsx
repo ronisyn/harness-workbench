@@ -156,6 +156,7 @@ export default function Chat({ user, onLogout }) {
   const [drawerTab, setDrawerTab] = useState('caps');
   const [caps, setCaps] = useState([]);
   const [toolList, setToolList] = useState([]); // 5.3c 工具启用集（设置→工具）
+  const [rules, setRules] = useState([]); // P6 allow/deny 规则层（设置→规则）
   const [provList, setProvList] = useState([]);
   const [market, setMarket] = useState([]);
   const [marketBusy, setMarketBusy] = useState(false);
@@ -576,6 +577,19 @@ export default function Chat({ user, onLogout }) {
     if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
     if (tab === 'tasks') { const t = await api.tasks(); setTasks(t.tasks || []); }
     if (tab === 'tools') { const t = await api.getToolset(); setToolList(t.tools || []); }
+    if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
+  };
+
+  // P6 规则管理：JSON 文本编辑 + 保存/加示例
+  const [ruleText, setRuleText] = useState('');
+  const saveRules = async () => {
+    try {
+      const parsed = JSON.parse(ruleText || '[]');
+      if (!Array.isArray(parsed)) throw new Error('需为数组');
+      await api.saveRules(parsed);
+      setRules(parsed);
+      setToast('规则已保存（下轮生效）');
+    } catch (e) { setToast('规则保存失败：' + e.message); }
   };
 
   const loadTasks = async () => { try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ } };
@@ -852,6 +866,7 @@ export default function Chat({ user, onLogout }) {
                 <button className={'rw-dtab' + (drawerTab === 'providers' ? ' sel' : '')} onClick={() => openDrawer('providers')}>厂商</button>
                 <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => openDrawer('market')}>模型市场</button>
                 <button className={'rw-dtab' + (drawerTab === 'tools' ? ' sel' : '')} onClick={() => openDrawer('tools')}>工具</button>
+                <button className={'rw-dtab' + (drawerTab === 'rules' ? ' sel' : '')} onClick={() => openDrawer('rules')}>规则</button>
                 <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
                 <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
               </div>
@@ -970,6 +985,24 @@ export default function Chat({ user, onLogout }) {
                     ))}
                   </div>
                   {!toolList.length && <div className="rw-empty">加载中…</div>}
+                </div>
+              )}
+
+              {drawerTab === 'rules' && (
+                <div className="rw-trace">
+                  <div className="rw-cap-gtitle">allow/deny 规则层（P6）——命中 deny 拦截；命中 allow 免纪律拦截+免 guard 审批；顺序=数组序，先命中先生效</div>
+                  <div className="rw-cap-item col">
+                    <span style={{ marginBottom: 4 }}>规则 JSON（[{'{'}id, pattern: 工具名正则, argPattern?: 参数JSON正则(可空), action: "allow"|"deny", why{'}'}]，留空数组=关闭）</span>
+                    <textarea className="rw-input" rows="8" style={{ fontFamily: 'monospace', fontSize: 12 }}
+                      value={ruleText || (rules.length ? JSON.stringify(rules, null, 2) : '[]')}
+                      onChange={(e) => setRuleText(e.target.value)}
+                      placeholder='[{"id":1,"pattern":"^run_command$","action":"deny","why":"禁跑 shell"},{"id":2,"pattern":"^reload_platform$","action":"deny","why":"禁自动重启"}]' />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button className="rw-btn" onClick={saveRules}>保存规则</button>
+                    <button className="rw-btn" onClick={() => { setRuleText('[]'); }}>清空</button>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>当前规则 {rules.length} 条；保存后下轮工具调用生效。</div>
                 </div>
               )}
 
