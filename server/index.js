@@ -479,8 +479,25 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // 反代（nginx）禁用缓冲，SSE 即时透出
   });
-  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  // O-8 心跳（2026-09 批3）：SSE 长思考/长任务期间可能 10-60s 无数据（LLM thinking 中），
+  // 中间代理空闲超时会断连（驱动多次 terminated 的根因）。每 15s 无数据发注释帧保活；有数据活动即重置。
+  let sseIdle = null;
+  const armSseHeartbeat = () => {
+    clearTimeout(sseIdle);
+    sseIdle = setTimeout(() => {
+      try { if (!res.writableEnded) res.write(': ping\n\n'); } catch { /* 连接已关 */ }
+      armSseHeartbeat(); // 持续保活直到请求结束
+    }, 15000);
+  };
+  armSseHeartbeat();
+  const stopSseHeartbeat = () => { clearTimeout(sseIdle); sseIdle = null; };
+  const send = (obj) => {
+    try {
+      if (!res.writableEnded) { res.write(`data: ${JSON.stringify(obj)}\n\n`); armSseHeartbeat(); }
+    } catch { /* 连接已关，忽略 */ }
+  };
 
   const t0 = Date.now();
   let firstTokenMs = 0;
@@ -621,6 +638,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 释放并发槽位
   inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
   clearActivity(conversationId); // 本轮事件环收尾（正常/异常/停止统一清理）
+  stopSseHeartbeat(); // O-8：停止心跳（连接即将关闭）
   res.end();
   // 自我重启协作：本回复已完整发出/落库，处理 reload_platform 请求
   maybeSelfRestart().catch(() => {});
