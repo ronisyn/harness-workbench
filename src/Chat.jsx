@@ -1010,11 +1010,15 @@ export default function Chat({ user, onLogout }) {
                 <div className="rw-trace">
                   <div className="rw-cap-gtitle">工具调用轨迹</div>
                   {toolcalls.length ? toolcalls.map((t) => {
+                    // O-11 修复（2026-09 批4）：args 可能是对象/JSON 字符串——统一格式化展示，避免 "[object Object]"
+                    let argsPretty = '';
+                    try { const v = typeof t.args === 'string' ? JSON.parse(t.args || '{}') : (t.args || {}); argsPretty = JSON.stringify(v, null, 1); }
+                    catch { argsPretty = String(t.args || ''); }
                     const rsum = String(t.result_summary || '');
                     return (
                     <div key={t.id} className="rw-trace-item">
                       <div className="rw-trace-head"><b>{t.tool_name}</b> <span className={'rw-trace-status ' + t.status}>{t.status}</span> {t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : ''}</div>
-                      <div className="rw-trace-args">参数：{String(t.args || '').slice(0, 150)}</div>
+                      <div className="rw-trace-args">参数：{argsPretty.slice(0, 300)}</div>
                       <div className="rw-trace-res">结果：{rsum.slice(0, 200)}</div>
                       {isDiffLike(rsum) && (
                         <details className="rw-diff-details"><summary>diff 视图</summary><DiffBlock text={rsum} /></details>
