@@ -172,7 +172,15 @@ app.post('/api/conversations/:id/autotitle', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
-  await db.query('DELETE FROM messages WHERE conversation_id=?', [req.params.id]);
+  // P0-2 修复（2026-09 全面体检）：① 先校验会话归属，防越权删他人会话子表数据（原实现删 messages 无归属校验）
+  // ② 级联清理全部子表：原实现只删 messages，遗留 tool_calls/usage_stats/agent_runs 等孤儿（实测 tool_calls 77% 为孤儿），污染用量统计口径
+  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+  if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
+  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'bg_tasks', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts']) {
+    try {
+      await db.query(`DELETE FROM ${t} WHERE ${t === 'task_contracts' ? 'conv_id' : 'conversation_id'}=?`, [req.params.id]);
+    } catch { /* 个别表未建则跳过 */ }
+  }
   await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
   res.json({ ok: true });
 });
