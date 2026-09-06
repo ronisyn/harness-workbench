@@ -1079,7 +1079,7 @@ export default function Chat({ user, onLogout }) {
                     <button className="rw-btn" onClick={saveMcp}>保存并连接</button>
                   </div>
                   {mcpStatus && <div style={{ marginTop: 8, fontSize: 12 }}>{mcpStatus}</div>}
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>提示：token 仅存于服务器 settings（不写入前端存储）；server 需服务器上可执行（npx/docker 等）。</div>
+                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>提示：密钥字段（键名含 token/key/secret/password 等）在页面显示为 <code>__REDACTED__</code> 占位，不会明文下发——直接保存（不改动该键）即保留服务器原值；需更换时才填入新 token。token 仅存于服务器 settings（不写入前端存储）；server 需服务器上可执行（npx/docker 等）。</div>
                 </div>
               )}
 

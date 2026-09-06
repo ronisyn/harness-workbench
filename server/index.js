@@ -1063,6 +1063,23 @@ async function main() {
       console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');
     } catch (e) { console.error('[mcp] 启动连接失败(可稍后配置 mcp_servers):', e.message); }
   })();
+  // P11 MCP 看门狗（2026-09 安全修复随行）：配置了 mcp_servers 时，任一 client 意外退出（进程重启/子进程死亡）
+  // 后 60s 内自动重连并同步工具（否则会话静默缺 mcp_* 工具直到手动 reload）
+  const mcpWatchdog = setInterval(async () => {
+    try {
+      const mcp = await import('./mcp.js');
+      const { syncMcpExtras } = await import('./tools/index.js');
+      const cfg = await getSetting('mcp_servers', []);
+      if (!Array.isArray(cfg) || cfg.length === 0) return;
+      const connected = mcp.listMcpClients();
+      const missing = cfg.filter((s) => s && s.id && !connected.some((c) => c.id === s.id));
+      if (missing.length === 0) return;
+      const r = await mcp.connectConfiguredMcps(); // 已连接的自动跳过（connectMcp 幂等）
+      const n = syncMcpExtras(mcp.listMcpClients());
+      console.log('[mcp] 看门狗重连 ' + missing.map((s) => s.id).join(',') + ' → ' + JSON.stringify(r) + ' 注册工具 ' + n);
+    } catch (e) { console.error('[mcp] 看门狗失败:', e.message); }
+  }, 60000);
+  if (mcpWatchdog.unref) mcpWatchdog.unref(); // 不阻塞进程退出
   // 微信渠道（W1-W6，默认启动；复用 iLink 登录态）
   if (process.env.RW_WECHAT !== '0') {
     startWechatChannel().catch((e) => console.error('[wechat] 启动异常:', e.message));
