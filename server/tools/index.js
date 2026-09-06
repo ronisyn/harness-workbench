@@ -31,8 +31,8 @@ function hasPh(v) { if (typeof v === 'string') return PH_RE.test(v); if (Array.i
 function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new Error(l + ' 参数疑似含截断/裁剪/归档占位符污染（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加，或把关键词转义/拼接后再写入。'); }
 // P0 安全修复（2026-09 全面体检）：审计留痕脱敏——GitHub token / OpenAI 风格密钥 / Bearer 凭证
 // 不得明文落 audit_log / tool_calls（实测曾泄漏 ghp_ 完整 token 59 条）；替换为 [REDACTED] 占位
-const SECRET_RE = /\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
-function redactSecrets(s) { return typeof s === 'string' ? s.replace(SECRET_RE, '[REDACTED]') : s; }
+const SECRET_RE = /\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
+export function redactSecrets(s) { return typeof s === 'string' ? s.replace(SECRET_RE, '[REDACTED]') : s; }
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
