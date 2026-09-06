@@ -29,6 +29,10 @@ const PH_B='(?:messages 表可按 id=|早期工具调用参数已折叠|早期�
 const PH_RE = new RegExp(PH_A + '|' + PH_B + '|\\[(?:内容已截断|参数已省略|上下文已裁剪中段|历史消息过长已截断|原文 \\d+ 字符已截断)[^\\]]*\\]');
 function hasPh(v) { if (typeof v === 'string') return PH_RE.test(v); if (Array.isArray(v)) return v.some(hasPh); if (v && typeof v === 'object') return Object.keys(v).some((k) => hasPh(v[k])); return false; }
 function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new Error(l + ' 参数疑似含截断/裁剪/归档占位符污染（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加，或把关键词转义/拼接后再写入。'); }
+// P0 安全修复（2026-09 全面体检）：审计留痕脱敏——GitHub token / OpenAI 风格密钥 / Bearer 凭证
+// 不得明文落 audit_log / tool_calls（实测曾泄漏 ghp_ 完整 token 59 条）；替换为 [REDACTED] 占位
+const SECRET_RE = /\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
+function redactSecrets(s) { return typeof s === 'string' ? s.replace(SECRET_RE, '[REDACTED]') : s; }
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -1070,9 +1074,12 @@ export async function execTool(name, args, ctx) {
   // 留痕（audit_log + tool_calls；用户"停止"中止的不留痕，避免孤儿 fail 行回填到后续消息）
   if (!eff.__signal || !eff.__signal.aborted) {
     try {
-      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId, 'tool:' + name, JSON.stringify({ args, result, ms: Date.now() - t0 }).slice(0, 1000)]);
+      // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
+      const rArgs = JSON.stringify(args).slice(0, 2000);
+      const rResult = JSON.stringify(result).slice(0, 2000);
+      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000)]);
       await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, JSON.stringify(args).slice(0, 2000), JSON.stringify(result).slice(0, 2000), Date.now() - t0, result.error ? 'fail' : 'done']);
+        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), Date.now() - t0, result.error ? 'fail' : 'done']);
     } catch { /* 留痕失败不影响 */ }
   }
   return result;
