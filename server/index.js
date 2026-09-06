@@ -74,8 +74,11 @@ app.get('/api/auth/me', async (req, res) => {
 });
 
 // ---------- 模型（已接入厂商） ----------
-app.get('/api/models', requireAuth, (req, res) => {
-  res.json({ ok: true, providers: activeProviders(config.keys) });
+app.get('/api/models', requireAuth, async (req, res) => {
+  // P7/F6c（2026-09 批3）：default_model 可配——settings default_model_<provider> 覆盖厂商硬编码默认模型
+  const defs = await getSetting('default_models', null); // { glm: 'glm-5.3', deepseek: '...' }
+  const over = (defs && typeof defs === 'object') ? defs : {};
+  res.json({ ok: true, providers: activeProviders(config.keys).map((p) => ({ ...p, defaultModel: over[p.id] || p.defaultModel })) });
 });
 
 // ---------- 能力开关 ----------
@@ -283,15 +286,16 @@ async function setSetting(key, val, noBump) {
 
 // ---------- 模型路由（F11 自动路由） ----------
 const VISION_RE = /(图片|看图|照片|截图|识别.*图|vision|image)/i;
-function resolveRoute(content, provider, model) {
+function resolveRoute(content, provider, model, defOverrides) {
   // C4 显式绝对锁（2026-09 批3）：provider 显式非 auto → 锁定该厂商（model 缺省用厂商 defaultModel），
   // 不允许被自动路由/视觉路由覆盖——用户选了 GLM 就是 GLM，5.2 都不行（契约六 C4）。
   if (provider && provider !== 'auto') {
     try {
       const p = findProvider(provider);
       if (!p) return { provider, model: model || '', note: '未知厂商（如实报错由 gateway 抛）' };
-      // 显式厂商 + model 缺省 → 用厂商 defaultModel；model 显式（非 __auto__）→ 原样用
-      const m = (model && model !== '__auto__') ? model : p.defaultModel;
+      // 显式厂商 + model 缺省 → 用厂商 defaultModel（P7：settings default_models 覆盖优先）；model 显式（非 __auto__）→ 原样用
+      const defM = (defOverrides && defOverrides[provider]) || p.defaultModel;
+      const m = (model && model !== '__auto__') ? model : defM;
       return { provider, model: m, note: model && model !== '__auto__' ? '显式模型' : '显式厂商默认模型' };
     } catch { return { provider, model: model || '' }; }
   }
@@ -322,7 +326,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 显式选择（body 或会话里非 auto 的 provider）是绝对锁：不允许被自动路由/回退覆盖。
   const wantProvider = provider || convProvider;
   const wantModel = model || convModel;
-  const route = resolveRoute(content, wantProvider || 'auto', wantModel || '__auto__');
+  // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认
+  let defOverrides = null;
+  try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
+  const route = resolveRoute(content, wantProvider || 'auto', wantModel || '__auto__', defOverrides);
   provider = route.provider;
   model = route.model;
   // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
