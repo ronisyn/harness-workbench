@@ -5,9 +5,14 @@
 // 任何钩子抛错：内置安全钩子（builtin+failClosed）保守拦截（fail-closed），其余 warn 后忽略——钩子永不拖垮主流程
 // 内置钩子（模块加载即注册，平台级强制纪律）：
 //   1. danger_command_guard（before run_command）—— 破坏性命令（删根/fork bomb/写盘/关机等）fail-closed 拦截
-//   2. system_write_guard（before 全部带 path 的写工具）—— 写系统关键区（/etc /boot /usr/bin 等）fail-closed 拦截
+//   2. system_write_guard（before 写类工具）—— 写系统关键区（/etc /boot /usr/bin 等）fail-closed 拦截
+//   3. preset_tier_guard（before *）—— preset 暴露面（minimal/standard 调 core/pro 级外工具 → 指引）
+//   4. enabled_tools_guard（before *）—— 账号工具启用集未含且非平台豁免 → 指引（可恢复：设置→工具 勾选）
+//   5. readonly_intent_guard（before 改动类）—— 请求级只读规划意图（P4）时禁改动工具
+//   6. shell_readonly_guard（before run_command）—— 读型命令（cat/ls/grep/…）引导用专门工具
+// P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
-import path from 'node:path';
+import { TOOL_META, PLATFORM_EXEMPT } from './meta.js';
 
 const registry = [];
 const MAX_HOOKS = 128;
@@ -39,6 +44,8 @@ export function clearHook(side, tool, name) {
 // 触发某 side+工具名的全部钩子。payload 传入 {args, ctx}；钩子可改 payload.args（浅合并语义）。
 // 返回 { stopped:boolean, reason?, by? }——某钩子 stop 后不再执行后续钩子。
 export async function emitHooks(side, tool, payload) {
+  // P2：把当前工具名注入 payload.ctx.__toolName，供 '*' 纪律钩子（preset/启用集等）按名判定
+  if (payload && payload.ctx && typeof payload.ctx === 'object') payload.ctx.__toolName = tool;
   for (const h of registry) {
     if (h.side !== side) continue;
     if (h.tool !== tool && h.tool !== '*') continue;
@@ -105,3 +112,59 @@ for (const w of WRITE_PATH_TOOLS) {
     return {};
   }, { builtin: true, failClosed: true });
 }
+
+// ---------------------------------------------------------------------------
+// P2 纪律统一层（2026-09 批2）：从 execTool 内联门禁迁入的纪律钩子——
+// 纪律集中一处（listHooks 可审计、可动态调整），execTool 只保留权限层（checkPerm/limitPath/审批）与安全网（占位符检疫/快照）。
+// 说明：内置纪律钩子 fail-open（返回 stop 才拦，抛错 warn 不阻断）——纪律是引导，安全网（danger/system_write）才 fail-closed。
+// ---------------------------------------------------------------------------
+
+// 3. preset 暴露面门禁（原 execTool 内联：非 all 会话调用未暴露层级 → 指引）
+registerHook('before', '*', 'preset_tier_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  if (!name) return {};
+  if (ctx.preset && ctx.preset !== 'all') {
+    const allowT = ctx.preset === 'minimal' ? new Set(['core']) : ctx.preset === 'standard' ? new Set(['core', 'pro']) : null;
+    const metaTier = TOOL_META[name]?.tier;
+    if (allowT && metaTier && !allowT.has(metaTier)) {
+      return { stop: true, reason: `工具 ${name}（${metaTier} 级）不在当前会话 preset=${ctx.preset} 的暴露范围。可 ask_user 请用户把 preset 切到 standard/all，或改用 core 级工具完成。` };
+    }
+  }
+  return {};
+}, { builtin: true, failClosed: false });
+
+// 4. 启用集门禁（原 execTool 内联：账号启用集未含且非平台豁免 → 指引）
+registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  if (!name) return {};
+  if (ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
+    return { stop: true, reason: `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。` };
+  }
+  return {};
+}, { builtin: true, failClosed: false });
+
+// 5. 只读意图门禁（原 execTool 内联 P4：请求级只读规划时禁改动类工具）
+const READONLY_MUTATING = new Set([
+  'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
+  'run_command', 'run_long_task', 'kill_process', 'db_write',
+  'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
+]);
+for (const m of READONLY_MUTATING) {
+  registerHook('before', m, 'readonly_intent_guard', ({ args, ctx }) => {
+    if (ctx?.__readonlyIntent) {
+      return { stop: true, reason: '只读规划意图（本轮）：工具 ' + m + ' 已被禁用。规划阶段只用只读工具（read/list/grep/find/web/db_query）；把方案作为回答展示，等用户批准后再执行改动。' };
+    }
+    return {};
+  }, { builtin: true, failClosed: false });
+}
+
+// 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
+registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
+  const cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+  const first = cmdline.split(/\s+/)[0];
+  const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
+  if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
+    return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
+  }
+  return {};
+}, { builtin: true, failClosed: false });
