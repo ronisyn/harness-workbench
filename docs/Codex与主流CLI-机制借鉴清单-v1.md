@@ -65,8 +65,11 @@
    - 建议落地：subagent_fanout 已有基础 → 加"双模型跑同一 prompt 再汇总"模板。
 
 ### P3（低价值/成本高，暂缓）
-5. **⬜ MCP 生态接入（Codex/Claude Code 支持 MCP 工具服务器）**
-   - 价值大但工程重（需 MCP 客户端+工具动态注册+鉴权），暂缓到 P1/P2 完成后再评估。
+5. **✅ MCP 生态接入（Codex/Claude Code 支持 MCP 工具服务器）**（2026-09-06 落地，状态见 docs/MCP接入状态.md）
+   - 落地：server/mcp.js + 设置→MCP 面板（配置存 settings 表 mcp_servers）；github MCP server 已接入 26 个工具，
+     以 mcp_github_<tool> 命名并入 execTool 主通道（权限 write 级 + 纪律钩子 + 审计脱敏，不再绕过平台纪律层）；
+     含密钥 env 键（匹配 token|secret|key|password|apikey）一律 __REDACTED__ 不下发前端；断线看门狗 60s 自动重连并同步工具。
+     已实测：mcp_github_list_commits 返回 ronisyn/harness-workbench 真实提交（与远程一致）。
 6. **⬜ watch 文件变更广播（3080 skills watch）**：服务器版价值低，不做（archive/archive/3080机制对照已注）。
 
 ## 3. 文档-实现差异（自查发现，顺手可修）
