@@ -976,8 +976,9 @@ export function toolDefs(expose = 'all', enabled = null) {
 
 // 执行工具并留痕
 export async function execTool(name, args, ctx) {
-  // P11 MCP fallback（2026-09 批5）：mcp_<serverId>_<toolName> 调用 → 转发到 MCP client（权限按 write 级评估）
-  const mcpMatch = /^mcp_([a-zA-Z0-9_-]+)_(.+)$/.exec(name);
+  // P11 MCP fallback（2026-09 批5）：mcp_<serverId>_<toolName> 调用 → 转发到 MCP client（权限按 write 级评估）。
+  // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
+  const mcpMatch = /^mcp_([a-zA-Z0-9]+)_(.+)$/.exec(name);
   if (mcpMatch) {
     const { callMcpTool } = await import('../mcp.js');
     const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
