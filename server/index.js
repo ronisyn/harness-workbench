@@ -146,8 +146,13 @@ app.get('/api/conversations', requireAuth, async (req, res) => {
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
   const { title, permission, preset, provider, model } = req.body || {};
+  // P24(O-22) permission 服务端白名单：非法值拒绝（原实现无校验，非法字符串在 checkPerm 静默全拒易踩坑）
+  const perm = permission === undefined || permission === null ? 'full' : String(permission);
+  if (!['read', 'write', 'guard', 'full'].includes(perm)) {
+    return res.status(400).json({ ok: false, message: 'permission 需为 read|write|guard|full' });
+  }
   const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model) VALUES (?,?,?,?,?,?)',
-    [req.user.id, title || '新对话', permission || 'full', ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
+    [req.user.id, title || '新对话', perm, ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
       provider || null, model || null]);
   res.json({ ok: true, id: r.insertId });
 });
@@ -156,7 +161,12 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   const { title, permission, preset, provider, model } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
-  if (permission !== undefined) { set.push('permission=?'); params.push(permission); }
+  if (permission !== undefined) {
+    if (!['read', 'write', 'guard', 'full'].includes(String(permission))) {
+      return res.status(400).json({ ok: false, message: 'permission 需为 read|write|guard|full' });
+    }
+    set.push('permission=?'); params.push(permission);
+  }
   if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
   if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
   if (model !== undefined) { set.push('model=?'); params.push(model || null); }

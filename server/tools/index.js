@@ -980,27 +980,33 @@ export function toolDefs(expose = 'all', enabled = null) {
 
 // 执行工具并留痕
 export async function execTool(name, args, ctx) {
-  // P11 MCP fallback（2026-09 批5）：mcp_<serverId>_<toolName> 调用 → 转发到 MCP client（权限按 write 级评估）。
+  // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：不再在权限/纪律检查前提前返回——
+  // 合成工具元数据（permission=write 级评估），与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
   // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
+  let tool = null;
   const mcpMatch = /^mcp_([a-zA-Z0-9]+)_(.+)$/.exec(name);
   if (mcpMatch) {
-    const { callMcpTool } = await import('../mcp.js');
     const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
-    const t0m = Date.now();
-    let result;
-    try {
-      const r = await callMcpTool(srvId, mcpTool, args);
-      result = { content: (r && r.content) || JSON.stringify(r || {}) };
-    } catch (e) { result = { error: String(e && e.message || e) }; }
-    try {
-      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, JSON.stringify(args).slice(0, 2000), JSON.stringify(result).slice(0, 2000), Date.now() - t0m, result.error ? 'fail' : 'done']);
-    } catch { /* 留痕失败忽略 */ }
-    return result;
+    tool = {
+      name,
+      description: '[MCP:' + srvId + '] ' + mcpTool,
+      permission: 'write', // MCP 外部副作用按 write 级评估（read 会话不可用；guard 会话可另配规则/审批）
+      params: { __mcp: { type: 'object', desc: '透传参数（MCP server 定义）' } },
+      run: async (a) => {
+        const { callMcpTool } = await import('../mcp.js');
+        const r = await callMcpTool(srvId, mcpTool, a || {});
+        return { content: (r && r.content) || JSON.stringify(r || {}) };
+      },
+    };
+  } else {
+    tool = findTool(name);
   }
-  const tool = findTool(name);
   if (!tool) throw new Error('未知工具: ' + name);
   if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
+  // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
+  if (ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
+    throw new Error('工具 db_write 需要 write 级及以上权限（当前 read 会话为只读）');
+  }
   const t0 = Date.now();
   let result;
   // full 权限不限制路径（limitPath=false）；read/write 级才检查工作区边界（guard=full 级能力+审批，不受限）

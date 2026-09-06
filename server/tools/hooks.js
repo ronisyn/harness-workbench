@@ -172,6 +172,9 @@ registerHook('before', '*', 'preset_tier_guard', ({ args, ctx }) => {
 registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
   const name = ctx?.__toolName;
   if (!name) return {};
+  // P24(O-21)：MCP 工具（mcp_*）由管理员在 settings mcp_servers 配置信任（动态命名无法进静态启用集），豁免启用集门禁；
+  // 但仍受权限(checkPerm write 级)/只读意图/审计约束（已并入 execTool 主通道）。
+  if (name.startsWith('mcp_')) return {};
   if (ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
     return { stop: true, reason: `工具 ${name} 未在工具启用集内（默认 25 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。` };
   }
@@ -183,6 +186,8 @@ const READONLY_MUTATING = new Set([
   'write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint',
   'run_command', 'run_long_task', 'kill_process', 'db_write',
   'git_commit', 'git_pull_push', 'skill_save', 'set_limits', 'reload_platform',
+  // P24(O-23) 只读意图清单补齐（间接副作用工具）：git_branch(checkout 切分支)/kb_del(删记忆)/create_contract(排程无人值守执行)/finish_task(触发业务区 auto-commit)
+  'git_branch', 'kb_del', 'create_contract', 'finish_task',
 ]);
 for (const m of READONLY_MUTATING) {
   registerHook('before', m, 'readonly_intent_guard', ({ args, ctx }) => {
@@ -192,6 +197,14 @@ for (const m of READONLY_MUTATING) {
     return {};
   }, { builtin: true, failClosed: false });
 }
+// P24(O-21/O-23)：MCP 外部工具（动态命名）同样受只读意图约束——管理员信任 ≠ 只读轮可执行外部副作用
+registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
+  const name = ctx?.__toolName;
+  if (ctx?.__readonlyIntent && name && name.startsWith('mcp_')) {
+    return { stop: true, reason: '只读规划意图（本轮）：MCP 外部工具 ' + name + ' 已被禁用。规划阶段只用只读工具；把方案作为回答展示，等用户批准后再执行。' };
+  }
+  return {};
+}, { builtin: true, failClosed: false });
 
 // 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
 registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
