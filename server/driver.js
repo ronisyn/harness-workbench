@@ -143,7 +143,7 @@ async function driveContract(c) {
       __autonomous: true, __accessRules: accessRules,
       __needInput: (payload) => needInput(c, payload),
     };
-    const result = await runAgent({ provider: 'deepseek', model: c.model || 'deepseek-v4-flash', messages: msgs, permission: 'full', ctx, keys: config.keys });
+    const result = await runAgent({ provider: c.provider || 'deepseek', model: c.model || 'deepseek-v4-flash', messages: msgs, permission: 'full', ctx, keys: config.keys });
     const finished = (result.toolLog || []).some((t) => t.name === 'finish_task');
     const toolNames = [...new Set((result.toolLog || []).map((t) => t.name))];
     const summary = String(result.content || '').slice(0, 3000);

@@ -42,11 +42,12 @@ function resolve(providerId, keys) {
 export async function chatOnce(providerId, messages, opts = {}, keys) {
   const p = resolve(providerId, keys);
   const model = opts.model || p.defaultModel;
+  const timeoutMs = opts.timeoutMs || p.timeoutMs || 90000; // O-3：厂商级超时（GLM thinking 180s）
   const res = await fetch(p.base + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify({ model, messages, max_tokens: opts.maxTokens || 8000, stream: false }),
-    signal: AbortSignal.timeout(opts.timeoutMs || 90000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${p.name}(${model}) 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
@@ -59,10 +60,13 @@ export async function chatOnce(providerId, messages, opts = {}, keys) {
 export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {}) {
   const p = resolve(providerId, keys);
   const model = opts.model || p.defaultModel;
-  // 首字节等待 60s；一旦开始收到数据，改为"流空闲 120s"护栏 —— 避免长输出（思考+生成 >60s）被整段中止
+  // 首字节等待：GLM thinking 模型 reasoning 长（O-3）→ 按厂商 timeoutMs 比例放宽；默认 60s。
+  // 一旦开始收到数据（含 reasoning delta），改为"流空闲"护栏（厂商 timeoutMs 或默认 120s）。
+  const firstByteMs = opts.firstByteMs || Math.min(60000, Math.round((p.timeoutMs || 90000) / 3));
+  const idleMs = p.timeoutMs || 120000;
   const ac = new AbortController();
-  let idleTimer = setTimeout(() => ac.abort(), 60000);
-  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ac.abort(), 120000); };
+  let idleTimer = setTimeout(() => ac.abort(), firstByteMs);
+  const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ac.abort(), idleMs); };
   let res;
   try {
     res = await fetch(p.base + '/chat/completions', {
@@ -73,7 +77,7 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
     });
   } catch (e) {
     clearTimeout(idleTimer);
-    throw new Error(`${p.name}(${model}) 连接失败/超时(60s): ${e.message}`);
+    throw new Error(`${p.name}(${model}) 连接失败/超时(${Math.round(firstByteMs / 1000)}s): ${e.message}`);
   }
   if (!res.ok || !res.body) {
     clearTimeout(idleTimer);
@@ -136,7 +140,7 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(90000), // 工具模式 LLM 调用 90s
+    signal: AbortSignal.timeout(p.timeoutMs || 90000), // O-3：工具模式超时按厂商（GLM thinking 180s）
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${p.name} 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);

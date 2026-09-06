@@ -74,8 +74,11 @@ app.get('/api/auth/me', async (req, res) => {
 });
 
 // ---------- 模型（已接入厂商） ----------
-app.get('/api/models', requireAuth, (req, res) => {
-  res.json({ ok: true, providers: activeProviders(config.keys) });
+app.get('/api/models', requireAuth, async (req, res) => {
+  // P7/F6c（2026-09 批3）：default_model 可配——settings default_model_<provider> 覆盖厂商硬编码默认模型
+  const defs = await getSetting('default_models', null); // { glm: 'glm-5.3', deepseek: '...' }
+  const over = (defs && typeof defs === 'object') ? defs : {};
+  res.json({ ok: true, providers: activeProviders(config.keys).map((p) => ({ ...p, defaultModel: over[p.id] || p.defaultModel })) });
 });
 
 // ---------- 能力开关 ----------
@@ -283,9 +286,20 @@ async function setSetting(key, val, noBump) {
 
 // ---------- 模型路由（F11 自动路由） ----------
 const VISION_RE = /(图片|看图|照片|截图|识别.*图|vision|image)/i;
-function resolveRoute(content, provider, model) {
-  if (provider !== 'auto' && model !== '__auto__') return { provider, model };
-  // 自动路由：视觉需求 → 豆包视觉；含工具意图且需要执行 → 默认主力（deepseek 已支持工具）
+function resolveRoute(content, provider, model, defOverrides) {
+  // C4 显式绝对锁（2026-09 批3）：provider 显式非 auto → 锁定该厂商（model 缺省用厂商 defaultModel），
+  // 不允许被自动路由/视觉路由覆盖——用户选了 GLM 就是 GLM，5.2 都不行（契约六 C4）。
+  if (provider && provider !== 'auto') {
+    try {
+      const p = findProvider(provider);
+      if (!p) return { provider, model: model || '', note: '未知厂商（如实报错由 gateway 抛）' };
+      // 显式厂商 + model 缺省 → 用厂商 defaultModel（P7：settings default_models 覆盖优先）；model 显式（非 __auto__）→ 原样用
+      const defM = (defOverrides && defOverrides[provider]) || p.defaultModel;
+      const m = (model && model !== '__auto__') ? model : defM;
+      return { provider, model: m, note: model && model !== '__auto__' ? '显式模型' : '显式厂商默认模型' };
+    } catch { return { provider, model: model || '' }; }
+  }
+  // 自动路由（provider=auto）：视觉需求 → 豆包视觉；含工具意图且需要执行 → 默认主力（deepseek 已支持工具）
   let route;
   if (VISION_RE.test(content)) route = { provider: 'ark', model: 'doubao-seed-2-0-mini-260428', note: '视觉任务→豆包视觉' };
   else route = { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→DeepSeek V4 Flash' };
@@ -302,8 +316,20 @@ function resolveRoute(content, provider, model) {
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
-  // F11 自动路由：provider/model 为 auto 时按内容路由
-  const route = resolveRoute(content, provider || 'deepseek', model);
+  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  if (!convs.length) { return res.status(404).json({ ok: false, message: '会话不存在' }); }
+  const convProvider = convs[0].provider || null;
+  const convModel = convs[0].model || null;
+  // C4 显式模型绝对锁（2026-09 批3）：解析优先级 = ①body 显式传的 provider/model（用户本轮刚切换）→
+  // ②会话已保存的 provider/model（用户此前选择，persist 在会话）→ ③默认（deepseek 或 default_model 配置）。
+  // 关键修复：原实现只读 body（缺省默认 deepseek），完全忽略会话保存值 → 用户切 GLM 后若 body 丢参即静默回 deepseek=冒充（O-14）。
+  // 显式选择（body 或会话里非 auto 的 provider）是绝对锁：不允许被自动路由/回退覆盖。
+  const wantProvider = provider || convProvider;
+  const wantModel = model || convModel;
+  // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认
+  let defOverrides = null;
+  try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
+  const route = resolveRoute(content, wantProvider || 'auto', wantModel || '__auto__', defOverrides);
   provider = route.provider;
   model = route.model;
   // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
@@ -316,8 +342,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     return res.status(429).json({ ok: false, message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
   }
   inflight.set(req.user.id, curInflight + 1);
-  const convs = await db.query('SELECT id, permission, mode, preset, project FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
-  if (!convs.length) { inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1)); return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const permission = convs[0].permission || 'full';
   const convMode = convs[0].mode || 'chat';
   const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
@@ -455,8 +479,25 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // 反代（nginx）禁用缓冲，SSE 即时透出
   });
-  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  // O-8 心跳（2026-09 批3）：SSE 长思考/长任务期间可能 10-60s 无数据（LLM thinking 中），
+  // 中间代理空闲超时会断连（驱动多次 terminated 的根因）。每 15s 无数据发注释帧保活；有数据活动即重置。
+  let sseIdle = null;
+  const armSseHeartbeat = () => {
+    clearTimeout(sseIdle);
+    sseIdle = setTimeout(() => {
+      try { if (!res.writableEnded) res.write(': ping\n\n'); } catch { /* 连接已关 */ }
+      armSseHeartbeat(); // 持续保活直到请求结束
+    }, 15000);
+  };
+  armSseHeartbeat();
+  const stopSseHeartbeat = () => { clearTimeout(sseIdle); sseIdle = null; };
+  const send = (obj) => {
+    try {
+      if (!res.writableEnded) { res.write(`data: ${JSON.stringify(obj)}\n\n`); armSseHeartbeat(); }
+    } catch { /* 连接已关，忽略 */ }
+  };
 
   const t0 = Date.now();
   let firstTokenMs = 0;
@@ -597,6 +638,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 释放并发槽位
   inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
   clearActivity(conversationId); // 本轮事件环收尾（正常/异常/停止统一清理）
+  stopSseHeartbeat(); // O-8：停止心跳（连接即将关闭）
   res.end();
   // 自我重启协作：本回复已完整发出/落库，处理 reload_platform 请求
   maybeSelfRestart().catch(() => {});
