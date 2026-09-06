@@ -2,7 +2,7 @@
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
-import { chatOnceWithTools, chatOnce, calcCost } from './llm/gateway.js';
+import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -369,7 +369,23 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const defs = ctx.__light
       ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
       : toolDefs(ctx.preset, ctx.__enabledTools);
-    const res = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature);
+    // P20 每轮流式（2026-09）：stream:true + tools，思考增量经 onThink 实时透出（P21），正文增量经 onContent 实时透出（真流）；
+    // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）；流失败 → 同模型一次性兜底一次（保底），再失败如实抛出（②由 index catch 落痕）
+    let res = null;
+    let roundLive = false;
+    try {
+      res = await chatStreamWithTools(provider, model, msgs, defs, keys, {
+        temperature,
+        signal: ctx.__signal,
+        onThink: (txt) => emitEv(ctx.conversationId, emit, { type: 'think', text: txt }),
+        onContent: (delta) => { roundLive = true; emitEv(ctx.conversationId, emit, { type: 'delta', delta }); },
+      });
+    } catch (e) {
+      if (e && e.aborted) return { content: '', stopped: true, toolLog, usage: {}, streamed: false };
+      const fb = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature).catch(() => null);
+      if (!fb) throw e;
+      res = fb; // 兜底（一次性）：正文未流式，由 index 收尾分块发出
+    }
     const llmMs = Date.now() - llmT0;
     // 全量计量（账本=真实消耗，三档计费 hit/miss/out）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id）
     try {
@@ -384,8 +400,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (effBudgetYuan > 0 && cumCost > effBudgetYuan) {
       return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超可用预算 ¥${effBudgetYuan}（段阈值 task_budget_yuan=${lim.budgetYuan} × 会话总账剩余；可调大 task_budget_total/task_budget_yuan 或 0=关）。先停再问：回复"继续"放行下一段）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
     }
-    // 模型推理过程（reasoning）实时透出 → 前端 think 区
-    if (res.reasoning) emitEv(ctx.conversationId, emit, { type: 'think', text: res.reasoning });
+    // 模型推理过程（reasoning）：P20 已由 chatStreamWithTools.onThink 逐块实时透出（此处不再整块后置）
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
@@ -494,7 +509,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         }
         final += '\n需要我基于这些结果继续说明或汇总，直接说即可。';
       }
-      return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '' };
+      return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '', streamed: roundLive }; // P20：正文已真流 → index 不再分块重发
     }
     // 长任务现场：每轮工具执行后落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）
     if (ctx.__runId) {
@@ -527,7 +542,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
     // C1：回填上下文用瘦身版 arguments（原始 calls 仍用于执行与落库，见下方 execOne）
-    msgs.push({ role: 'assistant', content: res.content || null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
+    // P22（2026-09）：工具轮正文（旁白）仅灰字展示、不入上下文历史——content 置 null（历史只存工具调用与最终文本）
+    msgs.push({ role: 'assistant', content: null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
     const maxPar = lim.maxParallelT > 0 ? lim.maxParallelT : 1; // 0=关闭并行（串行）
     const results = new Array(calls.length);
     const execOne = async (call, idx) => {

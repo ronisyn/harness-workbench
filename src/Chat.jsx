@@ -420,8 +420,14 @@ export default function Chat({ user, onLogout }) {
             patchLast((x) => ({ ...x, think: (x.think || '') + text, thinking: false }));
           },
           onToolStart: (tool) => {
-            // 工具开始：追加"运行中"卡片
-            patchLast((x) => ({ ...x, thinking: false, traces: [...(x.traces || []), { ...tool, status: 'running' }] }));
+            // 工具开始：先降级"已流正文"为过程说明（P22：工具轮旁白灰字展示、不入气泡），再追加"运行中"卡片
+            patchLast((x) => {
+              let n = { ...x };
+              if (n.content && !n._demoted) {
+                n = { ...n, think: (n.think ? n.think + '\n' : '') + '（过程说明）' + n.content, content: '', _demoted: true };
+              }
+              return { ...n, thinking: false, traces: [...(n.traces || []), { ...tool, status: 'running' }] };
+            });
           },
           onToolDone: (tool) => {
             // 工具完成：按 名字+seq(+子代理) 唯一匹配更新卡片（父/子代理交错不撞号）

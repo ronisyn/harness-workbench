@@ -587,6 +587,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             send({ type: 'approval', id: ev.id, desc: ev.desc });
           } else if (ev.type === 'ask') {
             send({ type: 'ask', id: ev.id, question: ev.question, options: ev.options });
+          } else if (ev.type === 'delta') {
+            // P20：agent 每轮流式正文实时透出（final 真流；工具轮旁白由前端灰字化）
+            if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+            send({ type: 'delta', delta: ev.delta });
           }
         },
       });
@@ -613,11 +617,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         answer = result.content || '（无输出）';
         usage = result.usage || {};
         if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-        // 统一路径分块模拟流式（真实逐字流式对工具模式不适用；分块保持近实时体验）
-        const chunkSize = 8;
-        for (let i = 0; i < answer.length; i += chunkSize) {
-          if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-          send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+        // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不再分块重发；
+        // 兜底路径（一次性 fallback / F6a 诚实说明 / guard 文案等生成型内容）仍按 8 字分块模拟
+        if (!result.streamed && answer) {
+          const chunkSize = 8;
+          for (let i = 0; i < answer.length; i += chunkSize) {
+            if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+            send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
+          }
         }
       }
     }
@@ -650,6 +657,20 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     }
   } catch (e) {
     send({ type: 'error', message: e.message });
+    // P20/②（O-17）：异常路径也必须落 assistant 占位消息（含已做进度与错误原因），绝不"无声无息"
+    try {
+      let prog = '';
+      if (agentRunId) {
+        const rr = (await db.query('SELECT rounds, tool_counts, last_step FROM agent_runs WHERE id=?', [agentRunId]))[0];
+        if (rr) {
+          const cts = (() => { try { return JSON.parse(rr.tool_counts || '{}'); } catch { return {}; } })();
+          const cText = Object.entries(cts).map(([k, v]) => k + '×' + v).join('、');
+          prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
+        }
+      }
+      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
+        [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
+    } catch { /* 忽略 */ }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
   }
   if (abortMap.get(akey) === actrl) abortMap.delete(akey);
