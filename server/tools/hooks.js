@@ -12,6 +12,7 @@
 //   6. shell_readonly_guard（before run_command）—— 读型命令（cat/ls/grep/…）引导用专门工具
 // P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
+import { execFileSync } from 'node:child_process';
 import { TOOL_META, PLATFORM_EXEMPT } from './meta.js';
 
 const registry = [];
@@ -200,5 +201,41 @@ registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
   if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
     return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
   }
+  return {};
+}, { builtin: true, failClosed: false });
+
+// ---------------------------------------------------------------------------
+// G 域质量钩子（2026-09 批4）：after 型（观察/留痕，不阻断已执行）——
+//   7. code_syntax_check（after write_file/edit_file）：改 .js/.mjs/.cjs 后自动 node --check，语法错误写入 result.hookNote
+//   8. finish_selfcheck_note（after finish_task）：校验 summary 长度与 selfCheck 提示（留痕引导提测质量）
+// ---------------------------------------------------------------------------
+const CODE_EXT = /\.(js|mjs|cjs)$/;
+const syntaxNote = ({ args, result }) => {
+  try {
+    const p = String((args && args.path) || '');
+    if (!CODE_EXT.test(p)) return {};
+    execFileSync('node', ['--check', p], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (result && typeof result === 'object' && !Array.isArray(result)) result.hookNote = '语法检查通过（node --check）';
+  } catch (e) {
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const msg = String((e && e.stderr) || (e && e.message) || e || '').split('\n').filter(Boolean).slice(0, 2).join(' | ').slice(0, 260);
+      result.hookNote = '⚠️ 语法检查失败：' + msg + '（请修复后再提交）';
+    }
+  }
+  return {};
+};
+registerHook('after', 'write_file', 'code_syntax_check', syntaxNote, { builtin: true, failClosed: false });
+registerHook('after', 'edit_file', 'code_syntax_check', syntaxNote, { builtin: true, failClosed: false });
+
+registerHook('after', 'finish_task', 'finish_selfcheck_note', ({ args, result }) => {
+  try {
+    const summary = String((args && args.summary) || '');
+    const selfCheck = String((args && args.selfCheck) || '');
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      result.hookNote = summary.length < 10
+        ? '⚠️ 完成总结过短（' + summary.length + ' 字），建议补充做了什么/结果/验证'
+        : (!selfCheck ? '提示：建议附 selfCheck（对照验收标准自检）' : '自审信息完整');
+    }
+  } catch { /* 忽略 */ }
   return {};
 }, { builtin: true, failClosed: false });
