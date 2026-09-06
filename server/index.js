@@ -308,10 +308,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   model = route.model;
   // F12 高级参数：读全局温度设置（settings 表，默认 0.4——2026-09 自进化：低温度=少发散/稳执行/降假开始与漂移）
   const temperature = await getSetting('temperature', 0.4);
-  // 并发限制：同账号同时在跑的对话超过上限(3)则直接拒绝（先于写库）
+  // P18 并发限制（2026-09 批2）：上限=settings max_concurrent_chats（默认 5；0=不限）——原来硬编码 3。
+  // 同账号同时在跑的对话超过上限则拒绝（先于写库），提示当前排在前面的对话数（队列可见）。
+  const maxConcurrent = Number(await getSetting('max_concurrent_chats', 5)) || 0;
   const curInflight = inflight.get(req.user.id) || 0;
-  if (curInflight >= 3) {
-    return res.status(429).json({ ok: false, message: '并发对话已达上限(3)，请等当前对话结束或点停止后再发' });
+  if (maxConcurrent > 0 && curInflight >= maxConcurrent) {
+    return res.status(429).json({ ok: false, message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
   }
   inflight.set(req.user.id, curInflight + 1);
   const convs = await db.query('SELECT id, permission, mode, preset, project FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
