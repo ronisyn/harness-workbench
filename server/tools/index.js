@@ -767,7 +767,19 @@ export const TOOLS = [
     } },
   { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
-    run: async (a) => {
+    run: async (a, ctx) => {
+      // F2 reload 防撞（2026-09 批2）：重启会打断服务器上一切进行中会话（agent_runs running 会被标 interrupted）。
+      // 自会话豁免：当前 run/当前会话不算碰撞；但若有【其他】活跃任务（其他会话/定时/驱动在跑）→ 拒绝并告知，
+      // 避免盲目 reload 打断别人（O-3 曾 2 次 reload 撞任务）。无其他活跃任务才调度重启。
+      try {
+        const other = await db.query(
+          `SELECT COUNT(*) c FROM agent_runs WHERE status='running' AND id<>? AND conversation_id<>?`,
+          [ctx.__runId ?? -1, ctx.conversationId ?? -1]
+        );
+        if (Number(other[0]?.c || 0) > 0) {
+          return { error: `reload 防撞：另有 ${other[0].c} 个任务正在运行（其他会话/定时/驱动），重启会中断它们。请等它们结束或让用户点"停止"后再 reload；当前会话不受影响。` };
+        }
+      } catch { /* 查询失败不阻断（保守放行，由 maybeSelfRestart 侧兜底） */ }
       const note = String(a.note || '').slice(0, 300);
       requestRestart(note || 'platform code change');
       return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。' };
