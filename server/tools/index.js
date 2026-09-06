@@ -16,7 +16,9 @@ import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
-const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process']);
+// O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
+// guard 会话调用它们不弹审批卡（曾误写文档为 7 项已改回 5 项，现按契约档位补全为 7 项）。
+const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits']);
 
 // P4 只读意图禁用的改动类工具：请求级只读规划（ctx.__readonlyIntent）时直接拒绝（只读）
 const MUTATING_TOOLS = new Set([
