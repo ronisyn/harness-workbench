@@ -181,7 +181,7 @@ const SCHEMA = [
     summary MEDIUMTEXT,
     updated_at DATETIME DEFAULT NOW()
   )`,
-  // ---- 定时任务（F14） ----
+  // ---- 定时务务（F14） ----
   `CREATE TABLE IF NOT EXISTS scheduled_tasks (
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_id INT,
@@ -208,7 +208,7 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     updated_at DATETIME DEFAULT NOW()
   )`,
-  // ---- 后台长任务注册表持久化（D2/D5：jobs Map 仅内存态，重启/超 TTL 后 pid↔日志映射丢失 → DB 持久索引，job_list/job_output/kill_process 重启后仍可查；启动时清理陈旧 running） ----
+  // ---- 后台长务务注册表持久化（D2/D5：jobs Map 仅内存态，重启/超 TTL 后 pid↔日志映射丢失 → DB 持久索引，job_list/job_output/kill_process 重启后仍可查；启动时清理陈旧 running） ----
   `CREATE TABLE IF NOT EXISTS long_jobs (
     job_id VARCHAR(40) PRIMARY KEY,
     cmd TEXT,
@@ -237,7 +237,7 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     KEY idx_kb_scope (account_id, scope)
   )`,
-  // ---- 长任务现场（断点恢复：每会话一条；running→completed|interrupted|paused） ----
+  // ---- 长务务现场（断点恢复：每会话一条；running→completed|interrupted|paused） ----
   `CREATE TABLE IF NOT EXISTS agent_runs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     conversation_id INT NOT NULL,
@@ -253,7 +253,7 @@ const SCHEMA = [
     updated_at DATETIME DEFAULT NOW(),
     INDEX idx_run_conv (conversation_id)
   )`,
-  // ---- 任务契约（外部驱动器：白天立项 → 夜间/立即无人值守执行 → 验收 → 用户复测确认） ----
+  // ---- 务务契约（外部驱动器：白天立项 → 夜间/立即无人值守执行 → 验收 → 用户复测确认） ----
   `CREATE TABLE IF NOT EXISTS task_contracts (
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_id INT,
@@ -302,7 +302,7 @@ export async function initSchema() {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
   }
   // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；单段成本提醒默认关（0）；
-  // 任务总账默认 30（会话 24h 真上限）；存量旧值 20 由部署时一次性 UPDATE 校正
+  // 任务总账默认 100（会话 24h 真上限，与 agent.js 回退值/蓝图一致）；存量旧值 20/30 由部署迁移校正
   const SEEDS = [
     ['__policy_rev', '1'],
     ['task_budget_yuan', '0'],

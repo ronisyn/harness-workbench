@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/release.mjs - 发布流水线雏形（2026-09 批5，P15）
 // 用法: node scripts/release.mjs [--check-only]
-// 流程：①语法全检 → ②前端构建 → ③selfcheck 冒烟（需服务器+账号）→ ④受控部署说明（git push/服务器 pull/reload 走 C5）
+// 流程：①语法全检 → ②前端构建 → ③受控部署说明（git push/服务器 pull/reload 走 C5）；真实冒烟（node scripts/selfcheck.mjs）需运行中服务器+账号，作为部署后人工/驱动步骤执行
 // 只做只读+校验+构建；部署动作（reload）由人工/C5 决策，脚本不自动执行。
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';

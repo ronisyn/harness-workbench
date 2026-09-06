@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
 import { db, bumpPolicyRev } from '../db.js';
-import { chatOnce } from '../llm/gateway.js';
+import { chatOnce, calcCost } from '../llm/gateway.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
@@ -23,7 +23,7 @@ const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_
 // —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
 // "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
 // 等占位符并真实执行，曾静默写坏文件。execTool 入口递归检疫 + 写类工具 run 内二次检疫
-const PH_A='(?:tool_call_id\\s*=\\s*[A-Za-z0-9_\\-]{4,}|db_query 查 tool_calls|job_output\\/read_file\\/查询工具|_archived|原文 \\d+ 字符已截断|已截断\\(原文 \\d+ 字符|原文在 messages 表可按 id=)';
+const PH_A='(?:tool_call_id\\s*=\\s*[A-Za-z0-9_\\-]{4,}|仅存前 2000 字符|db_query 查 tool_calls|job_output\\/read_file\\/查询工具|_archived|原文 \\d+ 字符已截断|已截断\\(原文 \\d+ 字符|原文在 messages 表可按 id=)';
 
 const PH_B='(?:messages 表可按 id=|早期工具调用参数已折叠|早期执行轮次已(?:折叠|归档)|早期过程说明已压缩归档|早期步骤结果已压缩归档|已压缩归档；需要细节可用 db_query|上下文已裁剪中段 \\d+ 字符|历史消息过长已截断 \\d+ 字符)';
 const PH_RE = new RegExp(PH_A + '|' + PH_B + '|\\[(?:内容已截断|参数已省略|上下文已裁剪中段|历史消息过长已截断|原文 \\d+ 字符已截断)[^\\]]*\\]');
@@ -893,6 +893,14 @@ export async function summarizeConversation(cid, opts = {}) {
         ],
         { model: opts.model || 'deepseek-v4-flash', maxTokens: 800, timeoutMs: 90000 }, keys);
       summary = '【会话归档 v2 语义摘要】\n' + String(r.content || '').trim().slice(0, 4000);
+      // P25(O-27)：归档属旁路 LLM 消耗，入账（kind=summary，挂会话与账号）
+      try {
+        const cowner = (await db.query('SELECT account_id FROM conversations WHERE id=?', [conversationId]))[0];
+        const miss = r.cache_miss != null ? r.cache_miss : Math.max(0, (r.tokensIn || 0) - (r.cache_hit || 0));
+        const cost = calcCost(opts.provider || 'deepseek', { hit: r.cache_hit || 0, miss, out: r.tokensOut || 0 });
+        await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"summary")',
+          [cowner ? cowner.account_id : null, conversationId, opts.provider || 'deepseek', opts.model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, miss, cost, 0]);
+      } catch { /* 计量失败不影响 */ }
     } catch (e) { summary = '【会话归档 v2 语义摘要生成失败，回退结构化】' + (e.message || '').slice(0, 200); }
   }
   if (!summary) {

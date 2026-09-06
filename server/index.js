@@ -7,6 +7,7 @@ import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
 import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
+import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
@@ -145,20 +146,22 @@ app.get('/api/conversations', requireAuth, async (req, res) => {
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
-  const { title, permission, preset, provider, model } = req.body || {};
+  const { title, permission, preset, provider, model, project } = req.body || {};
   // P24(O-22) permission 服务端白名单：非法值拒绝（原实现无校验，非法字符串在 checkPerm 静默全拒易踩坑）
   const perm = permission === undefined || permission === null ? 'full' : String(permission);
   if (!['read', 'write', 'guard', 'full'].includes(perm)) {
     return res.status(400).json({ ok: false, message: 'permission 需为 read|write|guard|full' });
   }
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model) VALUES (?,?,?,?,?,?)',
+  // P25(O-25)：会话可指定 project（projects/<project>/AGENTS.md 项目记忆注入），缺省 default
+  const proj = project === undefined || project === null ? 'default' : String(project).replace(/[\\/.]/g, '_').slice(0, 60) || 'default';
+  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model, project) VALUES (?,?,?,?,?,?,?)',
     [req.user.id, title || '新对话', perm, ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
-      provider || null, model || null]);
+      provider || null, model || null, proj]);
   res.json({ ok: true, id: r.insertId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
-  const { title, permission, preset, provider, model } = req.body || {};
+  const { title, permission, preset, provider, model, project } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
   if (permission !== undefined) {
@@ -167,6 +170,7 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
     }
     set.push('permission=?'); params.push(permission);
   }
+  if (project !== undefined) { set.push('project=?'); params.push(String(project).replace(/[\\/.]/g, '_').slice(0, 60) || 'default'); }
   if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
   if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
   if (model !== undefined) { set.push('model=?'); params.push(model || null); }
@@ -253,7 +257,7 @@ app.get('/api/providers', requireAuth, async (req, res) => {
   });
 });
 
-// ---------- 对话（双路径） ----------
+// ---------- 对话 ----------
 // 普通对话不带 tools（模型自然回答，保持出厂自我认知）；检测到工具意图时走 Agent（function calling）
 const TOOL_INTENT_RE = /(查|读|写|改|找|搜|看|打开|列出|创建|删除|复制|移动|执行|运行|命令|终端|数据库|sql|git|提交|推送|拉取|测试|语法|上传|下载|文件|目录|文件夹|路径|pdf|word|excel|ppt|ocr|图片|识别|飞书|文档|网址|http|网页|搜索|代码|编码|编程|脚本|优化|重构|修复|调试|部署|配置|接入|厂商|模型|安装|升级|维护|统计|用量|分析|检查|调研|了解|探索|护栏|限制|轮巡|轮次|时间预算|set_limits|reload_platform|技能|知识库|记忆|子代理|定时任务|目标|代码库|自审|断点|心跳|挂起|继续任务|恢复任务|现场|shell|环境信息|长任务|规划|计划模式|规划模式|退出计划|按计划执行|开始实施|进入计划|只读规划|立项|契约|任务单|验收|复测)/i;
 
@@ -282,6 +286,15 @@ async function generateSummary(provider, earlyText, conversationId) {
     });
     const j = await res.json().catch(() => ({}));
     const summary = j.choices?.[0]?.message?.content || '';
+    // P25(O-27)：长对话摘要属旁路 LLM 消耗，入账（kind=summary），此前绕过 usage_stats
+    try {
+      const u = (j && j.usage) || {};
+      const cowner = (await db.query('SELECT account_id FROM conversations WHERE id=?', [conversationId]))[0];
+      const miss = u.prompt_cache_miss_tokens != null ? u.prompt_cache_miss_tokens : Math.max(0, (u.prompt_tokens || 0) - (u.prompt_cache_hit_tokens || 0));
+      const cost = calcCost(provider, { hit: u.prompt_cache_hit_tokens || 0, miss, out: u.completion_tokens || 0 });
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"summary")',
+        [cowner ? cowner.account_id : null, conversationId, provider, findProvider(provider)?.defaultModel || '', u.prompt_tokens || 0, u.completion_tokens || 0, u.prompt_cache_hit_tokens || 0, miss, cost, 0]);
+    } catch { /* 计量失败不影响 */ }
     if (summary) {
       await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, summary]);
       console.log('[summary] 会话 ' + conversationId + ' 摘要已生成');
@@ -317,10 +330,16 @@ function resolveRoute(content, provider, model, defOverrides) {
       return { provider, model: m, note: model && model !== '__auto__' ? '显式模型' : '显式厂商默认模型' };
     } catch { return { provider, model: model || '' }; }
   }
-  // 自动路由（provider=auto）：视觉需求 → 豆包视觉；含工具意图且需要执行 → 默认主力（deepseek 已支持工具）
+  // 自动路由（provider=auto）：视觉需求 → 豆包视觉；非视觉 → 默认主力。
+  // P25(O-28)：auto 分支读 settings default_models（P7"默认可配"对 auto 也生效），不再硬编码绕过配置
   let route;
-  if (VISION_RE.test(content)) route = { provider: 'ark', model: 'doubao-seed-2-0-mini-260428', note: '视觉任务→豆包视觉' };
-  else route = { provider: 'deepseek', model: 'deepseek-v4-flash', note: '自动→DeepSeek V4 Flash' };
+  if (VISION_RE.test(content)) {
+    const m = (defOverrides && defOverrides.ark) || 'doubao-seed-2-0-mini-260428';
+    route = { provider: 'ark', model: m, note: '视觉任务→豆包视觉' };
+  } else {
+    const m = (defOverrides && defOverrides.deepseek) || 'deepseek-v4-flash';
+    route = { provider: 'deepseek', model: m, note: '自动→DeepSeek V4 Flash' };
+  }
   // 目标厂商未配 Key 时回落主力（防自动路由把对话带到不可用厂商）
   try {
     const p = findProvider(route.provider);
@@ -368,9 +387,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
   await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conversationId]);
-  // 会话自动命名：标题仍为默认「新对话」时用首条用户消息自动起名（已手动重命名的跳过）
-  await db.query('UPDATE conversations SET title=LEFT(?,24) WHERE id=? AND (title IS NULL OR title=? OR title=?)',
-    [content.replace(/\s+/g, ' ').trim().slice(0, 40), conversationId, '新对话', '']);
+  // P25(O-24)：不再用首条消息 24 字符截断占位标题（曾致 LLM 自动标题恒 skip）——标题保持「新对话」，
+  // 由回复完成后的 LLM 自动标题生成；LLM 失败时 autotitle.js 内兜底截断（见 autotitle.js）
 
   // 组装历史（长对话压缩 P1-F8：>40 条用摘要 + 最近 30 条；摘要异步懒生成不阻塞对话）
   let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
@@ -434,8 +452,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
   } catch { /* 忽略 */ }
   // WS5c 项目自我说明（类 AGENTS.md）：projects/<project>/AGENTS.md 存在则注入（每任务必带的项目级事实）
+  // P25(O-25)：去掉 '!== default' 门——default 项目也可放 projects/default/AGENTS.md；存在才注入
   try {
-    if (convProject && convProject !== 'default') {
+    if (convProject) {
       const agp = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'projects', convProject, 'AGENTS.md');
       if (fs.existsSync(agp)) {
         const ag = fs.readFileSync(agp, 'utf8').slice(0, 16000);
@@ -557,7 +576,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           budgetRemain = Math.max(0, Number(total) - Number(spent.c || 0));
         }
       } catch { /* 预算查询失败不阻断（null=不限） */ }
-      // 5.3c 工具启用集（默认 25；settings toolset_enabled 覆盖；设置→工具 勾选）
+      // 5.3c 工具启用集（默认 28；settings toolset_enabled 覆盖；设置→工具 勾选）
       let enabledTools = null;
       try {
         const saved = await getSetting('toolset_enabled', null);

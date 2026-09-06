@@ -83,7 +83,7 @@ function lastUserTextOf(msgs) {
 // 每轮费用=真实三档计费（calcCost：hit/miss/out，见 llm/gateway.js PRICE；与平台账单加权单价对齐）
 
 // C1 轨迹瘦身：assistant tool_calls 回填上下文时，对超长 arguments 做分级截断（保留 id/name 骨架与字段名，
-// 细节全文始终在 DB tool_calls.args 可按 tool_call_id 精确查回）。执行与落库仍用原始 calls，仅上下文体积变小。
+// 细节库内 tool_calls.args 存前 2000 字符（tool_call_id 可 db_query 查），完整以实际产物/日志为准）。执行与落库仍用原始 calls，仅上下文体积变小。
 const SLIM_ARG_LEN = 600;  // arguments 总长超过此值才瘦身（短参数原样保留，如 read_file 路径）
 const SLIM_VAL_LEN = 200;  // 单个字段值超过此长度截断（典型：write_file/append_file 的 content、edit_file 的 new）
 function slimToolCallForContext(call) {
@@ -98,12 +98,12 @@ function slimToolCallForContext(call) {
       if (v == null) continue;
       const str = typeof v === 'string' ? v : JSON.stringify(v);
       if (str.length > SLIM_VAL_LEN) {
-        obj[k] = `[内容已截断(原文 ${str.length} 字符)；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+        obj[k] = `[内容已截断(原文 ${str.length} 字符)；库内 tool_calls 仅存前 2000 字符（可按 tool_call_id=${call.id} db_query 查询），完整以实际产物/日志为准]`;
       }
     }
     slim = JSON.stringify(obj);
   } catch {
-    slim = raw.slice(0, SLIM_ARG_LEN) + `…[原文 ${raw.length} 字符已截断；全文可按 tool_call_id=${call.id} 用 db_query 查 tool_calls.args]`;
+    slim = raw.slice(0, SLIM_ARG_LEN) + `…[原文 ${raw.length} 字符已截断；库内 tool_calls 仅存前 2000 字符（可按 tool_call_id=${call.id} db_query 查询），完整以实际产物/日志为准]`;
   }
   return { id: call.id, type: 'function', function: { name, arguments: slim } };
 }
@@ -128,7 +128,7 @@ function archiveEarlyContext(msgs) {
     else if (m.role === 'assistant' && m.tool_calls) { // C2 早期工具调用 arguments 折叠（保留 id/name 骨架维持 API 配对合法）
       for (const tc of m.tool_calls) {
         const a = String(tc.function?.arguments || '');
-        if (a.length > 120) tc.function.arguments = JSON.stringify({ _archived: true, note: '早期工具调用参数已折叠；全文可按 tool_call_id=' + tc.id + ' 用 db_query 查 tool_calls.args' });
+        if (a.length > 120) tc.function.arguments = JSON.stringify({ _archived: true, note: '早期工具调用参数已折叠；库内 tool_calls 仅存前 2000 字符（可按 tool_call_id=' + tc.id + ' db_query 查询），完整以实际产物/日志为准' });
       }
     }
   }
