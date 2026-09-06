@@ -78,7 +78,8 @@ export function disconnectMcp(id) {
 }
 
 export function listMcpClients() {
-  return [...clients.entries()].map(([id, cl]) => ({ id, tools: cl.tools.map((t) => t.name) }));
+  // 返回含完整工具定义（name/description/inputSchema）——syncMcpExtras 需 schema 生成 function calling 描述
+  return [...clients.entries()].map(([id, cl]) => ({ id, tools: cl.tools }));
 }
 
 // 调用 MCP 工具（execTool 层注册为 mcp_<id>_<tool>）

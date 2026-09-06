@@ -979,7 +979,7 @@ export async function execTool(name, args, ctx) {
   // P11 MCP fallback（2026-09 批5）：mcp_<serverId>_<toolName> 调用 → 转发到 MCP client（权限按 write 级评估）
   const mcpMatch = /^mcp_([a-zA-Z0-9_-]+)_(.+)$/.exec(name);
   if (mcpMatch) {
-    const { callMcpTool } = await import('./mcp.js');
+    const { callMcpTool } = await import('../mcp.js');
     const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
     const t0m = Date.now();
     let result;
