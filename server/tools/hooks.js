@@ -74,7 +74,8 @@ const DANGER_PATTERNS = [
   { re: /\bchmod\s+-R\s+777\s+(\/|~)/, why: '递归 chmod 777 根/家目录' },
 ];
 registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
-  const cmd = String((args && args.command) || '');
+  // O-4 修复（2026-09 批2）：run_command 实参键是 cmd（tools/index.js params），此前读 args.command → 从未触发
+  const cmd = String((args && (args.cmd ?? args.command)) || '');
   for (const p of DANGER_PATTERNS) {
     if (p.re.test(cmd)) {
       return { stop: true, reason: p.why + '（命中危险模式 ' + p.re + '）。请改用精确/受限目标重试；确需执行须 ask_user 请平台管理员确认' };
@@ -83,13 +84,24 @@ registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
   return {};
 }, { builtin: true, failClosed: true });
 
+// O-5 修复（2026-09 批2）：写类守卫只挂【写类工具】（write_file/append_file/edit_file/copy_move/delete_file/mkdir），
+// 不挂 '*'——此前 '*' 使 read_file 读 /etc 配置也被"写守卫"误拦（读不是写，无写入风险）。
+// 路径判定不做 path.resolve（Windows 下会把 /etc 变 E:\etc 破坏匹配；服务器是 Linux，直接按原样正则判定，
+// 同时把 \ 归一为 / 兜底）。工具实参可能是相对路径（工作区内）——相对路径不在系统区，直接放行。
 const SYSTEM_WRITE_RE = /^\/(etc|boot|bin|sbin|dev|proc|sys|root)(\/|$)|^\/usr\/(bin|sbin|lib(64)?)(\/|$)/;
-registerHook('before', '*', 'system_write_guard', ({ args }) => {
-  const p = args && typeof args.path === 'string' ? args.path : '';
-  if (!p) return {};
-  const abs = path.resolve(p);
-  if (SYSTEM_WRITE_RE.test(abs)) {
-    return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + abs + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
-  }
-  return {};
-}, { builtin: true, failClosed: true });
+const WRITE_PATH_TOOLS = ['write_file', 'append_file', 'edit_file', 'copy_move', 'delete_file', 'mkdir'];
+for (const w of WRITE_PATH_TOOLS) {
+  registerHook('before', w, 'system_write_guard', ({ args }) => {
+    // 写位置判定：write/edit/append/delete/mkdir 用 path；copy_move 目标是 dst（写点），src 仅读源不必拦
+    let p = '';
+    if (typeof args.path === 'string') p = args.path;
+    else if (w === 'copy_move' && typeof args.dst === 'string') p = args.dst;
+    else if (typeof args.src === 'string') p = args.src;
+    if (!p) return {};
+    const norm = p.replace(/\\/g, '/');
+    if (norm.startsWith('/') && SYSTEM_WRITE_RE.test(norm)) {
+      return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + p + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
+    }
+    return {};
+  }, { builtin: true, failClosed: true });
+}
