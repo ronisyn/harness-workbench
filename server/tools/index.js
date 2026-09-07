@@ -166,17 +166,21 @@ export const TOOLS = [
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else if (it.name.includes(a.name)) out.push(f); } };
       walk(root); return { matches: out.slice(0, 100) };
     } },
-  { name: 'grep_search', description: '在目录中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）', permission: 'read',
+  { name: 'grep_search', description: '在路径(目录或单文件)中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）', permission: 'read',
     params: { path: { type: 'string', required: false }, pattern: { type: 'string', required: true } },
     run: async (a, ctx) => {
       const root = a.path || ctx.root; const re = new RegExp(a.pattern); const matches = []; const files = [];
+      // 2026-09-08 自我进化: 单文件支持（原实现仅目录可搜，path=文件时 readdirSync 抛错被 catch 吞掉→恒空，连续 3 日复现）
+      const searchFile = (f) => {
+        if (!/\.(js|ts|jsx|tsx|md|json|yaml|yml|txt|html|css)$/.test(f)) return;
+        try { const lines = fs.readFileSync(f, 'utf8').split('\n'); let fileHit = false;
+          for (let i = 0; i < lines.length; i++) { if (re.test(lines[i])) { if (matches.length < 100) matches.push({ file: f, line: i + 1, text: lines[i].slice(0, 200) }); fileHit = true; } }
+          if (fileHit && files.length < 100) files.push(f); } catch { }
+      };
+      let st = null; try { st = fs.statSync(root); } catch { /* 路径不存在 → 与原来一致返回空 */ }
+      if (st && st.isFile()) { searchFile(root); return { matches, files }; }
       const walk = (d) => { let items = []; try { items = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-        for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); }
-          else if (/\.(js|ts|jsx|tsx|md|json|yaml|yml|txt|html|css)$/.test(it.name)) {
-            try { const lines = fs.readFileSync(f, 'utf8').split('\n'); let fileHit = false;
-              for (let i = 0; i < lines.length; i++) { if (re.test(lines[i])) { if (matches.length < 100) matches.push({ file: f, line: i + 1, text: lines[i].slice(0, 200) }); fileHit = true; } }
-              if (fileHit && files.length < 100) files.push(f); } catch { }
-          } } };
+        for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else searchFile(f); } };
       walk(root); return { matches, files };
     } },
   { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）', permission: 'read',
