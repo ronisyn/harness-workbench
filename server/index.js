@@ -200,7 +200,7 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   // ② 级联清理全部子表：原实现只删 messages，遗留 tool_calls/usage_stats/agent_runs 等孤儿（实测 tool_calls 77% 为孤儿），污染用量统计口径
   const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
-  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'bg_tasks', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts']) {
+  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'bg_tasks', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
     try {
       await db.query(`DELETE FROM ${t} WHERE ${t === 'task_contracts' ? 'conv_id' : 'conversation_id'}=?`, [req.params.id]);
     } catch { /* 个别表未建则跳过 */ }
