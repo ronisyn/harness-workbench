@@ -29,11 +29,11 @@ export function validatePack(raw) {
   const unknown = Object.keys(raw).filter((k) => !PACK_ALLOWED_KEYS.includes(k));
   const warnings = unknown.map((k) => `未知字段(收容): ${k}`);
   // 类型与枚举的轻校验（只做最必要约束；细部在 B 系列实施期校验器扩展）
-  const num = (p, name) => { const x = p && p[name]; if (x !== undefined && (typeof x !== 'number' || !Number.isFinite(x) || x < 0)) errors.push(`${name} 需为 ≥0 的数字`); };
+  const num = (p, name) => { const x = p && p[name]; if (x !== undefined && x !== null && (typeof x !== 'number' || !Number.isFinite(x) || x < 0)) errors.push(`${name} 需为 ≥0 的数字或空`); };
   const arr = (p, name, what) => { const x = p && p[name]; if (x !== undefined && !Array.isArray(x)) errors.push(`${name} 需为数组（${what}）`); };
   const m = raw.modelPolicy || {};
   num(m, 'budgetYuan'); num(m, 'qualityCostBias');
-  if (m.qualityCostBias !== undefined && (m.qualityCostBias > 10)) errors.push('qualityCostBias 需 ≤10');
+  if (m.qualityCostBias != null && (typeof m.qualityCostBias !== 'number' || m.qualityCostBias < 0 || m.qualityCostBias > 10)) errors.push('qualityCostBias 需为 0-10 的数字或空');
   const t = raw.tools || {};
   if (t.presetBase !== undefined && !['minimal', 'standard', 'all'].includes(t.presetBase)) errors.push('tools.presetBase 需为 minimal|standard|all');
   arr(t, 'forceOn', '工具名'); arr(t, 'forceOff', '工具名');

@@ -40,6 +40,10 @@ test('中性壳 persona 为 null；空字符串→null', () => {
   assert.equal(row.persona, null);
 });
 
+test('qualityCostBias 允许空(null)（rowToPack/clone 用）', () => {
+  assert.equal(validatePack({ shellPackVersion: 1, key: 'code', name: 'x', modelPolicy: { qualityCostBias: null } }).ok, true);
+});
+
 test('默认壳 key 常量', () => {
   assert.equal(SHELL_DEFAULT_KEY, 'default');
   assert.equal(isKeyOk('default'), true);
