@@ -35,7 +35,11 @@ export default function App() {
   const [convParam, setConvParam] = useState('');
 
   // 登录后默认落总览首页（D4）；已登录直接访问 /chat?conv= /console/* 直达
-  const enterChat = (convId) => { setConvParam(convId || ''); go(convId ? '/chat?conv=' + convId : '/chat'); };
+  const enterChat = (convId, draft) => {
+    setConvParam(convId || '');
+    if (convId && draft) { try { sessionStorage.setItem('rw_draft_' + convId, draft); } catch { /* ignore */ } }
+    go(convId ? '/chat?conv=' + convId : '/chat');
+  };
   const enterConsole = (board) => { go(board ? '/console/' + board : '/console'); };
 
   useEffect(() => {

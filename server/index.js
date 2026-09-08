@@ -17,6 +17,7 @@ import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk } from './templates.js';
+import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -1358,6 +1359,26 @@ app.post('/api/templates/:key/prompt', requireAuth, async (req, res) => {
   await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:prompt', req.params.key]);
   res.json({ ok: true, prompt });
 });
+// 共用：把 profile 片段 + skills 装配进指定壳（templates apply / apps launch 共用；同 key 覆盖、异 key 追加、技能 allow 去重）
+async function ensureProfileOnShell(shellKey, frag, skills) {
+  const sh = (await db.query('SELECT id, skey, task_profiles, skills_allow FROM shells WHERE skey=? AND status="enabled"', [shellKey]))[0];
+  if (!sh) return { error: '壳不存在或未启用' };
+  let profiles = [];
+  try { profiles = typeof sh.task_profiles === 'string' ? JSON.parse(sh.task_profiles) : (sh.task_profiles || []); } catch { profiles = []; }
+  if (!Array.isArray(profiles)) profiles = [];
+  if (frag) {
+    const idx = profiles.findIndex((p) => p && p.key === frag.key);
+    if (idx >= 0) profiles[idx] = { ...profiles[idx], ...frag }; else profiles.push(frag);
+  }
+  let skillsAllow = [];
+  try { skillsAllow = typeof sh.skills_allow === 'string' ? JSON.parse(sh.skills_allow) : (sh.skills_allow || []); } catch { skillsAllow = []; }
+  if (!Array.isArray(skillsAllow)) skillsAllow = [];
+  for (const s of (Array.isArray(skills) ? skills : [])) if (!skillsAllow.includes(s)) skillsAllow.push(s);
+  await db.query('UPDATE shells SET task_profiles=?, skills_allow=?, updated_at=NOW() WHERE id=?',
+    [JSON.stringify(profiles), JSON.stringify(skillsAllow), sh.id]);
+  return { shellId: sh.id, profiles: profiles.length, skills: skillsAllow.length };
+}
+
 // 应用至壳：模板的 taskProfile（+skills.allow 并入）装配到指定壳 → 壳内会话点名该档案即按模板生效
 app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
   try {
@@ -1367,24 +1388,46 @@ app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
     if (!frag) return res.status(400).json({ ok: false, message: '模板缺少可用 taskProfile' });
     const shellKey = String((req.body || {}).shellKey || '').trim();
     if (!isTplKeyOk(shellKey)) return res.status(400).json({ ok: false, message: 'shellKey 非法' });
-    const sh = (await db.query('SELECT id, skey, task_profiles, skills_allow FROM shells WHERE skey=? AND status="enabled"', [shellKey]))[0];
-    if (!sh) return res.status(404).json({ ok: false, message: '壳不存在或未启用（default 壳不装配模板档案）' });
     if (shellKey === 'default') return res.status(400).json({ ok: false, message: 'default 保留壳不可装配' });
-    // 档案合并：同 key 覆盖，新增追加（去重）
-    let profiles = [];
-    try { profiles = typeof sh.task_profiles === 'string' ? JSON.parse(sh.task_profiles) : (sh.task_profiles || []); } catch { profiles = []; }
-    if (!Array.isArray(profiles)) profiles = [];
-    const idx = profiles.findIndex((p) => p && p.key === frag.key);
-    if (idx >= 0) profiles[idx] = { ...profiles[idx], ...frag }; else profiles.push(frag);
-    // 技能 allow 并入（去重）
-    let skillsAllow = [];
-    try { skillsAllow = typeof sh.skills_allow === 'string' ? JSON.parse(sh.skills_allow) : (sh.skills_allow || []); } catch { skillsAllow = []; }
-    if (!Array.isArray(skillsAllow)) skillsAllow = [];
-    for (const s of (Array.isArray(t.skills) ? t.skills : [])) if (!skillsAllow.includes(s)) skillsAllow.push(s);
-    await db.query('UPDATE shells SET task_profiles=?, skills_allow=?, updated_at=NOW() WHERE id=?',
-      [JSON.stringify(profiles), JSON.stringify(skillsAllow), sh.id]);
+    const r = await ensureProfileOnShell(shellKey, frag, t.skills);
+    if (r.error) return res.status(404).json({ ok: false, message: r.error });
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:apply', 'template=' + req.params.key + ' shell=' + shellKey + ' profile=' + frag.key]);
-    res.json({ ok: true, shellKey, profile: frag.key, profiles: profiles.length, skills: skillsAllow.length });
+    res.json({ ok: true, shellKey, profile: frag.key, profiles: r.profiles, skills: r.skills });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- D9 应用形态 v1 API（壳内启动式应用；§6.5/D9：apps/<key>/app.json 随仓库 git） ----------
+app.get('/api/apps', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, apps: listApps() }); }
+  catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.get('/api/apps/:key', requireAuth, async (req, res) => {
+  const a = getApp(req.params.key);
+  if (!a) return res.status(404).json({ ok: false, message: '应用不存在' });
+  res.json({ ok: true, app: a });
+});
+// 启动应用：可选把 entryProfile+skills 装配到目标壳 → 建挂壳会话（title=应用名）→ 返回 conversationId + 启动草稿
+// （草稿由前端填入对话页输入框供用户编辑后发送 = 应用语境进入本轮；不建第二套会话体系）
+app.post('/api/apps/:key/launch', requireAuth, async (req, res) => {
+  try {
+    const a = getApp(req.params.key);
+    if (!a) return res.status(404).json({ ok: false, message: '应用不存在' });
+    // 目标壳：body.shellKey > app.targetShell；default 壳语义=不装配档案、会话不挂壳
+    let shellKey = String((req.body || {}).shellKey || '').trim() || (a.targetShell || '');
+    shellKey = shellKey && shellKey !== 'default' ? shellKey : '';
+    let shellId = null;
+    if (shellKey) {
+      if (!isAppKeyOk(shellKey)) return res.status(400).json({ ok: false, message: 'shellKey 非法' });
+      const frag = toAppProfileFragment(a);
+      const r = await ensureProfileOnShell(shellKey, frag, a.skills);
+      if (r.error) return res.status(404).json({ ok: false, message: r.error });
+      shellId = r.shellId;
+    }
+    const c = await db.query('INSERT INTO conversations (account_id, title, permission, preset, shell_id) VALUES (?,?,?,?,?)',
+      [req.user.id, String(a.name || a.key).slice(0, 60), 'full', 'all', shellId]);
+    const draft = buildLaunchDraft(a, (req.body || {}).goal || '');
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'app:launch', 'app=' + a.key + (shellKey ? ' shell=' + shellKey : '') + ' conv=' + c.insertId]);
+    res.json({ ok: true, conversationId: c.insertId, shellKey: shellKey || null, draft });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 

@@ -79,6 +79,10 @@ export const api = {
   templateGet: (key) => request('/api/templates/' + encodeURIComponent(key)),
   templatePrompt: (key, goal) => request('/api/templates/' + encodeURIComponent(key) + '/prompt', { method: 'POST', body: JSON.stringify({ goal }) }),
   templateApply: (key, shellKey) => request('/api/templates/' + encodeURIComponent(key) + '/apply', { method: 'POST', body: JSON.stringify({ shellKey }) }),
+  // D9 应用形态
+  apps: () => request('/api/apps'),
+  appGet: (key) => request('/api/apps/' + encodeURIComponent(key)),
+  appLaunch: (key, body) => request('/api/apps/' + encodeURIComponent(key) + '/launch', { method: 'POST', body: JSON.stringify(body || {}) }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

@@ -8,7 +8,7 @@ import ModelPlazaBoard from './ModelPlaza.jsx';
 import ShellDevBoard from './ShellDev.jsx';
 import CapsBoard from './CapsBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
-import TemplateBoard from './TemplateBoard.jsx';
+import AppsBoard from './AppsBoard.jsx';
 
 // 板块注册表：code → { group, label, render }
 export const BOARDS = {
@@ -17,7 +17,7 @@ export const BOARDS = {
   'agent-dev': { group: 'Agent', label: '1.3 Agent 开发（壳）', render: () => <ShellDevBoard /> },
   'agent-caps': { group: 'Agent', label: '1.4 Agent 能力', render: () => <CapsBoard /> },
   'agent-evo': { group: 'Agent', label: '1.5 Agent 进化', render: () => <EvoBoard /> },
-  'agent-apps': { group: 'Agent', label: '1.6 Agent 广场（应用）', render: () => <TemplateBoard /> },
+  'agent-apps': { group: 'Agent', label: '1.6 Agent 广场（应用）', render: () => <AppsBoard /> },
   'kb': { group: '知识库', label: '1.7 知识库', render: () => <KbBoard /> },
   'settings': { group: '系统', label: '1.8 设置', render: () => <SettingsBoard /> },
 };

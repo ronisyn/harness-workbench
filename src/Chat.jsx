@@ -217,14 +217,23 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     }).catch(() => {});
   }, [loadConvs]);
 
-  // M1：从总览首页直达会话（/chat?conv=<id>）——convs 加载完成后打开指定会话一次
+  // M1/D9：从总览首页/应用广场直达会话（/chat?conv=<id>）——convs 加载完成后打开指定会话一次；
+  // 应用启动草稿经 sessionStorage(rw_draft_<id>) 传递 → 打开后预填输入框（用户可编辑再发送）
   const autoOpenedRef = useRef(false);
   useEffect(() => {
     if (initialConvId && convs.length && !autoOpenedRef.current) {
       autoOpenedRef.current = true;
       const target = convs.find((c) => c.id === Number(initialConvId));
-      if (target) openConv(target.id);
-      else { setCurTitle('会话不存在或已删除'); }
+      if (target) {
+        openConv(target.id);
+        try {
+          const draft = sessionStorage.getItem('rw_draft_' + initialConvId);
+          if (draft) {
+            sessionStorage.removeItem('rw_draft_' + initialConvId);
+            setInput(draft); inputRef.current = draft;
+          }
+        } catch { /* ignore */ }
+      } else { setCurTitle('会话不存在或已删除'); }
     }
   }, [initialConvId, convs, loadMessages]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -1,0 +1,23 @@
+{
+  "appVersion": 1,
+  "key": "biz-eval",
+  "name": "商业模式评估",
+  "description": "业务单元示例（跨代码域应用）：给定一个商业想法，按固定框架评估市场/价值/壁垒/可行性与下一步。",
+  "targetShell": null,
+  "persona": "你是一位审慎的商业模式顾问：评估时先澄清输入、再给结构化结论，不编造市场数据（缺失标注需调研）。",
+  "entryProfile": {
+    "key": "biz-eval",
+    "name": "商业模式评估",
+    "match": ["商业模式评估", "biz eval"],
+    "modelHint": { "defaultProvider": "deepseek", "defaultModel": "deepseek-v4-pro", "qualityCostBias": 5 }
+  },
+  "skills": [],
+  "acceptance": {
+    "checks": [
+      "对给定想法给出：一句话定位、目标客群、价值主张、市场规模判断（或标注数据缺口）、壁垒与风险、MVP 与下一步",
+      "每一项有理由或标注假设，不编造数据",
+      "结论可执行：给出 3 个以内明确下一步"
+    ]
+  },
+  "openingPrompt": "按【商业模式评估】应用开始：请先陈述你的商业想法（一句话+目标用户+当前阶段）；若已有资料可一并说明，我按框架评估并给下一步。"
+}
