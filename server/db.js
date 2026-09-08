@@ -299,6 +299,7 @@ const SCHEMA = [
     guardrails JSON,
     channels JSON,
     ui_brand JSON,
+    pack_extra JSON,
     eval_ref VARCHAR(255),
     status VARCHAR(10) DEFAULT 'enabled',
     created_at DATETIME DEFAULT NOW(),
@@ -377,6 +378,9 @@ export async function initSchema() {
     'ALTER TABLE shells ADD COLUMN task_profiles JSON',
     // ④：知识库壳私有维度（scope=shell 条目挂所属壳；存量行 shell_id=NULL 不受影响）
     'ALTER TABLE knowledge ADD COLUMN shell_id INT NULL',
+    // F2 往返保真：DB 无列承载的 pack 扩展字段（tone/terms/mcps/defaultsAutoLoad/approvalMode/bindings/importRefs/credentials 等）
+    // 存 pack_extra（import 写入 / export/clone 合并还原），避免 clone/export→import→export 丢字段
+    'ALTER TABLE shells ADD COLUMN pack_extra JSON',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); }

@@ -456,13 +456,36 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认
   let defOverrides = null;
   try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
+  // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
+  // 一次读取壳全字段：persona/domain/intent_rules/task_profiles/model_policy/tools —— 路由三级(档案/壳默认)与预算共用，避免多查询
+  const convShellId = convs[0].shell_id || null;
+  let convShellCtx = null;
+  let shellIntentRules = null;
+  let shellTaskProfiles = null;
+  let shellModelPolicy = null; // 壳默认模型（三级路由第三级；§6.2 壳默认）
+  let shellBudgetYuan = null;  // 壳级成本预算上限（§8 叠加生效：壳上限可收紧，不高于全局）
+  let shellToolsOn = [], shellToolsOff = [];
+  if (convShellId) {
+    try {
+      const sr = (await db.query('SELECT skey, persona, domain_text, intent_rules, task_profiles, model_policy FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
+      convShellCtx = sr ? shellContext(sr) : null;
+      if (sr) {
+        if (sr.intent_rules != null) shellIntentRules = sr.intent_rules;
+        if (sr.task_profiles != null) shellTaskProfiles = sr.task_profiles;
+        if (sr.model_policy != null) {
+          try { const mp = typeof sr.model_policy === 'string' ? JSON.parse(sr.model_policy) : sr.model_policy; shellModelPolicy = mp && typeof mp === 'object' ? mp : null; } catch { shellModelPolicy = null; }
+          if (shellModelPolicy) shellBudgetYuan = Number(shellModelPolicy.budgetYuan) > 0 ? Number(shellModelPolicy.budgetYuan) : null;
+        }
+      }
+      const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
+      for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
+    } catch { convShellCtx = null; }
+  }
   // B3：任务档案点名（仅"显式点名"，不自动猜；C4 显式模型=绝对锁，本层不覆盖）
   let profileSuggestion = null;
-  if (convs[0].shell_id && !wantProvider && !wantModel) {
+  if (convShellId && !wantProvider && !wantModel && shellTaskProfiles != null) {
     try {
-      const pRow = (await db.query('SELECT task_profiles FROM shells WHERE id=? AND status="enabled"', [convs[0].shell_id]))[0];
-      const profs = (pRow && pRow.task_profiles) || null;
-      const hit = resolveTaskProfile(content, profs || undefined);
+      const hit = resolveTaskProfile(content, shellTaskProfiles || undefined);
       if (hit && hit.profile && hit.profile.modelHint && hit.profile.modelHint.defaultProvider) {
         const cand = findProvider(hit.profile.modelHint.defaultProvider);
         if (cand && config.keys[cand.keyEnv]) {
@@ -473,6 +496,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         }
       }
     } catch { profileSuggestion = null; }
+  }
+  // 三级路由第三级：壳默认（档案未命中、仍无显式时才应用；无 modelPolicy/无 key → 跳过回落全局 auto）
+  if (!wantProvider && !wantModel && shellModelPolicy && shellModelPolicy.defaultProvider) {
+    const cand = findProvider(shellModelPolicy.defaultProvider);
+    const mdl = shellModelPolicy.defaultModel || (cand && cand.defaultModel) || '';
+    if (cand && config.keys[cand.keyEnv] && mdl) {
+      wantProvider = cand.id;
+      wantModel = mdl;
+      if (!profileSuggestion) profileSuggestion = { key: null, name: null, provider: cand.id, model: mdl, qualityCostBias: shellModelPolicy.qualityCostBias == null ? null : shellModelPolicy.qualityCostBias, shellDefault: true };
+    }
   }
   const route = resolveRoute(content, wantProvider || 'auto', wantModel || '__auto__', defOverrides);
   provider = route.provider;
@@ -491,20 +524,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const convMode = convs[0].mode || 'chat';
   const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
   const convProject = convs[0].project || 'default';
-  // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
-  const convShellId = convs[0].shell_id || null;
-  let convShellCtx = null;
-  let shellIntentRules = null;
-  let shellToolsOn = [], shellToolsOff = [];
-  if (convShellId) {
-    try {
-      const sr = (await db.query('SELECT skey, persona, domain_text, intent_rules FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
-      convShellCtx = sr ? shellContext(sr) : null;
-      if (sr && sr.intent_rules != null) shellIntentRules = sr.intent_rules;
-      const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
-      for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
-    } catch { convShellCtx = null; }
-  }
 
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
@@ -678,13 +697,21 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         [req.user.id, 'intent:' + cl.label, redactSecrets(detail).slice(0, 900), convShellId]);
     }
   } catch { /* 意图事件失败不影响对话 */ }
-  // B3：任务档案路由灰字事件（档案点名生效时；显式模型优先不受影响；不入消息正文/导出）
+  // B3/壳默认：路由灰字事件（档案点名或壳默认生效时；显式模型优先不受影响；不入消息正文/导出）
   if (profileSuggestion) {
     try {
-      send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
-      const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) });
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-        [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId]);
+      if (profileSuggestion.shellDefault) {
+        // 第三级壳默认（§6.2）：会话无显式、未点名档案时按壳 modelPolicy 路由
+        send({ type: 'route', profile: null, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '🧩 壳默认模型：本会话按壳默认使用 ' + profileSuggestion.model + '（显式选模型可覆盖）' });
+        const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, shellDefault: true });
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
+          [req.user.id, 'route:shell-default', redactSecrets(detail).slice(0, 900), convShellId]);
+      } else {
+        send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
+        const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) });
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
+          [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId]);
+      }
     } catch { /* 路由事件失败不影响对话 */ }
   }
 
@@ -739,7 +766,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff };
+      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
       let teleBase = null;

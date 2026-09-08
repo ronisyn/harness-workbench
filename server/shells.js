@@ -74,10 +74,55 @@ export function packToRow(pack) {
     guardrails: JSON.stringify((pack.guardrails && pack.guardrails.accessRules) || []),
     channels: JSON.stringify((pack.channels && pack.channels.domainHosts) || []),
     ui_brand: pack.uiBrand ? JSON.stringify(pack.uiBrand) : null,
+    pack_extra: JSON.stringify(extractPackExtra(pack)),
     eval_ref: (pack.eval && pack.eval.goldenSetRef) || null,
     intent_rules: pack.intentRules ? JSON.stringify(pack.intentRules) : null,
     task_profiles: pack.taskProfiles ? JSON.stringify(pack.taskProfiles) : null,
   };
+}
+
+// 提取 DB 无独立列的 pack 扩展字段（往返保真：clone/export→import→export 不丢——F2）
+// 这些字段随 pack 语义存在（§3.1），DB 仅以 pack_extra 整体镜像；运行时消费见"壳包字段接线状态表"（部分后置）
+export function extractPackExtra(pack) {
+  const id = pack.identity || {};
+  const t = pack.tools || {};
+  const k = pack.knowledge || {};
+  const sk = pack.skills || {};
+  const g = pack.guardrails || {};
+  const ch = pack.channels || {};
+  const extra = {};
+  if (pack.shellPackVersion !== undefined) extra.shellPackVersion = pack.shellPackVersion;
+  if (id.tone) extra.tone = id.tone;
+  if (Array.isArray(id.forbidden) && id.forbidden.length) extra.forbidden = id.forbidden;
+  if (Array.isArray(pack.domain?.terms) && pack.domain.terms.length) extra.domainTerms = pack.domain.terms;
+  if (Array.isArray(t.mcps) && t.mcps.length) extra.mcps = t.mcps;
+  if (Array.isArray(t.connectors) && t.connectors.length) extra.connectors = t.connectors;
+  if (Array.isArray(k.importRefs) && k.importRefs.length) extra.kbImportRefs = k.importRefs;
+  if (Array.isArray(sk.defaultsAutoLoad) && sk.defaultsAutoLoad.length) extra.defaultsAutoLoad = sk.defaultsAutoLoad;
+  if (g.approvalMode && g.approvalMode !== 'default') extra.approvalMode = g.approvalMode;
+  if (Array.isArray(g.sensitiveDefaults) && g.sensitiveDefaults.length) extra.sensitiveDefaults = g.sensitiveDefaults;
+  if (ch.bindings && Object.keys(ch.bindings).length) extra.channelBindings = ch.bindings;
+  if (pack.credentials && Object.keys(pack.credentials).length) extra.credentials = pack.credentials;
+  return extra;
+}
+
+// pack_extra → 与 rowToPack 输出合并
+export function mergePackExtra(row, out) {
+  const ex = jsafe(row && row.pack_extra, null);
+  if (!ex || typeof ex !== 'object') return out;
+  if (ex.shellPackVersion !== undefined) out.shellPackVersion = ex.shellPackVersion;
+  if (ex.tone !== undefined) out.identity.tone = ex.tone;
+  if (Array.isArray(ex.forbidden)) out.identity.forbidden = ex.forbidden;
+  if (Array.isArray(ex.domainTerms)) out.domain.terms = ex.domainTerms;
+  if (Array.isArray(ex.mcps)) out.tools.mcps = ex.mcps;
+  if (Array.isArray(ex.connectors)) out.tools.connectors = ex.connectors;
+  if (Array.isArray(ex.kbImportRefs)) out.knowledge.importRefs = ex.kbImportRefs;
+  if (Array.isArray(ex.defaultsAutoLoad)) out.skills.defaultsAutoLoad = ex.defaultsAutoLoad;
+  if (ex.approvalMode) out.guardrails.approvalMode = ex.approvalMode;
+  if (Array.isArray(ex.sensitiveDefaults)) out.guardrails.sensitiveDefaults = ex.sensitiveDefaults;
+  if (ex.channelBindings) out.channels.bindings = ex.channelBindings;
+  if (ex.credentials) out.credentials = ex.credentials;
+  return out;
 }
 
 // 壳行 → 三态工具集（force_on/force_off 提取；供 B 系列工具解析层使用）
@@ -97,7 +142,7 @@ export function shellContext(row) {
 // 壳行 → pack 对象（供 clone/export；JSON 字段兼容已解析值）
 export function rowToPack(row) {
   const mp = jsafe(row.model_policy, {}) || {};
-  return {
+  const out = {
     shellPackVersion: 1,
     key: row.skey,
     name: row.name,
@@ -114,4 +159,8 @@ export function rowToPack(row) {
     intentRules: jsafe(row.intent_rules, null) || undefined,
     taskProfiles: jsafe(row.task_profiles, null) || undefined,
   };
+  // uiBrand 与 pack_extra（DB 无独立列的扩展字段）补回——F2 往返保真
+  const ub = jsafe(row.ui_brand, null);
+  if (ub && typeof ub === 'object' && Object.keys(ub).length) out.uiBrand = ub;
+  return mergePackExtra(row, out);
 }

@@ -921,7 +921,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                   <span className="rw-sysline-tag">意图</span>{sysline.intent.echo || sysline.intent.label}
                 </span>
               )}
-              {sysline.route && sysline.route.profile && (
+              {(sysline.route) && (sysline.route.profile || sysline.route.suggestProvider) && (
                 <span className="rw-sysline-route">
                   <span className="rw-sysline-tag">路由</span>{sysline.route.echo || ('已按档案 ' + sysline.route.profile + ' 使用 ' + sysline.route.suggestModel)}
                   {cur && <button className="rw-btn rw-sysline-revert" onClick={revertToDefault} title="清除本会话显式模型选择，回落自动路由">↩ 退回默认</button>}

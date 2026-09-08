@@ -19,21 +19,21 @@ export async function importShell(pack) {
   const existing = await getShellByKey(row.skey);
   if (existing) {
     await db.query(
-      `UPDATE shells SET name=?, description=?, persona=?, domain_text=?, model_policy=?, tools_preset=?, tools_force_on=?, tools_force_off=?, knowledge_scopes=?, skills_allow=?, guardrails=?, channels=?, ui_brand=?, eval_ref=?, intent_rules=?, task_profiles=?, updated_at=NOW() WHERE id=?`,
+      `UPDATE shells SET name=?, description=?, persona=?, domain_text=?, model_policy=?, tools_preset=?, tools_force_on=?, tools_force_off=?, knowledge_scopes=?, skills_allow=?, guardrails=?, channels=?, ui_brand=?, pack_extra=?, eval_ref=?, intent_rules=?, task_profiles=?, updated_at=NOW() WHERE id=?`,
       [row.name, row.description, row.persona, row.domain_text, row.model_policy, row.tools_preset,
         row.tools_force_on, row.tools_force_off, row.knowledge_scopes, row.skills_allow, row.guardrails,
-        row.channels, row.ui_brand, row.eval_ref, row.intent_rules, row.task_profiles, existing.id]
+        row.channels, row.ui_brand, row.pack_extra, row.eval_ref, row.intent_rules, row.task_profiles, existing.id]
     );
     const id = existing.id;
     await replaceTools(id, row);
     return { id, key: row.skey, mode: 'updated' };
   }
   const r = await db.query(
-    `INSERT INTO shells (skey, name, description, persona, domain_text, model_policy, tools_preset, tools_force_on, tools_force_off, knowledge_scopes, skills_allow, guardrails, channels, ui_brand, eval_ref, intent_rules, task_profiles, status, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
+    `INSERT INTO shells (skey, name, description, persona, domain_text, model_policy, tools_preset, tools_force_on, tools_force_off, knowledge_scopes, skills_allow, guardrails, channels, ui_brand, pack_extra, eval_ref, intent_rules, task_profiles, status, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),NOW())`,
     [row.skey, row.name, row.description, row.persona, row.domain_text, row.model_policy, row.tools_preset,
       row.tools_force_on, row.tools_force_off, row.knowledge_scopes, row.skills_allow, row.guardrails,
-      row.channels, row.ui_brand, row.eval_ref, row.intent_rules, row.task_profiles, 'enabled']
+      row.channels, row.ui_brand, row.pack_extra, row.eval_ref, row.intent_rules, row.task_profiles, 'enabled']
   );
   await replaceTools(r.insertId, row);
   return { id: r.insertId, key: row.skey, mode: 'created' };

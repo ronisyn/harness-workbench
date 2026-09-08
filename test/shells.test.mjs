@@ -62,3 +62,35 @@ test('默认壳 key 常量', () => {
   assert.equal(isKeyOk('ab'), true);
   assert.equal(isKeyOk('A b'), false);
 });
+
+test('F2 pack 往返保真：tone/terms/uiBrand/importRefs/mcps 等 export→import→export 不丢', () => {
+  const pack = {
+    shellPackVersion: 1, key: 'rt', name: '往返', description: 'd',
+    identity: { persona: 'p', tone: '直接', forbidden: ['A'] },
+    domain: { agendsText: 'x', terms: ['t1'] },
+    modelPolicy: { defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-flash', allowModels: [], budgetYuan: 0, qualityCostBias: 3 },
+    tools: { presetBase: 'standard', forceOn: [], forceOff: ['run_command'], mcps: [{ id: 'm1' }], connectors: [{ id: 'c1' }] },
+    knowledge: { scopes: ['global'], importRefs: ['ref1.md'] },
+    skills: { allow: [], defaultsAutoLoad: ['task-approach'] },
+    guardrails: { accessRules: [], approvalMode: 'strict', sensitiveDefaults: ['run_command'] },
+    channels: { domainHosts: [], bindings: { wechat: 'x' } },
+    uiBrand: { title: '品牌' },
+    credentials: { ref: 'env:XXX' },
+    intentRules: { do: ['修'] }, taskProfiles: [],
+  };
+  // pack → row → pack（模拟 import→export 语义）
+  const row = packToRow(pack);
+  const back = rowToPack(row);
+  assert.equal(back.identity.tone, '直接');
+  assert.deepEqual(back.identity.forbidden, ['A']);
+  assert.deepEqual(back.domain.terms, ['t1']);
+  assert.deepEqual(back.tools.mcps, [{ id: 'm1' }]);
+  assert.deepEqual(back.tools.connectors, [{ id: 'c1' }]);
+  assert.deepEqual(back.knowledge.importRefs, ['ref1.md']);
+  assert.deepEqual(back.skills.defaultsAutoLoad, ['task-approach']);
+  assert.equal(back.guardrails.approvalMode, 'strict');
+  assert.deepEqual(back.channels.bindings, { wechat: 'x' });
+  assert.deepEqual(back.uiBrand, { title: '品牌' });
+  assert.deepEqual(back.credentials, { ref: 'env:XXX' });
+  assert.deepEqual(back.tools.forceOff, ['run_command']);
+});

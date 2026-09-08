@@ -348,10 +348,15 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     // 护栏每轮读取（5s 缓存防 DB 风暴）：预算/轮次用最新值判定，快照与判定同源
     const lim = await agentLimits();
-    // 5.7 预算融合：段知情阈值（task_budget_yuan）× 会话 24h 剩余（task_budget_total 总账，index.js 注入 __budgetRemain）
-    const effBudgetYuan = (ctx.__budgetRemain != null && ctx.__budgetRemain >= 0)
-      ? (lim.budgetYuan > 0 ? Math.min(lim.budgetYuan, ctx.__budgetRemain) : ctx.__budgetRemain)
-      : lim.budgetYuan;
+    // 5.7 预算融合：段知情阈值（task_budget_yuan，可叠加壳级 modelPolicy.budgetYuan 收紧——§8"壳上限可收紧、不高于全局语义"）
+    // 壳上限仅当壳显式配置 >0 时参与；min(全局段阈值, 壳上限, 会话 24h 剩余)
+    let shellCap = ctx.__shellBudgetYuan != null ? ctx.__shellBudgetYuan : 0;
+    const effBudgetYuan = (() => {
+      let v = lim.budgetYuan;
+      if (shellCap > 0) v = v > 0 ? Math.min(v, shellCap) : shellCap;
+      if (ctx.__budgetRemain != null && ctx.__budgetRemain >= 0) v = v > 0 ? Math.min(v, ctx.__budgetRemain) : ctx.__budgetRemain;
+      return v;
+    })();
     if (ctx.__budgetRemain === 0) {
       return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total' };
     }
