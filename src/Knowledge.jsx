@@ -9,7 +9,7 @@ const SCOPES = [
   { v: 'shell', lb: '壳私有（仅所选壳的会话可见）' },
 ];
 
-export default function Knowledge({ onClose }) {
+export default function Knowledge({ onClose, embedded }) {
   const [shells, setShells] = useState([]);     // 可写壳目标（enabled 且非 default）
   const [scope, setScope] = useState('global');
   const [shellKey, setShellKey] = useState('');
@@ -76,6 +76,75 @@ export default function Knowledge({ onClose }) {
     try { await api.knowledgeDelete(id); loadList(); }
     catch (e) { setErr(e.message); }
   };
+
+  if (embedded) {
+    return (
+      <div className="rw-kb-embed">
+        <div className="rw-kb-embed-body">
+          {/* 上传链 */}
+          <div className="rw-cap-group">
+            <div className="rw-cap-gtitle">上传 → 解析入库（xlsx/csv 行结构化 / txt/md 分段 / json 数组）</div>
+            <label className="rw-cap-item col">
+              <span style={{ marginBottom: 4 }}>归属</span>
+              <select className="rw-select" value={scope} onChange={(e) => setScope(e.target.value)}>
+                {SCOPES.map((s) => <option key={s.v} value={s.v}>{s.lb}</option>)}
+              </select>
+            </label>
+            {scope === 'shell' && (
+              <label className="rw-cap-item col">
+                <span style={{ marginBottom: 4 }}>目标壳（壳私有仅该壳会话可见）</span>
+                <select className="rw-select" value={shellKey} onChange={(e) => setShellKey(e.target.value)}>
+                  {shells.length === 0 && <option value="">（无可用壳）</option>}
+                  {shells.map((s) => <option key={s.skey} value={s.skey}>{s.name}（{s.skey}）</option>)}
+                </select>
+              </label>
+            )}
+            <label className="rw-cap-item col">
+              <span style={{ marginBottom: 4 }}>文件</span>
+              <input id="kb-file-embed" className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={pickFile} />
+            </label>
+            <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} />
+              <span>表格首行为表头（作为列名）</span>
+            </label>
+            <button className="rw-btn pri" onClick={doImport} disabled={busy}>{busy ? '导入中…' : '⬆ 上传并导入'}</button>
+            {msg && <div className="rw-kb-msg">{msg}</div>}
+            {err && <div className="rw-kb-err">{err}</div>}
+          </div>
+          {/* 列表管理 */}
+          <div className="rw-cap-group">
+            <div className="rw-cap-gtitle">知识条目</div>
+            <div className="rw-kb-filters">
+              <select className="rw-select" value={fScope} onChange={(e) => setFScope(e.target.value)}>
+                <option value="">全部范围</option>
+                <option value="global">全局</option>
+                <option value="shell">壳私有</option>
+                <option value="conv">会话私有</option>
+              </select>
+              <input className="rw-input" placeholder="关键词过滤…" value={q}
+                onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') loadList(); }} />
+              <button className="rw-btn" onClick={loadList}>查询</button>
+            </div>
+            <div className="rw-kb-list">
+              {rows.length === 0 && <div className="rw-kb-empty">（无条目）</div>}
+              {rows.map((r) => (
+                <div key={r.id} className="rw-kb-item">
+                  <div className="rw-kb-item-head">
+                    <span className={'rw-kb-tag ' + r.scope}>
+                      {r.scope === 'global' ? '全局' : r.scope === 'shell' ? '壳:' + (r.shell_key || r.shell_id) : '会话'}
+                    </span>
+                    <b>{r.title}</b>
+                    <button className="rw-conv-del" title="删除" onClick={() => delRow(r.id)}>✕</button>
+                  </div>
+                  {r.body_preview && <div className="rw-kb-body">{r.body_preview}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="rw-mask rw-kb-mask" onClick={onClose}>

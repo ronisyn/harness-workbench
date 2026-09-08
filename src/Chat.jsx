@@ -129,7 +129,7 @@ const PRESET_LABEL = { all: '全量', standard: '标准', minimal: '精简' };
 const PRESET_TIP = { all: '暴露全部 61 工具（默认）', standard: 'core+pro 52 个，隐藏 expert 高危/改自身类', minimal: '仅 core 21 个文件/查证/规划类' };
 const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
-export default function Chat({ user, onLogout, onGoHome, initialConvId }) {
+export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialConvId }) {
   const [convs, setConvs] = useState([]);
   const [cur, setCur] = useState(null);
   const [curTitle, setCurTitle] = useState('');
@@ -771,6 +771,7 @@ export default function Chat({ user, onLogout, onGoHome, initialConvId }) {
         <div className="rw-logo" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">Roni Workbench</div>
         <div className="rw-conv-title">{curTitle || 'Roni Workbench'}</div>
         <div className="rw-top-actions">
+          {onGoConsole && <button className="rw-btn" onClick={() => onGoConsole()} title="统一后台（M2：八板块）">🎛 后台</button>}
           <button className="rw-btn" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">🏠 首页</button>
           <button className="rw-btn" onClick={() => setKbOpen(true)} title="知识库：上传/管理（④）">📚 知识</button>
           {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}

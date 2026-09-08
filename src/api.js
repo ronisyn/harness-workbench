@@ -58,9 +58,22 @@ export const api = {
   stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
   // B1 壳 + ④ 知识库
   shells: () => request('/api/shells'),
+  shellGet: (key) => request('/api/shells/' + encodeURIComponent(key)),
+  shellExport: (key) => request('/api/shells/' + encodeURIComponent(key) + '/export'),
+  shellImport: (pack) => request('/api/shells', { method: 'POST', body: JSON.stringify({ pack }) }),
+  shellClone: (key, newKey, name) => request('/api/shells/' + encodeURIComponent(key) + '/clone', { method: 'POST', body: JSON.stringify({ newKey, name }) }),
+  shellPatch: (key, patch) => request('/api/shells/' + encodeURIComponent(key), { method: 'PATCH', body: JSON.stringify(patch) }),
+  shellDisable: (key) => request('/api/shells/' + encodeURIComponent(key), { method: 'DELETE' }),
   knowledgeList: (params) => request('/api/knowledge?' + new URLSearchParams(params || {}).toString()),
   knowledgeImport: (body) => request('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
   knowledgeDelete: (id) => request('/api/knowledge/' + id, { method: 'DELETE' }),
+  // M2 统一后台（§7.2 八板块）
+  modelToggle: (id, enabled) => request('/api/models/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  providerTest: (baseUrl, apiKey) => request('/api/providers/test', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey }) }),
+  telemetryDaily: (params) => request('/api/telemetry/daily?' + new URLSearchParams(params || {}).toString()),
+  reviewsList: (params) => request('/api/reviews?' + new URLSearchParams(params || {}).toString()),
+  reviewsAdd: (conversationId, result, bugReason) => request('/api/reviews', { method: 'POST', body: JSON.stringify({ conversationId, result, bugReason }) }),
+  audit: (limit) => request('/api/audit?limit=' + (Number(limit) || 100)),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

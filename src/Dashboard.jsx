@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api, streamChat } from './api.js';
 
-export default function Dashboard({ user, onGoChat, onLogout }) {
+export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
   // —— 迷你对话（同一会话体系：复用最近一个会话；无则现场建，均为现有 /api/chat）——
   const [conv, setConv] = useState(null);       // 迷你对话绑定的会话
   const convRef = useRef(null);                 // 同步 ref：避免连续发送时闭包读到旧 null 重复建会话
@@ -102,6 +102,7 @@ export default function Dashboard({ user, onGoChat, onLogout }) {
         <div className="rw-logo" title="总览首页">Roni Workbench</div>
         <div className="rw-conv-title">工作台总览</div>
         <div className="rw-top-actions">
+          {onGoConsole && <button className="rw-btn" onClick={() => onGoConsole()} title="统一后台（M2：八板块）">🎛 后台</button>}
           <button className="rw-btn pri" onClick={() => onGoChat()} title="进入对话页（同一会话体系）">💬 对话页</button>
           <span className="rw-user">{user.username}</span>
           <button className="rw-btn" onClick={onLogout} title="退出">↪</button>

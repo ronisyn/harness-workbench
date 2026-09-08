@@ -516,3 +516,27 @@ body {
 .rw-dash-muted { font-size: 11.5px; color: var(--rw-muted); }
 .rw-dash-result { font-size: 12px; color: var(--rw-muted); background: var(--rw-bg); border-radius: 6px;
   padding: 5px 8px; margin-top: 4px; width: 100%; line-height: 1.5; word-break: break-all; }
+
+/* ================= M2 统一后台 /console（§7.1/§7.2 四组八项） ================= */
+.rw-console { display: flex; height: calc(100% - 52px); }
+.rw-console-nav { width: 200px; border-right: 1px solid var(--rw-border); background: var(--rw-panel); padding: 12px 10px; overflow-y: auto; }
+.rw-console-group { margin-bottom: 14px; }
+.rw-console-group-title { font-size: 11px; color: var(--rw-muted); font-weight: 700; letter-spacing: 1px; margin: 4px 6px 6px; }
+.rw-console-navitem { display: block; padding: 7px 10px; border-radius: 8px; font-size: 13px; color: var(--rw-ink);
+  cursor: pointer; text-decoration: none; margin-bottom: 2px; border: 1px solid transparent; }
+.rw-console-navitem:hover { background: var(--rw-tint); color: var(--rw-red); }
+.rw-console-navitem.sel { background: var(--rw-red); color: #fff; font-weight: 600; }
+.rw-console-main { flex: 1; overflow-y: auto; padding: 18px 22px; background: var(--rw-bg); }
+.rw-console-ph { background: var(--rw-panel); border: 1px dashed var(--rw-border); border-radius: 12px;
+  padding: 28px; text-align: center; color: var(--rw-muted); font-size: 13px; }
+.rw-console-ph b { display: block; font-size: 15px; color: var(--rw-red); margin-bottom: 6px; }
+.rw-console-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.rw-console-table { width: 100%; border-collapse: collapse; background: var(--rw-panel); font-size: 12.5px; }
+.rw-console-table th, .rw-console-table td { border: 1px solid var(--rw-border); padding: 5px 8px; text-align: left; }
+.rw-console-table th { background: var(--rw-tint); font-weight: 600; color: var(--rw-ink); white-space: nowrap; }
+.rw-console-table td { color: var(--rw-ink); }
+.rw-console-note { margin-top: 14px; font-size: 11.5px; color: var(--rw-muted); border-top: 1px dashed var(--rw-border); padding-top: 8px; }
+.rw-console-main .rw-kb-embed { height: auto; }
+.rw-kb-embed-body { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.rw-kb-embed-body .rw-kb-list { max-height: 56vh; }
+@media (max-width: 900px) { .rw-console-nav { width: 150px; } .rw-kb-embed-body { grid-template-columns: 1fr; } }
