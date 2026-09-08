@@ -257,7 +257,9 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
         } catch { /* ignore */ }
       } else { setCurTitle('会话不存在或已删除'); }
     }
-  }, [initialConvId, convs, loadMessages]); // eslint-disable-line react-hooks/exhaustive-deps
+  // P0-3 修复（2026-09-09 对话页白屏）：依赖数组不得引用声明于其后的 const——原 [.., loadMessages]
+  // 在渲染期求值命中 TDZ（Cannot access before initialization，压缩名 Xe），整页崩溃；effect 体内仅用 openConv（其内部才调 loadMessages），移除该依赖
+  }, [initialConvId, convs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const switchProvider = (pid) => {
     setProvider(pid);
