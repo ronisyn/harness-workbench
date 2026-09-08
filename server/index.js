@@ -218,6 +218,11 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   // ② 级联清理全部子表：原实现只删 messages，遗留 tool_calls/usage_stats/agent_runs 等孤儿（实测 tool_calls 77% 为孤儿），污染用量统计口径
   const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
+  // 孤儿防护（终审）：先中止该会话仍在执行的 agent（SSE 断连 abort 已发、但收尾落库可能与删除并发）——
+  // 中止后 agent 收尾走 stopped 路径，配合落库前会话存在校验（原子 INSERT…SELECT WHERE EXISTS），杜绝"先删后写"孤儿
+  try { const actrl = abortMap.get(req.user.id + ':' + req.params.id); if (actrl) actrl.abort('delete'); } catch { /* 忽略 */ }
+  // 先删 conversations 行再清子表：会话行消失即向并发迟到写"关门"（存在校验即刻为假），随后子表删除按 id 全清
+  await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
   // 契约事件（contract_events 挂在 task_contracts 下、无 conversation_id）须先按其所属契约清理，避免孤儿
   try { await db.query('DELETE FROM contract_events WHERE contract_id IN (SELECT id FROM task_contracts WHERE conv_id=?)', [req.params.id]); } catch { /* 表未建则跳过 */ }
   for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
@@ -225,7 +230,6 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
       await db.query(`DELETE FROM ${t} WHERE ${t === 'task_contracts' ? 'conv_id' : 'conversation_id'}=?`, [req.params.id]);
     } catch { /* 个别表未建则跳过 */ }
   }
-  await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
   res.json({ ok: true });
 });
 
@@ -722,6 +726,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
 
   const t0 = Date.now();
   let firstTokenMs = 0;
+  // 孤儿防护（2026-09 终审）：客户端断连后 agent 收尾（assistant/telemetry 落库）与"删会话"并发时，
+  // 迟到写会在级联删除之后插入 → 孤儿行。落库前校验会话仍存在，已被删则跳过（删除即用户放弃该现场）。
+  const convAlive = async () => {
+    try { const r = await db.query('SELECT 1 FROM conversations WHERE id=?', [conversationId]); return !!(r && r.length); }
+    catch { return true; } // 校验失败不阻塞主流程（宁可多写不丢回复）
+  };
   const TRUNC_NOTE = '\n\n> ⚠️ 本段输出达到模型单次长度上限（已截断）。需要完整内容的话，告诉我"继续"，我会接着分段输出。';
   const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
@@ -825,10 +835,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       if (!skipStore && teleBase !== null) {
         try {
           const agg = (await db.query('SELECT COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COALESCE(SUM(cost),0) cost, COUNT(*) n FROM usage_stats WHERE conversation_id=? AND id>? AND kind IN ("round","collapse")', [conversationId, teleBase]))[0] || {};
-          // 仅真实发生 LLM 执行才落观测（护栏前置拦截/零消耗不产生空行污染 execs 口径）
+          // 仅真实发生 LLM 执行才落观测（护栏前置拦截/零消耗不产生空行污染 execs 口径）；
+          // 原子守卫：会话已被删（删会话与收尾并发）则 EXISTS 为假 → 不插入 → 无孤儿 telemetry
           if ((agg.n || 0) > 0) {
-            await db.query('INSERT INTO model_telemetry (conversation_id, account_id, shell_id, provider, model, profile_key, difficulty, tokens_in, tokens_out, cache_hit, cache_miss, cost, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())',
-              [conversationId, req.user.id, convShellId, provider, model, profileSuggestion ? profileSuggestion.key : null, null, agg.tin || 0, agg.tout || 0, agg.hit || 0, agg.miss || 0, agg.cost || 0, Date.now() - t0]);
+            await db.query('INSERT INTO model_telemetry (conversation_id, account_id, shell_id, provider, model, profile_key, difficulty, tokens_in, tokens_out, cache_hit, cache_miss, cost, duration_ms, created_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,NOW() FROM conversations WHERE id=?',
+              [conversationId, req.user.id, convShellId, provider, model, profileSuggestion ? profileSuggestion.key : null, null, agg.tin || 0, agg.tout || 0, agg.hit || 0, agg.miss || 0, agg.cost || 0, Date.now() - t0, conversationId]);
           }
         } catch { /* 观测落表失败不影响对话 */ }
       }
@@ -849,11 +860,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     }
     if (!skipStore) {
       send({ type: 'done', usage });
-      // 存 assistant 消息（reasoning=思考过程，历史回看可见）
-      const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?,?)',
-        [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0]);
+      // 存 assistant 消息（reasoning=思考过程，历史回看可见）；原子守卫防"删会话与落库并发"产生孤儿消息
+      const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) SELECT ?,?,?,?,?,?,?,? FROM conversations WHERE id=?',
+        [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0, conversationId]);
       // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
-      await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
+      if (r && r.insertId) await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
       // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
       // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
     } else {
@@ -870,7 +881,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           }
         }
         const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
-        await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
+        if (await convAlive()) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
           [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
       } catch { /* 忽略 */ }
     }
@@ -887,8 +898,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
         }
       }
-      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
-        [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
+      await db.query('INSERT INTO messages (conversation_id, role, content) SELECT ?,?,? FROM conversations WHERE id=?',
+        [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）', conversationId]);
     } catch { /* 忽略 */ }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
   }
