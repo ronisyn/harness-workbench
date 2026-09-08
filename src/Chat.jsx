@@ -5,6 +5,11 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, streamChat } from './api.js';
 import Knowledge from './Knowledge.jsx';
+import SettingsPanel from './shared/SettingsPanel.jsx';
+import CapSwitches from './shared/CapSwitches.jsx';
+import ToolsetEditor from './shared/ToolsetEditor.jsx';
+import RulesEditor from './shared/RulesEditor.jsx';
+import ProposalsManager from './shared/ProposalsManager.jsx';
 
 function Md({ text }) {
   return (
@@ -32,6 +37,12 @@ function PlanCard({ plan }) {
 // （状态 + 名称 + 次数 + 末次结果一行预览 + 耗时），点击行才展开完整参数/结果；文件工具可打开
 const FILE_TOOLS = ['read_file', 'write_file', 'append_file', 'edit_file', 'extract_pdf', 'extract_docx', 'extract_xlsx', 'extract_pptx', 'syntax_check', 'ocr_image', 'view_image'];
 const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+// args/result 可能是对象/JSON 字符串——统一解析兜底（避免 "[object Object]"）
+const safeJson = (v, fb) => {
+  if (v == null) return fb !== undefined ? fb : {};
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return v; }
+};
 // P2 UI diff 视图：结果文本含 diff 特征（转义 \n 的 -/+ 行 或 "diff" 字段）→ 渲染着色 diff 块
 const isDiffLike = (v) => /\\n[+-] /.test(String(v ?? '')) || /"diff"\s*:/.test(String(v ?? ''));
 function DiffBlock({ text }) {
@@ -166,9 +177,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   };
   useEffect(() => () => saveDraftsToStorage(), []);
   const [busy, setBusy] = useState(false);
-  // WS4：设置 schema（GET /api/settings 返回）驱动渲染非 runtime 键（budget 等）
-  const [settingsSchema, setSettingsSchema] = useState([]);
-  const [sval, setSval] = useState({});
   // 活动轮询（旁观/断连实时性兜底：事件环增量 + 活动条 + 完成自动刷新）
   const [live, setLive] = useState(null); // {last, tools, ts}
   const actSeqRef = useRef(0);
@@ -180,13 +188,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const [drawer, setDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState('caps');
   const [kbOpen, setKbOpen] = useState(false); // ④ 知识库面板
-  const [caps, setCaps] = useState([]);
-  const [toolList, setToolList] = useState([]); // 5.3c 工具启用集（设置→工具）
-  const [rules, setRules] = useState([]); // P6 allow/deny 规则层（设置→规则）
-  const [proposals, setProposals] = useState([]); // P3 提案面板（设置→提案）
-  const [propContent, setPropContent] = useState(''); // 查看中的提案内容
-  const [propTitle, setPropTitle] = useState(''); // 新建提案标题
-  const [propDraft, setPropDraft] = useState(''); // 新建提案正文
+  // R1/R2：能力开关/工具集/规则/提案/高级参数 已下沉共享组件自管，Chat 不再维护副本（见 shared/）
   const [mcpText, setMcpText] = useState(''); // P11 MCP 配置 JSON（设置→MCP）
   const [mcpStatus, setMcpStatus] = useState(''); // MCP 连接状态
   const [provList, setProvList] = useState([]);
@@ -195,12 +197,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const [selModels, setSelModels] = useState({});
   const [toast, setToast] = useState('');
   const [toolcalls, setToolcalls] = useState([]);
-  const [temperature, setTemperature] = useState(1.0);
-  const [sysPrompt, setSysPrompt] = useState('');
-  const [limBudget, setLimBudget] = useState(120);
-  const [limRounds, setLimRounds] = useState(2000);
-  const [limLoop, setLimLoop] = useState(6);
-  const [limParallel, setLimParallel] = useState(10);
   const [tasks, setTasks] = useState([]);
   const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const [queue, setQueue] = useState([]);       // 输入队列：执行中输入的消息排队，结束后自动发送
@@ -660,39 +656,15 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     setToast('工具预设已切换为 ' + PRESET_LABEL[preset] + '（' + PRESET_TIP[preset] + '）');
   };
 
-  // 5.3c 工具启用集切换（豁免工具恒启用，不可勾）
-  const toggleTool = async (name, on) => {
-    const en = toolList.filter((t) => t.enabled && !t.defaultOn).map((t) => t.name);
-    const next = on ? [...en, name] : en.filter((n) => n !== name);
-    try {
-      await api.setToolset(next);
-      setToolList((ls) => ls.map((t) => (t.name === name ? { ...t, enabled: on } : t)));
-      setToast((on ? '已启用 ' : '已停用 ') + name + '（下轮生效）');
-    } catch (e) { setToast(e.message); }
-  };
-
   const openDrawer = async (tab = 'caps') => {
     setDrawer(true); setDrawerTab(tab);
     try {
-      const d = await api.capabilities().catch(() => ({ list: [] })); // P3-4：单点失败不中断整个抽屉
-      setCaps(d.list || []);
-      api.getSettings().then((s) => {
-        setSettingsSchema(s.schema || []);
-        setSval(s.settings || {});
-        if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
-        if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
-        if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
-        if (s.settings?.round_cap !== undefined) setLimRounds(Number(s.settings.round_cap));
-        if (s.settings?.loop_guard !== undefined) setLimLoop(Number(s.settings.loop_guard));
-        if (s.settings?.max_parallel_tools !== undefined) setLimParallel(Number(s.settings.max_parallel_tools));
-      }).catch(() => {});
+      // R1/R2：能力开关/高级参数/工具/规则/提案面板为共享组件，各自自载（打开即渲染，无重复预载）；
+      // 此处仅预载仍需 Chat 侧状态的：厂商/市场/轨迹/定时/MCP
       if (tab === 'providers') { const p = await api.providers().catch(() => ({ providers: [] })); setProvList(p.providers || []); }
       if (tab === 'market') await loadMarket();
       if (tab === 'trace' && cur) { const t = await api.toolcalls(cur).catch(() => ({ toolcalls: [] })); setToolcalls(t.toolcalls || []); }
       if (tab === 'tasks') { const t = await api.tasks().catch(() => ({ tasks: [] })); setTasks(t.tasks || []); }
-      if (tab === 'tools') { const t = await api.getToolset().catch(() => ({ tools: [] })); setToolList(t.tools || []); }
-      if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
-      if (tab === 'proposals') { try { const p = await api.proposals(); setProposals(p.proposals || []); setPropContent(''); } catch { setProposals([]); } }
       if (tab === 'mcp') {
         try { const s = await api.getSettings(); setMcpText(JSON.stringify((s.settings?.mcp_servers || []), null, 2)); } catch { setMcpText('[]'); }
         try { const m = await api.mcpStatus(); setMcpStatus('已配置 ' + (m.configured || []).length + ' 个 server；已连接 ' + (m.clients || []).length + ' 个：' + (m.clients || []).map((c) => c.id).join(', ')); } catch { setMcpStatus('查询失败'); }
@@ -713,31 +685,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     } catch (e) { setToast('保存失败：' + e.message); }
   };
 
-  // P3 提案查看/新建
-  const viewProposal = async (file) => { try { const d = await api.proposalContent(file); setPropContent(d.content || ''); } catch (e) { setToast(e.message); } };
-  const submitProposal = async () => {
-    if (!propTitle.trim() || !propDraft.trim()) { setToast('标题与正文必填'); return; }
-    try {
-      const body = '# 提案：' + propTitle + '\n\n> 状态：🆕 待审\n\n' + propDraft;
-      const d = await api.createProposal(propTitle, body);
-      setToast('提案已创建：' + d.file + '（用户审阅后按 C5 合入）');
-      setPropTitle(''); setPropDraft(''); setPropContent('');
-      const p = await api.proposals(); setProposals(p.proposals || []);
-    } catch (e) { setToast(e.message); }
-  };
-
-  // P6 规则管理：JSON 文本编辑 + 保存/加示例
-  const [ruleText, setRuleText] = useState('');
-  const saveRules = async () => {
-    try {
-      const parsed = JSON.parse(ruleText || '[]');
-      if (!Array.isArray(parsed)) throw new Error('需为数组');
-      await api.saveRules(parsed);
-      setRules(parsed);
-      setToast('规则已保存（下轮生效）');
-    } catch (e) { setToast('规则保存失败：' + e.message); }
-  };
-
+  // R1：提案/规则/高级参数 已由共享组件自管（shared/ProposalsManager 等），见抽屉 tab 渲染
   const loadTasks = async () => { try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ } };
   const createTask = async () => {
     try {
@@ -749,38 +697,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   };
   const toggleTask = async (id, enabled) => { await api.patchTask(id, { enabled }); loadTasks(); };
   const delTask = async (id) => { if (!confirm('删除该定时任务？')) return; await api.deleteTask(id); loadTasks(); };
-
-  const saveTimer = useRef({});
-  const debounced = (key, ms, fn) => {
-    clearTimeout(saveTimer.current[key]);
-    saveTimer.current[key] = setTimeout(fn, ms);
-  };
-
-  const setTemp = async (v) => {
-    setTemperature(v);
-    debounced('temp', 500, () => { try { api.setSettings({ temperature: v }).catch(() => {}); } catch { /* ignore */ } });
-  };
-
-  const saveSysPrompt = async (v) => {
-    setSysPrompt(v);
-    debounced('sys', 800, () => { try { api.setSettings({ systemPrompt: v }).catch(() => {}); } catch { /* ignore */ } });
-  };
-
-  const saveLim = async (k, v) => {
-    const n = Number(v);
-    const val = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-    if (k === 'time_budget_min') setLimBudget(val);
-    else if (k === 'round_cap') setLimRounds(val);
-    else if (k === 'loop_guard') setLimLoop(val);
-    else if (k === 'max_parallel_tools') setLimParallel(val);
-    debounced('lim-' + k, 600, () => {
-      try {
-        api.setSettings({ [k]: val }).then(() => {
-          if (k === 'time_budget_min' || k === 'round_cap' || k === 'loop_guard' || k === 'max_parallel_tools') setToast('护栏已更新（0=不限，立即生效）');
-        }).catch(() => {});
-      } catch { /* ignore */ }
-    });
-  };
 
   const loadMarket = async () => {
     setMarketBusy(true);
@@ -802,12 +718,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
       setSelModels({});
       loadMarket();
     } catch (ex) { setToast(ex.message); }
-  };
-
-  const toggleCap = async (key, v) => {
-    setCaps((c) => c.map((x) => (x.key === key ? { ...x, enabled: v } : x)));
-    try { await api.setCapabilities({ [key]: v }); }
-    catch (e) { setCaps((c) => c.map((x) => (x.key === key ? { ...x, enabled: !v } : x))); setToast('开关保存失败：' + (e.message || e)); } // P3-5：失败回滚+提示
   };
 
   useEffect(() => {
@@ -1051,47 +961,10 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
             <div className="rw-drawer-body">
               {drawerTab === 'caps' && (
                 <div className="rw-cap-group">
-                  <div className="rw-cap-gtitle">高级参数</div>
-                  <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span>温度</span>
-                    <input type="range" min="0" max="1.5" step="0.1" value={temperature}
-                      onChange={(e) => setTemp(Number(e.target.value))} style={{ flex: 1 }} />
-                    <span>{temperature.toFixed(1)}</span>
-                  </label>
-                  <div className="rw-cap-item col">
-                    <span style={{ marginBottom: 4 }}>系统提示词（用户自定义指令，注入每轮对话；留空即不注入）</span>
-                    <textarea className="rw-input" rows="3" placeholder="例如：回答保持简短；涉及代码时先给结论…"
-                      value={sysPrompt} onChange={(e) => saveSysPrompt(e.target.value)} />
-                  </div>
-                  <div className="rw-cap-item col">
-                    <span style={{ marginBottom: 2 }}>运行护栏（0=不限，立即生效；默认 120 分钟 / 2000 轮 / 循环 6 次）</span>
-                    <div className="rw-limrow">
-                      <label>时间预算(分) <input className="rw-input" type="number" min="0" value={limBudget} onChange={(e) => saveLim('time_budget_min', e.target.value)} /></label>
-                      <label>轮次上限 <input className="rw-input" type="number" min="0" value={limRounds} onChange={(e) => saveLim('round_cap', e.target.value)} /></label>
-                      <label>循环检测 <input className="rw-input" type="number" min="0" value={limLoop} onChange={(e) => saveLim('loop_guard', e.target.value)} /></label>
-                      <label>并行工具 <input className="rw-input" type="number" min="0" value={limParallel} onChange={(e) => saveLim('max_parallel_tools', e.target.value)} /></label>
-                    </div>
-                  </div>
-                  {settingsSchema.filter((s) => s.group !== 'runtime').map((s) => (
-                    <div key={s.key} className="rw-cap-item col">
-                      <span style={{ marginBottom: 4 }}>{s.label}（{s.hint || ''}）</span>
-                      <input className="rw-input" type="number" min={s.min || 0} value={sval[s.key] ?? s.def ?? ''}
-                        onChange={(e) => { const v = e.target.value; setSval((o) => ({ ...o, [s.key]: v })); saveLim(s.key, v); }} />
-                    </div>
-                  ))}
+                  <SettingsPanel compact />
+                  <CapSwitches groupNames={GROUP_NAME} showGroupTitle={false} />
                 </div>
               )}
-              {drawerTab === 'caps' && ['A', 'B', 'C'].map((g) => (
-                <div key={g} className="rw-cap-group">
-                  <div className="rw-cap-gtitle">{GROUP_NAME[g]}</div>
-                  {caps.filter((c) => c.group === g).map((c) => (
-                    <label key={c.key} className="rw-cap-item">
-                      <input type="checkbox" checked={c.enabled} onChange={(e) => toggleCap(c.key, e.target.checked)} />
-                      <span>{c.name}</span>
-                    </label>
-                  ))}
-                </div>
-              ))}
 
               {drawerTab === 'providers' && (
                 <div className="rw-providers">
@@ -1149,61 +1022,15 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
               )}
 
               {drawerTab === 'tools' && (
-                <div className="rw-trace">
-                  <div className="rw-cap-gtitle">工具启用集（默认 25 项勾选；未启用工具不被提供，调用时给指引）</div>
-                  <div className="rw-toolgrid">
-                    {toolList.map((t) => (
-                      <label key={t.name} className="rw-cap-item" title={'[' + (t.tier || '') + ']' + (t.defaultOn ? ' 默认启用/平台豁免' : '')}>
-                        <input type="checkbox" disabled={t.defaultOn} checked={t.enabled}
-                          onChange={(e) => toggleTool(t.name, e.target.checked)} />
-                        <span>{t.name}</span>
-                        <em className="rw-tool-tier">{t.tier}</em>
-                      </label>
-                    ))}
-                  </div>
-                  {!toolList.length && <div className="rw-empty">加载中…</div>}
-                </div>
+                <div className="rw-trace"><ToolsetEditor onToast={setToast} /></div>
               )}
 
               {drawerTab === 'rules' && (
-                <div className="rw-trace">
-                  <div className="rw-cap-gtitle">allow/deny 规则层（P6）——命中 deny 拦截；命中 allow 免纪律拦截+免 guard 审批；顺序=数组序，先命中先生效</div>
-                  <div className="rw-cap-item col">
-                    <span style={{ marginBottom: 4 }}>规则 JSON（[{'{'}id, pattern: 工具名正则, argPattern?: 参数JSON正则(可空), action: "allow"|"deny", why{'}'}]，留空数组=关闭）</span>
-                    <textarea className="rw-input" rows="8" style={{ fontFamily: 'monospace', fontSize: 12 }}
-                      value={ruleText || (rules.length ? JSON.stringify(rules, null, 2) : '[]')}
-                      onChange={(e) => setRuleText(e.target.value)}
-                      placeholder='[{"id":1,"pattern":"^run_command$","action":"deny","why":"禁跑 shell"},{"id":2,"pattern":"^reload_platform$","action":"deny","why":"禁自动重启"}]' />
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button className="rw-btn" onClick={saveRules}>保存规则</button>
-                    <button className="rw-btn" onClick={() => { setRuleText('[]'); }}>清空</button>
-                  </div>
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>当前规则 {rules.length} 条；保存后下轮工具调用生效。</div>
-                </div>
+                <div className="rw-trace"><RulesEditor onToast={setToast} /></div>
               )}
 
               {drawerTab === 'proposals' && (
-                <div className="rw-trace">
-                  <div className="rw-cap-gtitle">平台改动提案（P3/C5）——平台 main 合入前先写提案供你审阅；业务项目不受此限</div>
-                  {proposals.length ? proposals.map((p) => (
-                    <div key={p.file} className="rw-trace-item" style={{ cursor: 'pointer' }} onClick={() => viewProposal(p.file)}>
-                      <div className="rw-trace-head"><b>{p.title}</b> <span className={'rw-trace-status ' + (p.status === '待审' ? 'pending' : 'done')}>{p.status}</span></div>
-                      <div className="rw-trace-res">{p.file}（{p.size} 字符）</div>
-                    </div>
-                  )) : <div className="rw-empty">暂无提案（平台改动时 RW 会先写提案）</div>}
-                  {propContent && (
-                    <details open style={{ marginTop: 8 }}><summary>提案内容</summary>
-                      <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 240, overflow: 'auto', background: '#f6f6f6', padding: 8, borderRadius: 4 }}>{propContent}</pre>
-                    </details>
-                  )}
-                  <div className="rw-cap-gtitle" style={{ marginTop: 12 }}>新建提案</div>
-                  <input className="rw-input" style={{ marginBottom: 6 }} placeholder="标题（如：批5 增加 MCP client 框架）" value={propTitle} onChange={(e) => setPropTitle(e.target.value)} />
-                  <textarea className="rw-input" rows="5" placeholder="正文：背景/改动/影响/验证（可用 docs/templates/提案模板.md 结构）" value={propDraft} onChange={(e) => setPropDraft(e.target.value)} />
-                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button className="rw-btn" onClick={submitProposal}>提交提案（存档 proposals/）</button>
-                  </div>
-                </div>
+                <div className="rw-trace"><ProposalsManager onToast={setToast} /></div>
               )}
 
               {drawerTab === 'mcp' && (
@@ -1223,23 +1050,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
 
               {drawerTab === 'trace' && (
                 <div className="rw-trace">
-                  <div className="rw-cap-gtitle">工具调用轨迹</div>
-                  {toolcalls.length ? toolcalls.map((t) => {
-                    // O-11 修复（2026-09 批4）：args 可能是对象/JSON 字符串——统一格式化展示，避免 "[object Object]"
-                    let argsPretty = '';
-                    try { const v = typeof t.args === 'string' ? JSON.parse(t.args || '{}') : (t.args || {}); argsPretty = JSON.stringify(v, null, 1); }
-                    catch { argsPretty = String(t.args || ''); }
-                    const rsum = String(t.result_summary || '');
-                    return (
-                    <div key={t.id} className="rw-trace-item">
-                      <div className="rw-trace-head"><b>{t.tool_name}</b> <span className={'rw-trace-status ' + t.status}>{t.status}</span> {t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : ''}</div>
-                      <div className="rw-trace-args">参数：{argsPretty.slice(0, 300)}</div>
-                      <div className="rw-trace-res">结果：{rsum.slice(0, 200)}</div>
-                      {isDiffLike(rsum) && (
-                        <details className="rw-diff-details"><summary>diff 视图</summary><DiffBlock text={rsum} /></details>
-                      )}
-                    </div>);
-                  }) : <div className="rw-empty">本会话暂无工具调用</div>}
+                  <div className="rw-cap-gtitle">工具调用轨迹（R5：与消息内工具过程共用同一 TraceCard 渲染）</div>
+                  {toolcalls.length ? toolcalls.map((t) => (
+                    // DB 行 → TraceCard item shape（名称/参数/结果/状态/耗时）；args/result 已含 O-11 格式化兜底
+                    <TraceCard key={t.id} items={[{ name: t.tool_name, args: (typeof t.args === 'string' ? safeJson(t.args) : t.args) ?? {}, result: t.result_summary, status: t.status || 'done', duration_ms: t.duration_ms || 0 }]} />
+                  )) : <div className="rw-empty">本会话暂无工具调用</div>}
                 </div>
               )}
 
