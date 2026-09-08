@@ -1,7 +1,7 @@
 # RW-Agent 平台化改造总方案
 
-> 版本：v2.17（2026-09-08 全面自检与修复回填：附录 D 增"全面自检 v1"记录；仅收录已达成共识，不含讨论过程）
-> 状态：✅ 基线定稿（B1/B2/B3/④知识库/⑤观测/M1/M2/⑥模板库/D9 应用 v1 已实施；全面自检 4 路审计+2 批修复完成）
+> 版本：v2.18（2026-09-08 R1/R2/R5 双实现重构回填：附录 D 增"R1/R2/R5 单一事实源重构"记录；仅收录已达成共识，不含讨论过程）
+> 状态：✅ 基线定稿（B1/B2/B3/④知识库/⑤观测/M1/M2/⑥模板库/D9 应用 v1/全面自检修复/R1R2R5 重构已完成）
 > 单一权威：本文为平台化改造唯一方案文档；修订=直接修订本文件并升版本号，不另立同层文档。
 > 约束：**未获用户明确指令，不进行任何代码/网页改动**；本文只描述方案。
 
@@ -331,6 +331,19 @@
   - 验收：单测 50/50（新增 round-trip）、selfcheck 12/12、修复 E2E 9 项全过（pack_extra 列/往返保真 6 字段/壳默认路由 shell-default 生效且灰字）。
 - **数据清理**：历史测试残留孤儿（usage 67/tool_calls 100/messages 8/残留壳 tmpcode+b1dup）已清（=0）。
 - **已标注后置（未在本轮接线，见《壳包字段运行接线状态表》草案）**：guardrails 审批策略（当前仅 settings 全局 access_rules 生效）、skills.allow 白名单与 defaultsAutoLoad、tools.presetBase/forceOn 运行时过滤、knowledge.scopes/importRefs、`intent_samples` 沉淀链路、telemetry 按账号隔离（D11）、视图/difficulty 接线；另剩余前端 P3 体验项（空态/加载/冗余组件抽取）列待办。
+
+## 附录 D 续：R1/R2/R5 单一事实源重构（2026-09-08）
+
+- **提交（origin/main，已部署 880）**：`db469f5`（R1/R2/R5 前端双实现重构）；当前运行 HEAD=db469f5。
+- **背景**：全面自检审计 R1/R2/R5 指出同一数据在"对话页⚙设置抽屉"与"统一后台 console 板块"存在两套实现且已分叉（能力开关/工具集/规则/提案/高级参数/轨迹渲染）。
+- **实施（原则：抽共享组件为单一事实源，两入口引用同一实现，数据组件自管）**：
+  - 新 `src/shared/` 五个共享组件：`SettingsPanel`（R2 高级参数：温度/系统提示词/运行护栏/预算/上下文，schema 驱动，blur/debounce 归一保存）、`CapSwitches`（R1 能力开关 A/B/C，groupNames 可选，失败回滚+提示）、`ToolsetEditor`（R1 工具启用集，豁免 defaultOn 恒开不可关）、`RulesEditor`（R1 规则 JSON 编辑——1.4 由只读表升级为同编辑器）、`ProposalsManager`（R1 提案列表/查看/新建）。
+  - **对话页**：⚙设置→能力 tab=SettingsPanel+CapSwitches；工具/Rules/提案 tab 分别渲染共享组件；openDrawer 移除重复预载（只保留仍需 Chat 侧状态的 providers/market/trace/tasks/mcp）；删除 Chat 本地重复 state（caps/toolList/rules/proposals/prop*/temperature/sysPrompt/lim*/settingsSchema/sval 等）与 handler（toggleCap/toggleTool/saveRules/viewProposal/submitProposal/setTemp/saveSysPrompt/saveLim/debounce）。
+  - **console**：1.4 CapsBoard=组合 CapSwitches+ToolsetEditor+RulesEditor；1.5 EvoBoard 提案区改用 ProposalsManager（保留进化/周报卡与审计表）；1.8 SettingsBoard=SettingsPanel 薄壳。
+  - **R5 轨迹**：抽屉"轨迹"tab 复用消息流内 TraceCard（tool_calls DB 行→TraceCard shape 映射，共用中文化/折叠/diff/文件打开），删除抽屉专用第二套内联渲染；补前端 safeJson 兜底。
+- **验收**：本地单测 50/50、selfcheck 12/12、build 通过；JS bundle 456→448KB（去重约 8KB）；/console/agent-caps、agent-evo、settings、/chat 路由 200；bundle 含共享组件文案。共享组件数据链路=既有 /api/capabilities|toolset|access-rules|proposals|settings（无新接口）。
+- **边界**：仍保留的本地面板（providers 展示/market/tasks 定时/mcp）在 console 无对应板块，非双实现不抽；统一后对话页"高级参数"比原抽屉多展示 schema 中 fake_continue_warn/consecutive_fail_guard/max_concurrent_chats 等键（一致性优先，行为不变）。
+
 
 
 
