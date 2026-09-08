@@ -609,8 +609,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   };
 
   // B2：意图识别灰字事件（只发事件+审计，不改消息正文/导出，不影响现有 needsTools 行为路径）
+  let highGuardIntent = false;
   try {
     const cl = classifyIntent(content, shellIntentRules || undefined);
+    if (cl.label === 'act-high') highGuardIntent = true;
     send({ type: 'intent', label: cl.label, echo: cl.echo, hit: cl.hit });
     if (cl.label !== 'chat' || cl.echo) {
       await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
@@ -677,7 +679,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellToolsOn, shellToolsOff };
+      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellToolsOn, shellToolsOff };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
