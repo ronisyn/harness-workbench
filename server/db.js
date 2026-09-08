@@ -305,7 +305,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS shell_tools (
     shell_id INT NOT NULL,
     tool_name VARCHAR(64) NOT NULL,
-    mode VARCHAR(8) NOT NULL,
+    mode VARCHAR(12) NOT NULL,
     PRIMARY KEY (shell_id, tool_name)
   )`,
   `CREATE TABLE IF NOT EXISTS shell_settings (
@@ -334,6 +334,8 @@ export async function initSchema() {
     "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
     // B1 壳维度：会话归属壳（NULL=默认壳语义，保持存量行为不变）
     'ALTER TABLE conversations ADD COLUMN shell_id INT NULL',
+    // B1 修正：三态 mode 列长不足（force_off 被截断）→ 扩到 12
+    'ALTER TABLE shell_tools MODIFY COLUMN mode VARCHAR(12) NOT NULL',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
