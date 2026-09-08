@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>意图回显 · 30 秒演示（②意图重构 v1 视觉稿）</title>
+<style>
+  :root{--red:#e2542b;--cream:#faf3e7;--panel:#fffdf8;--ochre:#c98b2e;--ink:#3d2f1f;--line:#e6d5b0;--gray:#8a7a63;--green:#4c8c4a;--blue:#3f6f9e;--soft:#f3e8d4}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);font-size:14px}
+  .bar{display:flex;align-items:center;gap:10px;padding:9px 16px;background:linear-gradient(90deg,#3d2f1f,#5a442a);color:#f6ead6}
+  .bar b{color:#ffd9a0}.bar span{font-size:12px;color:#d8c4a2}
+  .wrap{max-width:860px;margin:14px auto;padding:0 16px 40px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  h4{font-size:13px;color:var(--red-d);margin-bottom:8px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+  .chip{border:1px solid var(--line);background:#fff;border-radius:14px;padding:5px 12px;font-size:12px;cursor:pointer}
+  .chip:hover{border-color:var(--red)}
+  .inrow{display:flex;gap:8px}
+  input{flex:1;border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:14px;background:#fff}
+  button.act{border:none;border-radius:9px;padding:8px 18px;background:var(--red);color:#fff;cursor:pointer;font-size:14px}
+  .echo{background:#fdf6e9;border:1px dashed var(--ochre);border-radius:10px;padding:8px 12px;font-size:13px;color:#6b5433;margin-top:12px}
+  .echo .tag{color:var(--red-d);font-weight:700}
+  .reply{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:9px 12px;margin-top:10px;font-size:13px}
+  .src{font-size:11px;color:var(--gray);margin-top:6px}
+  .pill{font-size:10px;padding:1px 8px;border-radius:9px;border:1px solid var(--line)}
+  .pill.r{background:#fdece7;color:var(--red-d)}
+  .pill.g{background:#e9f3e8;color:var(--green)}
+  .pill.o{background:#fdf3dd;color:#8a6410}
+  .pill.b{background:#eaf1f8;color:var(--blue)}
+  .pack{background:#fff;border:1px dashed var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:#5a4a33;line-height:1.8}
+  .mono{font-family:Consolas,monospace;font-size:11px;background:#f7f2e7;padding:1px 5px;border-radius:4px}
+  .note{font-size:11px;color:var(--gray);margin-top:10px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="bar"><b>⌘ 意图回显演示</b><span>code 壳语境 · ②意图重构 v1 视觉稿（30 秒看明白"识别对错当场可见"）</span></div>
+
+<div class="wrap">
+  <div class="panel">
+    <h4>点一个示例，或自己输入一句话，然后看下面会怎么"被理解"</h4>
+    <div class="chips" id="chips">
+      <div class="chip">帮我修一下登录超时的问题</div>
+      <div class="chip">给导出加一个 jsonl 格式</div>
+      <div class="chip">把测试库里的那条记录删了</div>
+      <div class="chip">先别改，帮我把这次重构的方案想清楚</div>
+      <div class="chip">帮我把那坨经常抽风的导出逻辑拾掇一下</div>
+      <div class="chip">你觉得昨天那场比赛怎么样</div>
+      <div class="chip">就这样吧，谢谢</div>
+    </div>
+    <div class="inrow">
+      <input id="q" placeholder="例如：帮我把设置页的按钮颜色调一下">
+      <button class="act" onclick="run()">看它怎么理解</button>
+    </div>
+  </div>
+
+  <div class="panel" style="display:none" id="out">
+    <h4>模拟对话（对话里你实际会看到的）</h4>
+    <div style="font-size:12px;color:var(--gray)">你：<span id="you"></span></div>
+    <div class="echo" id="echo"></div>
+    <div class="reply" id="reply"></div>
+    <div class="src" id="src"></div>
+  </div>
+
+  <div class="panel">
+    <h4>intentSamples 在哪里（<span class="pill o">后置可选字段</span>，今天不用填）</h4>
+    <div class="pack">
+      位置：<span class="mono">shellpacks/code/pack.json</span>（随壳包 git 版本化）→ 将来长这样：<br>
+      <span class="mono">"intentSamples": { "修bug": ["帮我修…","这个报错处理下"], "新功能": ["加一个…","支持…"], "只读规划": ["先别改…方案…"] }</span>
+    </div>
+    <div class="note">界面上你看不到这个词表本身；统一后台→壳详情只会显示"本壳能识别：修bug / 新功能 / 只读规划…（N 条例句）"，可点开查看。</div>
+  </div>
+
+  <div class="panel">
+    <h4>这页演示了什么（对应 ②v1 的两件事）</h4>
+    <div class="note">① <b>每壳一份词表</b>（示例为 code 壳的假想词表，仅演示用）→ 识别结果<b>当场以灰字回显</b>，对错你立刻能纠正；② 词表没认出来的句子，标注走"LLM 兜底"或"拿不准就问你"——<b>不再像今天一样假装答应然后什么都不做</b>。</div>
+  </div>
+</div>
+
+<script>
+var Q = document.getElementById('q');
+document.getElementById('chips').addEventListener('click', function(e){
+  var c = e.target.closest('.chip'); if(!c) return;
+  Q.value = c.textContent; run();
+});
+function run(){
+  var t = Q.value.trim(); if(!t) return;
+  var out = document.getElementById('out'); out.style.display='block';
+  document.getElementById('you').textContent = t;
+  var r = classify(t);
+  document.getElementById('echo').innerHTML = r.echo;
+  document.getElementById('reply').textContent = r.reply;
+  document.getElementById('src').textContent = r.src;
+}
+function has(ary){ return ary.some(w=>has2(w)); }
+function has2(w){ try{ return new RegExp(w).test(Q.value); }catch(e){ return Q.value.indexOf(w)>=0; } }
+function classify(t){
+  // 简化规则：仅演示"窄方案：要不要动手 + 危不危险 + 疑似任务/闲聊"，词表=code 壳假想
+  var v = Q.value;
+  var hi = /删除|删库|drop|清空|测试库|生产|线上|推送|强制|直接改.*库/.test(v);
+  var act = /修|改|加|建|写|删|查|跑|部署|修复|处理|清理|生成|创建|调|做一下|搞定|解决/.test(v);
+  var read = /先别改|方案|设计|怎么看|评估|分析|调研|建议|聊聊|讨论|计划|想清楚|思考/.test(v);
+  var askLLM = /拾掇|弄一下|捣鼓|那坨|抽风/.test(v);
+  var unsure = /就这样|谢谢|再见|好的|嗯/.test(v) && !act && !read;
+  if (hi && act) return {
+    echo:'👆 我理解：<span class="tag">要我动手 · 高危</span>（涉及删除/生产类操作）→ 将发起<span class="tag">审批</span>，批准后才执行',
+    reply:'这条涉及删除类高危操作，我先弹出审批卡给你确认，不会直接执行。',
+    src:'来源：code 壳词表 · 高危规则命中'
+  };
+  if (act || askLLM) {
+    var via = askLLM ? '词表未命中 → 走 LLM 兜底分类（每次几分钱，kind=intent 入账）' : '来源：code 壳词表命中「动手」';
+    return {
+      echo:'👆 我理解：<span class="tag">要我动手 · 普通</span> → 将使用 code 壳工具链执行；若你只想讨论，请说明',
+      reply:'收到，我先看相关代码/文件再动手，会边做边给你看过程。',
+      src: via
+    };
+  }
+  if (read) return {
+    echo:'👆 我理解：<span class="tag">先讨论 · 只读规划</span> → 将只读查证、给方案，不改任何文件',
+    reply:'好，我只做只读调研与方案，不改代码；你确认方案后我们再决定是否动手。',
+    src:'来源：code 壳词表命中「只读规划」'
+  };
+  if (unsure) return {
+    echo:'👆 我理解：<span class="tag">闲聊/收尾</span> → 纯对话，不带工具',
+    reply:'好嘞，需要我做什么随时说。',
+    src:'来源：未命中任何词表 → 按普通对话处理'
+  };
+  if (!act && !read) return {
+    echo:'👆 <span class="tag">拿不准</span>：像是要我做事，但我没太确定 → 我不猜，先问你',
+    reply:'你是想让我动手处理，还是只想聊一下？你说一声我再开始。',
+    src:'来源：LLM 兜底也不确定 → 回退询问（杜绝"假答应"）'
+  };
+  return { echo:'👆 闲聊', reply:'…', src:'…' };
+}
+</script>
+</body>
+</html>

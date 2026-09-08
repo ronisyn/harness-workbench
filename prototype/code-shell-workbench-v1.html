@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code 壳工作台 · 原型 v1（讨论用视觉稿，非产品代码）</title>
+<style>
+  :root{
+    --red:#e2542b; --red-d:#c2451f; --cream:#faf3e7; --panel:#fffdf8;
+    --ochre:#c98b2e; --ink:#3d2f1f; --line:#e6d5b0; --gray:#8a7a63;
+    --green:#4c8c4a; --blue:#3f6f9e; --bg-soft:#f3e8d4;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);font-size:14px}
+  /* ---------- 壳顶栏 ---------- */
+  .shellbar{display:flex;align-items:center;gap:14px;padding:10px 18px;background:linear-gradient(90deg,#3d2f1f,#5a442a);color:#f6ead6}
+  .shellbar .logo{font-weight:700;color:#ffd9a0}
+  .shellbar .domain{color:#d8c4a2;font-size:12px;background:rgba(255,255,255,.08);padding:2px 8px;border-radius:10px}
+  .shellbar .meta{margin-left:auto;font-size:12px;color:#e8d9bf}
+  .tabs{display:flex;gap:4px;padding:8px 18px 0;background:var(--cream)}
+  .tabs button{border:1px solid var(--line);border-bottom:none;background:var(--bg-soft);color:var(--ink);padding:8px 16px;border-radius:10px 10px 0 0;cursor:pointer;font-size:13px}
+  .tabs button.on{background:var(--panel);font-weight:700;border-color:#cbb98f}
+  .view{display:none;padding:14px 18px 40px}
+  .view.on{display:block}
+  h3{font-size:15px;margin:6px 0 10px}
+  .cards{display:flex;gap:12px;flex-wrap:wrap}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;flex:1;min-width:200px}
+  .card b{font-size:20px;color:var(--red)}
+  .card small{color:var(--gray)}
+  .grid2{display:grid;grid-template-columns:300px 1fr;gap:12px}
+  .grid2b{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .panel h4{font-size:13px;color:var(--red-d);margin-bottom:8px;border-bottom:1px dashed var(--line);padding-bottom:6px}
+  /* ---------- issue 列表 ---------- */
+  .issue{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px;cursor:pointer;background:var(--panel)}
+  .issue.sel{border-color:var(--red);box-shadow:0 0 0 1px var(--red)}
+  .issue .t{font-weight:600;font-size:13px}
+  .issue .sub{font-size:11px;color:var(--gray);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap}
+  .pill{font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid var(--line);color:var(--ink)}
+  .pill.r{background:#fdece7;color:var(--red-d);border-color:#f0c3b5}
+  .pill.o{background:#fdf3dd;color:#8a6410;border-color:#e8cf96}
+  .pill.g{background:#e9f3e8;color:var(--green);border-color:#bcdcb9}
+  .pill.b{background:#eaf1f8;color:var(--blue);border-color:#c3d6ea}
+  .pill.ink{background:#eee7da;color:#5a4a33}
+  /* ---------- 执行流 ---------- */
+  .flow{max-height:340px;overflow:auto;padding-right:6px}
+  .msg{display:flex;gap:10px;margin:10px 0}
+  .msg .who{flex:0 0 96px;font-size:11px;text-align:right;color:var(--gray)}
+  .msg .bubble{flex:1;background:var(--bg-soft);border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px}
+  .msg.user .bubble{background:#fdece7;border-color:#f0c3b5}
+  .trace{background:#fff;border:1px solid var(--line);border-left:4px solid var(--ochre);border-radius:8px;margin:6px 0;padding:6px 10px;font-size:12px}
+  .trace .tl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .trace .tl .nm{font-weight:600}
+  .trace .tl .st{margin-left:auto;font-size:11px;color:var(--green)}
+  .mono{font-family:Consolas,monospace;font-size:11px;background:#f7f2e7;border-radius:4px;padding:1px 4px;color:#6b5433}
+  /* ---------- 按钮 ---------- */
+  .btns{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  button.act{border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer}
+  .ok{background:var(--red);color:#fff}
+  .back{background:#fff;border:1px solid var(--red);color:var(--red-d)}
+  .ghost{background:var(--panel);border:1px solid var(--line);color:var(--ink)}
+  /* ---------- worker 榜 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:6px}
+  th,td{border:1px solid var(--line);padding:6px 10px;font-size:12px;text-align:right}
+  th{background:var(--bg-soft)}
+  td:first-child,th:first-child{text-align:left}
+  .note{font-size:11px;color:var(--gray);margin-top:8px}
+  .kpi{font-size:22px;font-weight:700}
+  .foot{position:fixed;bottom:0;left:0;right:0;background:#f1e6d2;border-top:1px solid var(--line);padding:6px 18px;font-size:11px;color:var(--gray)}
+</style>
+</head>
+<body>
+
+<!-- ================= 壳顶栏 ================= -->
+<div class="shellbar">
+  <span class="logo">⌘ Code 工作台</span>
+  <span class="domain">code.ronisyn.com（885 · 代码壳）</span>
+  <span class="meta">核心引擎 RW v0.2+ ｜ Issue 真相源: github.com/ronisyn ｜ 本原型=讨论用视觉稿 v1</span>
+</div>
+
+<div class="tabs">
+  <button class="on" data-v="v1">总览</button>
+  <button data-v="v2">Issue 工单</button>
+  <button data-v="v3">Worker 观测榜</button>
+  <button data-v="v4">对话（直接模式）</button>
+</div>
+
+<!-- ================= v1 总览 ================= -->
+<div class="view on" id="v1">
+  <h3>今天 · 代码交付脉搏</h3>
+  <div class="cards">
+    <div class="card"><small>执行中（按你指派的 worker）</small><br><b>3</b> <small>个 issue</small></div>
+    <div class="card"><small>待你复测</small><br><b>5</b> <small>个 issue</small></div>
+    <div class="card"><small>本周完成</small><br><b>12</b> <small>个 issue</small></div>
+    <div class="card"><small>本周成本</small><br><b>¥46.2</b> <small>（分 worker 记账）</small></div>
+  </div>
+  <div style="height:12px"></div>
+  <div class="grid2">
+    <div class="panel">
+      <h4>待你指派（issue 队列 → 选模型执行）</h4>
+      <div class="issue"><div class="t">#132 修复登录态过期后 401 处理</div>
+        <div class="sub"><span class="pill">需求</span><span class="pill ink">估: 中</span><span class="pill">验收: 3 条</span></div></div>
+      <div class="issue"><div class="t">#133 导出报表加进度条</div>
+        <div class="sub"><span class="pill">需求</span><span class="pill ink">估: 小</span></div></div>
+      <div class="issue"><div class="t">#134 采购模块对接 Shopify 订单（连接器试点）</div>
+        <div class="sub"><span class="pill">连接器</span><span class="pill ink">估: 大</span><span class="pill b">需 scm 壳协作</span></div></div>
+      <div class="issue"><div class="t">#135 单元测试覆盖率补到 70%</div>
+        <div class="sub"><span class="pill">质量</span><span class="pill ink">估: 中</span></div></div>
+      <div class="btns"><button class="act ok">把勾选项指派给 worker…</button>
+        <button class="act ghost">自动建议 worker（按观测榜）</button></div>
+    </div>
+    <div class="panel">
+      <h4>执行中（并行 worker 会话）</h4>
+      <div class="issue"><div class="t">#128 会话导出支持 jsonl 回放</div>
+        <div class="sub"><span class="pill g">执行中</span><span class="pill r">worker: GLM-5.3</span><span class="pill">13 轮 · ¥1.2</span></div></div>
+      <div class="issue"><div class="t">#129 轨迹卡失败态红标</div>
+        <div class="sub"><span class="pill g">执行中</span><span class="pill r">worker: DeepSeek-V4-Pro</span><span class="pill">7 轮 · ¥0.6</span></div></div>
+      <div class="issue"><div class="t">#130 定时任务增加 shell 维度</div>
+        <div class="sub"><span class="pill o">待复测</span><span class="pill r">worker: Kimi-K2.7-Code</span><span class="pill">已提测 · 等你放行</span></div></div>
+      <div class="issue"><div class="t">#131 文档: 渠道绑定壳说明</div>
+        <div class="sub"><span class="pill o">待复测</span><span class="pill r">worker: GLM-5.3</span><span class="pill">验收钩子已过</span></div></div>
+    </div>
+  </div>
+  <div class="note">注：issue 即任务真相（git 平台 issue ↔ 本地镜像）；"对话"是围绕 issue 的执行会话；普通闲聊另在"对话"页。本屏=hello「首页脉搏」在 code 壳的形态。</div>
+</div>
+
+<!-- ================= v2 Issue 工单 ================= -->
+<div class="view" id="v2">
+  <div class="grid2">
+    <div class="panel">
+      <h4>Issue（任务真相 · 状态流）</h4>
+      <div class="issue sel"><div class="t">#128 会话导出支持 jsonl 回放</div>
+        <div class="sub"><span class="pill g">执行中</span><span class="pill r">worker: GLM-5.3</span></div></div>
+      <div class="issue"><div class="t">#129 轨迹卡失败态红标</div>
+        <div class="sub"><span class="pill g">执行中</span><span class="pill r">worker: DeepSeek-V4-Pro</span></div></div>
+      <div class="issue"><div class="t">#130 定时任务增加 shell 维度</div>
+        <div class="sub"><span class="pill o">待复测</span></div></div>
+      <div class="issue"><div class="t">#131 文档: 渠道绑定壳说明</div>
+        <div class="sub"><span class="pill o">待复测</span></div></div>
+      <div class="issue"><div class="t">#127 用量视图 v_usage_by_shell</div>
+        <div class="sub"><span class="pill g2" style="color:var(--green)">已完成</span><span class="pill">通过率: 一次过</span></div></div>
+      <div class="issue"><div class="t">#126 导出追加思考区</div>
+        <div class="sub"><span class="pill" style="color:var(--red-d)">已打回×1</span><span class="pill">bug: 2 条</span></div></div>
+      <div class="note">复测=你放行/打回；打回自动记 bug 并回流 worker 统计。</div>
+    </div>
+    <div>
+      <div class="panel">
+        <h4>#128 会话导出支持 jsonl 回放 · <span class="pill r">worker: GLM-5.3</span> <span class="pill ink">验收 4 条</span></h4>
+        <div class="mono" style="padding:8px">验收钩子：① jsonl 每行含 role/content/reasoning ✓ ② 可回放（重跑不抛错）✓ ③ 导出文件 < 2MB ✓ ④ 人工复测（你）…</div>
+        <div class="flow">
+          <div class="msg user"><div class="who">你 · 09:02</div><div class="bubble">把 #128 做了：jsonl 回放格式对齐 harness。验收标准照工单，先方案后编码，完成调 finish_task。</div></div>
+          <div class="msg"><div class="who">worker GLM-5.3</div><div class="bubble">好。先读现有导出实现（index.js export 路由）与工具契约，确认字段口径…</div></div>
+          <div class="trace"><div class="tl"><span class="nm">read_file</span> server/index.js:202-242 <span class="st">✓ 0.3s</span></div></div>
+          <div class="trace"><div class="tl"><span class="nm">git_status / repo_map</span> <span class="st">✓ 0.5s</span></div></div>
+          <div class="msg"><div class="who">worker GLM-5.3</div><div class="bubble">方案：export 增 format=jsonl，逐条序列化（含 reasoning），文件流式写。先写单测再改码。</div></div>
+          <div class="trace"><div class="tl"><span class="nm">write_file</span> test/export-jsonl.test.mjs <span class="st">✓</span></div></div>
+          <div class="trace"><div class="tl"><span class="nm">run_test</span> npm test <span class="st">✓ 13/13</span></div></div>
+          <div class="trace"><div class="tl"><span class="nm">edit_file</span> server/index.js（export 分支） <span class="st">✓</span></div></div>
+          <div class="msg"><div class="who">worker GLM-5.3 · 09:41</div><div class="bubble">finish_task：实现+单测完成，验收 ①②③ 钩子已过；④ 人工复测待你。成本 ¥1.2 / 13 轮 / 34K tokens。</div></div>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:var(--gray)">本轮指标：<b style="color:var(--ink)">13 轮 · 22 分钟 · 34K token · ¥1.2 · 自测 13/13</b>（自动记入 GLM-5.3 观测档案）</div>
+        <div class="btns">
+          <button class="act ok">✅ 复测通过 · 放行合并（PR #88）</button>
+          <button class="act back">⛔ 打回并记录 bug（附原因，自动回流统计）</button>
+          <button class="act ghost">🔁 换 worker 重跑</button>
+          <button class="act ghost">💬 转直接模式讨论</button>
+        </div>
+      </div>
+      <div class="note" style="margin-top:8px">中间列=worker 的执行会话（对话+轨迹直播+指标），与 RW 880 现有轨迹体验一致；差别是它绑定 issue#128 + worker=GLM-5.3，指标按 (issue,worker) 记账。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= v3 Worker 观测榜 ================= -->
+<div class="view" id="v3">
+  <h3>Worker 观测榜（长期自然任务观测 · 非同任务对照）</h3>
+  <div class="cards">
+    <div class="card"><small>DeepSeek-V4-Pro（A）</small><br><span class="kpi">20</span> <small>任务</small><br><small>一次通过 <b>80%</b> ｜ 平均打回 bug <b>0.4</b> ｜ 中位时长 <b>18 分</b> ｜ 平均 <b>¥0.9</b>/任务</small></div>
+    <div class="card"><small>GLM-5.3（B）</small><br><span class="kpi">15</span> <small>任务</small><br><small>一次通过 <b>73%</b> ｜ 平均打回 bug <b>0.6</b> ｜ 中位时长 <b>24 分</b> ｜ 平均 <b>¥1.3</b>/任务</small></div>
+    <div class="card"><small>Kimi-K2.7-Code（C，观察中）</small><br><span class="kpi">6</span> <small>任务</small><br><small>一次通过 <b>67%</b> ｜ 平均打回 bug <b>0.8</b> ｜ 中位时长 <b>21 分</b> ｜ 平均 <b>¥1.0</b>/任务</small></div>
+  </div>
+  <div style="height:10px"></div>
+  <div class="panel">
+    <h4>逐任务流水（可下钻到 issue 会话）</h4>
+    <table>
+      <tr><th>Issue</th><th>Worker</th><th>难度估</th><th>一次过</th><th>打回 bug</th><th>时长</th><th>Token</th><th>成本</th><th>备注</th></tr>
+      <tr><td>#121 登录过期处理</td><td>DeepSeek-V4-Pro</td><td>中</td><td>✓</td><td>0</td><td>15 分</td><td>41K</td><td>¥0.8</td><td></td></tr>
+      <tr><td>#124 导出 PDF 表格</td><td>DeepSeek-V4-Pro</td><td>大</td><td>✗</td><td>2</td><td>52 分</td><td>132K</td><td>¥3.1</td><td>列宽/分页 bug</td></tr>
+      <tr><td>#118 设置页防抖保存</td><td>GLM-5.3</td><td>小</td><td>✓</td><td>0</td><td>9 分</td><td>18K</td><td>¥0.4</td><td></td></tr>
+      <tr><td>#128 jsonl 回放</td><td>GLM-5.3</td><td>中</td><td>待复测</td><td>–</td><td>22 分</td><td>34K</td><td>¥1.2</td><td></td></tr>
+      <tr><td>#115 轨迹卡动画</td><td>Kimi-K2.7-Code</td><td>小</td><td>✗</td><td>1</td><td>11 分</td><td>22K</td><td>¥0.5</td><td>闪烁问题</td></tr>
+    </table>
+    <div class="note">设计要点（与你确认的口径一致）：<b>不把同一任务同时给 A/B 跑</b>；你按 issue 指派不同 worker，任务自然不同；通过率/bug/时长/token 按 (worker×难度档) 归集。样本足够后形成"code 壳任务选型榜"，可反哺指派建议与默认路由，但<b>最终派给谁仍由你下令</b>。当前仅 A 满 20 任务，B 15，C 6——榜单置信度随任务量增长，界面需显式标注样本量。</div>
+  </div>
+</div>
+
+<!-- ================= v4 对话 ================= -->
+<div class="view" id="v4">
+  <h3>对话（直接模式 · RW 开放本色保留）</h3>
+  <div class="panel">
+    <p style="line-height:1.8">code 壳不是只有工单。你可以随时进入直接对话：</p>
+    <ul style="margin:8px 0 0 22px;line-height:1.9">
+      <li>讨论/设计：<span class="mono">"帮我设计导出模块的重构方案（先只读规划）"</span>——RW 全能力直接干；</li>
+      <li>即兴小改：<span class="mono">"把按钮颜色调一下"</span>——RW 直接写，不立项也行；</li>
+      <li>闲聊/研究：<span class="mono">"调研一下 jsonl 回放的最佳实践"</span>——联网+知识库；</li>
+      <li>转工单：<span class="mono">"这个方案落地，建个 issue 派给 GLM-5.3 执行"</span>——对话 → issue → worker；</li>
+      <li>约束提示：本壳默认装配 code 纪律（行为准则+验收模板+审批），<b>全部可调可关</b>；壳内任何执行者（含 RW 自己）遵守同一套装配——谁执行谁遵守。</li>
+    </ul>
+  </div>
+  <div class="btns">
+    <button class="act ok">＋ 新对话</button>
+    <button class="act ghost">把当前对话内容转成 issue</button>
+    <button class="act ghost">回工单视图（执行中会话在这里也可见）</button>
+  </div>
+</div>
+
+<div class="foot">Code 壳工作台 · UI 原型 v1（2026-09-08 讨论用视觉稿）｜ 待确认问题见对话：#1 issue 真相源、#2 复测收口、#3 拆分并行、#4 本稿逐屏差异反馈</div>
+
+<script>
+  document.querySelectorAll('.tabs button').forEach(function(b){
+    b.addEventListener('click', function(){
+      document.querySelectorAll('.tabs button').forEach(function(x){x.classList.remove('on')});
+      document.querySelectorAll('.view').forEach(function(v){v.classList.remove('on')});
+      b.classList.add('on');
+      document.getElementById(b.dataset.v).classList.add('on');
+    });
+  });
+  document.querySelectorAll('.issue').forEach(function(it){
+    it.addEventListener('click', function(){ document.querySelectorAll('.issue').forEach(function(x){x.classList.remove('sel')}); it.classList.add('sel'); });
+  });
+</script>
+</body>
+</html>

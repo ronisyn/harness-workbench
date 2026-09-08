@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code 壳工作台 · 原型 v2（四空间 · 讨论用视觉稿）</title>
+<style>
+  :root{--red:#e2542b;--red-d:#c2451f;--cream:#faf3e7;--panel:#fffdf8;--ochre:#c98b2e;--ink:#3d2f1f;--line:#e6d5b0;--gray:#8a7a63;--green:#4c8c4a;--blue:#3f6f9e;--soft:#f3e8d4}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--cream);color:var(--ink);font-size:14px}
+  .shellbar{display:flex;align-items:center;gap:14px;padding:10px 18px;background:linear-gradient(90deg,#3d2f1f,#5a442a);color:#f6ead6}
+  .shellbar b{color:#ffd9a0}
+  .shellbar .dom{color:#d8c4a2;font-size:12px;background:rgba(255,255,255,.08);padding:2px 8px;border-radius:10px}
+  .shellbar .admin{margin-left:auto;font-size:12px}
+  .shellbar .admin a{color:#ffd9a0;text-decoration:none;border:1px solid #8a6a3f;padding:3px 10px;border-radius:8px}
+  .nav{display:flex;gap:2px;padding:8px 18px 0;border-bottom:1px solid var(--line);background:var(--cream)}
+  .nav button{border:1px solid transparent;background:none;padding:9px 18px;cursor:pointer;font-size:14px;color:var(--ink);border-radius:10px 10px 0 0}
+  .nav button.on{background:var(--panel);border-color:var(--line);border-bottom-color:var(--panel);font-weight:700}
+  .nav .bdg{display:inline-block;background:var(--red);color:#fff;border-radius:9px;font-size:11px;padding:0 6px;margin-left:6px}
+  .view{display:none;padding:14px 18px 60px;max-width:1280px;margin:0 auto}
+  .view.on{display:block}
+  h3{font-size:15px;margin:4px 0 10px}
+  .cards{display:flex;gap:12px;flex-wrap:wrap}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;flex:1;min-width:190px}
+  .card b{font-size:18px;color:var(--red)}
+  .card small{color:var(--gray)}
+  .grid{display:grid;gap:12px}
+  .g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .panel h4{font-size:13px;color:var(--red-d);margin-bottom:8px;border-bottom:1px dashed var(--line);padding-bottom:6px}
+  .proj{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel);cursor:pointer}
+  .proj:hover{border-color:var(--red)}
+  .proj .n{font-weight:700}
+  .proj .r{font-size:11px;color:var(--gray);font-family:Consolas,monospace}
+  .meta-line{font-size:11px;color:var(--gray);display:flex;gap:10px;margin-top:6px;flex-wrap:wrap}
+  .pill{font-size:10px;padding:1px 8px;border-radius:9px;border:1px solid var(--line)}
+  .pill.r{background:#fdece7;color:var(--red-d);border-color:#f0c3b5}
+  .pill.o{background:#fdf3dd;color:#8a6410;border-color:#e8cf96}
+  .pill.g{background:#e9f3e8;color:var(--green);border-color:#bcdcb9}
+  .pill.b{background:#eaf1f8;color:var(--blue);border-color:#c3d6ea}
+  .pill.ink{background:#eee7da;color:#5a4a33}
+  table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}
+  th,td{border:1px solid var(--line);padding:5px 8px;text-align:right}
+  th{background:var(--soft)} td:first-child,th:first-child{text-align:left}
+  button.act{border:none;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px}
+  .ok{background:var(--red);color:#fff}.back{background:#fff;border:1px solid var(--red);color:var(--red-d)}.ghost{background:#fff;border:1px solid var(--line)}
+  .note{font-size:11px;color:var(--gray);margin-top:10px;line-height:1.7}
+  .flow{max-height:240px;overflow:auto}
+  .msg{display:flex;gap:8px;margin:8px 0}
+  .msg .who{flex:0 0 110px;font-size:11px;text-align:right;color:var(--gray)}
+  .msg .b{flex:1;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:6px 10px;font-size:12px}
+  .msg.me .b{background:#fdece7;border-color:#f0c3b5}
+  .trace{background:#fff;border:1px solid var(--line);border-left:4px solid var(--ochre);border-radius:8px;padding:4px 8px;font-size:11px;margin:4px 0}
+  .kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:8px}
+  .col{background:var(--soft);border-radius:10px;padding:8px;min-height:120px}
+  .col h5{font-size:12px;margin-bottom:6px;color:#6b5433}
+  .it{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:6px 8px;margin-bottom:6px;font-size:12px;cursor:pointer}
+  .it .t{font-weight:600}.it .s{font-size:10px;color:var(--gray);margin-top:2px}
+  .bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:2px 0 6px}
+  .bar i{display:block;height:100%;background:var(--red)}
+  .bar.o i{background:var(--ochre)}.bar.g i{background:var(--green)}
+  .foot{position:fixed;bottom:0;left:0;right:0;background:#f1e6d2;border-top:1px solid var(--line);padding:6px 18px;font-size:11px;color:var(--gray);z-index:5}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--gray);border:1px dashed var(--line);border-radius:10px;padding:8px 12px;margin-top:10px;background:#fff}
+</style>
+</head>
+<body>
+<div class="shellbar">
+  <b>⌘ Code 工作台</b><span class="dom">code.ronisyn.com · 885 代码壳</span>
+  <span style="font-size:12px;color:#d8c4a2">项目=仓库｜issue=工单｜执行模型=被指派的模型</span>
+  <span class="admin"><a href="#">⛭ 总后台（壳管理·跨壳模型评估）→</a></span>
+</div>
+
+<div class="nav">
+  <button class="on" data-v="v-proj">项目（仓库）</button>
+  <button data-v="v-chat">对话</button>
+  <button data-v="v-todo">我的待办<span class="bdg">12</span></button>
+  <button data-v="v-observe">模型观测</button>
+  <button data-v="v-conf">壳设置</button>
+</div>
+
+<!-- ========== 项目列表（对象空间入口） ========== -->
+<div class="view on" id="v-proj">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h3>项目（每个项目 = 一个仓库 + 该项目知识）</h3>
+    <button class="act ok">＋ 新建项目（clone 仓库）</button>
+  </div>
+  <div class="cards" style="margin-top:6px">
+    <div class="proj" onclick="openProj('harness-workbench')"><div class="n">harness-workbench</div><div class="r">github.com/ronisyn/harness-workbench</div>
+      <div class="meta-line"><span class="pill g">活跃</span><span>工单 21（执行中 3 · 待复测 4）</span><span>需求文档 6</span></div></div>
+    <div class="proj" onclick="openProj('ec-b2b-mall')"><div class="n">ec-b2b-mall</div><div class="r">github.com/ronisyn/ec-b2b-mall</div>
+      <div class="meta-line"><span class="pill g">活跃</span><span>工单 8（待指派 2）</span><span>连接器: Shopify 试点</span></div></div>
+    <div class="proj" onclick="openProj('arccaptain-app')"><div class="n">arccaptain-app</div><div class="r">github.com/ronisyn/arccaptain-app</div>
+      <div class="meta-line"><span class="pill o">搁置中</span><span>工单 15</span></div></div>
+    <div class="proj" onclick="openProj('tech-book')"><div class="n">tech-book</div><div class="r">github.com/ronisyn/tech-book</div>
+      <div class="meta-line"><span class="pill">文档型</span><span>工单 3</span></div></div>
+    <div class="proj" onclick="openProj('indus-b2b')"><div class="n">indus-b2b</div><div class="r">github.com/ronisyn/indus-b2b</div>
+      <div class="meta-line"><span class="pill">规划</span></div></div>
+  </div>
+  <div class="legend">对象空间：项目=仓库，左上是唯一入口；<b>不把 200 需求 / 1500 工单铺进全局侧栏</b>——进入项目后在其内部用页签+筛选+看板管理。</div>
+</div>
+
+<!-- ========== 项目内页（页签：工单/需求文档/文档库） ========== -->
+<div class="view" id="v-inproj">
+  <button class="act ghost" onclick="backProj()">← 项目列表</button>
+  <div class="panel" style="margin-top:8px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <h3 style="margin:0" id="pjName">harness-workbench</h3>
+      <span class="pill ink" id="pjRepo">github.com/ronisyn/harness-workbench</span>
+      <span class="pill b">项目知识库（本项目专属，议题④ L2）</span>
+      <span style="margin-left:auto;display:flex;gap:8px">
+        <button class="act ok" onclick="alert('原型：新建 GitHub issue → 指派执行模型')">＋ 新建工单</button>
+        <button class="act ghost">仓库（打开）</button>
+      </span>
+    </div>
+    <div class="nav" style="padding:8px 0 0;border:none">
+      <button class="on" data-pv="pj-kanban">工单（issue）</button>
+      <button data-pv="pj-req">需求文档</button>
+      <button data-pv="pj-docs">文档库 / 知识</button>
+    </div>
+
+    <!-- 工单看板 -->
+    <div class="pv on" id="pj-kanban">
+      <div class="kanban">
+        <div class="col"><h5>待你指派（2）</h5>
+          <div class="it"><div class="t">#134 Shopify 订单同步连接器</div><div class="s">需求:EC-0908-2 · 大 · 关联文档×2</div></div>
+          <div class="it"><div class="t">#135 单测覆盖率 70%</div><div class="s">质量 · 中</div></div>
+        </div>
+        <div class="col"><h5>执行中（3）</h5>
+          <div class="it" onclick="openIssue()"><div class="t">#128 jsonl 回放</div><div class="s">执行模型 GLM-5.3 · 13 轮 · ¥1.2 · 进行中</div></div>
+          <div class="it"><div class="t">#129 轨迹卡红标</div><div class="s">DeepSeek-V4-Pro · 7 轮</div></div>
+          <div class="it"><div class="t">#132 登录过期处理（子#132a/b）</div><div class="s">子工单并行 · Kimi×2</div></div>
+        </div>
+        <div class="col"><h5>待复测（4）</h5>
+          <div class="it"><div class="t">#130 定时任务 shell 维</div><div class="s">验收钩子已过 · 等你放行</div></div>
+          <div class="it"><div class="t">#131 渠道绑定文档</div><div class="s">等你放行</div></div>
+        </div>
+        <div class="col"><h5>已完成（最近）</h5>
+          <div class="it"><div class="t">#127 用量视图</div><div class="s">一次过</div></div>
+          <div class="it"><div class="t">#126 导出思考区</div><div class="s">打回1次 · bug2 条（已回流观测）</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="pv" id="pj-req">
+      <table><tr><th>需求文档（仓库内 md · issue 关联引用）</th><th>版本</th><th>验收</th><th>关联工单</th><th>状态</th></tr>
+      <tr><td>会话导出 jsonl 回放-需求.md</td><td>v1.1</td><td>4 条</td><td>#128</td><td><span class="pill g">已验收</span></td></tr>
+      <tr><td>壳-核分层架构-需求.md</td><td>v0.1（讨论中）</td><td>7 条</td><td>—</td><td><span class="pill o">讨论中</span></td></tr>
+      <tr><td>连接器-试点-需求.md（Shopify）</td><td>v0.5</td><td>5 条</td><td>#134</td><td><span class="pill o">待拆解</span></td></tr>
+    </table>
+    <div class="note">需求文档=给人看+拆解用；执行时模型只看工单（issue），文档通过关联链接供需要时查阅。</div>
+    </div>
+    <div class="pv" id="pj-docs"><div class="note">文档库/项目知识（AGENTS.md + 项目级知识，hello 项目级 knowledge 迁移落点）——原型略。</div></div>
+  </div>
+
+  <!-- 工单执行面板（焦点 B：过程给你看 + 你随时插话） -->
+  <div class="panel" style="margin-top:10px" id="issuePanel">
+    <h4>工单 #128 会话导出支持 jsonl 回放 · <span class="pill r">执行模型: GLM-5.3</span> <span class="pill ink">关联: jsonl回放-需求.md v1.1</span> <span class="pill o">验收 4 条(3/4 已过)</span></h4>
+    <div class="grid g2">
+      <div>
+        <div class="mono" style="background:#f7f2e7;border-radius:6px;padding:6px;font-size:11px;margin-bottom:6px">工单要求（issue body，模型执行依据）：导出接口支持 format=jsonl；每行含 role/content/reasoning；可回放；<2MB…</div>
+        <div class="flow">
+          <div class="msg me"><div class="who">你 · 09:02</div><div class="b">按工单做，先方案后编码，完成调 finish_task。</div></div>
+          <div class="msg"><div class="who">执行模型 GLM-5.3</div><div class="b">收到。先读现有导出实现与测试基线…</div></div>
+          <div class="trace">read_file server/index.js:202-242 ✓ · git_status ✓</div>
+          <div class="msg"><div class="who">执行模型 GLM-5.3</div><div class="b">方案定了：format=jsonl 分支+流式写+单测。开始编码。</div></div>
+          <div class="trace">write_file test/export-jsonl.test.mjs ✓ → run_test 13/13 ✓ → edit_file ✓</div>
+          <div class="msg"><div class="who">执行模型 GLM-5.3 · 09:41</div><div class="b">finish_task：①②③ 钩子过，④ 人工复测待你。¥1.2 / 13 轮 / 34K token。</div></div>
+          <div class="msg me"><div class="who">你（插入）· 现在</div><div class="b">回放时 reasoning 为空的行也保留吗？我看下测试覆盖…</div></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <input style="flex:1;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff" placeholder="对该执行模型说…（流式回复/思考/轨迹在此实时显示，插话下轮生效，不会丢现场）">
+          <button class="act ok">发送</button>
+          <button class="act ghost">⏹ 停</button>
+        </div>
+      </div>
+      <div>
+        <div class="note" style="margin-top:0"><b>本轮指标</b>：13 轮 · 22 分 · 34K token · ¥1.2（自动记入 GLM-5.3 观测）</div>
+        <div style="margin-top:6px" class="note"><b>验收钩子</b><br>① jsonl 逐行含 role/content/reasoning ✅<br>② 可回放不抛错 ✅<br>③ 文件&lt;2MB ✅<br>④ 人工复测 —— 等你</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="act ok">✅ 复测通过 · 放行（PR #88 合并）</button>
+          <button class="act back">⛔ 打回（必填 bug 原因 → 回流观测 + 回执行队列）</button>
+          <button class="act ghost">🔁 换执行模型重跑</button>
+          <button class="act ghost">📎 关联文档</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 对话（会话空间） ========== -->
+<div class="view" id="v-chat">
+  <div class="grid g3">
+    <div class="panel">
+      <h4>与 RW 的讨论（可挂上下文）</h4>
+      <div class="it"><div class="t">壳-核分层架构 · 讨论中</div><div class="s">挂: 需求文档 · 23 条新决策点</div></div>
+      <div class="it"><div class="t">hello 知识库并入方案</div><div class="s">挂: 文档 · 附 B 四问</div></div>
+      <div class="it"><div class="t">连接器三层设计确认</div><div class="s">独立 · 已确认 A</div></div>
+    </div>
+    <div class="panel">
+      <h4>执行会话（工单执行 · 也可在此列表看到）</h4>
+      <div class="it"><div class="t">#128 · GLM-5.3</div><div class="s">进行中 · 13 轮 · ¥1.2</div></div>
+      <div class="it"><div class="t">#129 · DeepSeek-V4-Pro</div><div class="s">进行中 · 7 轮</div></div>
+      <div class="it"><div class="t">#130 · Kimi-K2.7-Code</div><div class="s">待复测（等你）</div></div>
+    </div>
+    <div class="panel">
+      <h4>关系说明</h4>
+      <div class="note" style="margin-top:4px">对话是"线"（线程），对象是"点"（项目/工单/文档）。讨论可挂到对象上也可独立；执行会话自动挂在工单上。<b>待办不是对话也不是工单</b>——它是"欠你的行动"汇总（见我的待办页）。规模上千也不会铺满侧栏：侧栏只列会话与当前上下文。</div>
+    </div>
+  </div>
+  <div class="legend">会话空间与对象空间分开：这里是全部线程（讨论+执行会话）；项目/工单在"项目"入口里。一个对话中没答完的确认 → 自动进入"我的待办"。</div>
+</div>
+
+<!-- ========== 我的待办（行动队列） ========== -->
+<div class="view" id="v-todo">
+  <h3>我的待办 = "欠你的行动"，处理即消失（跨项目/对话聚合）</h3>
+  <div class="grid g3">
+    <div class="panel"><h4>待你指派（2）</h4>
+      <div class="it"><div class="t">#134 Shopify 连接器 → 指派模型</div><div class="s">来源: 项目 ec-b2b-mall · 新建工单</div></div>
+      <div class="it"><div class="t">#135 单测覆盖率 → 指派模型</div><div class="s">来源: 项目 harness-workbench</div></div>
+    </div>
+    <div class="panel"><h4>待你复测（4）</h4>
+      <div class="it"><div class="t">#130 定时任务 shell 维 · Kimi</div><div class="s">来源: 执行会话（验收钩子已过）</div></div>
+      <div class="it"><div class="t">#131 渠道绑定文档 · GLM</div><div class="s">来源: 执行会话</div></div>
+      <div class="it"><div class="t">#126-修复 导出思考区 · DeepSeek</div><div class="s">打回后修复再提 · bug 原因已记录</div></div>
+    </div>
+    <div class="panel"><h4>待你确认（6）· 来自对话/审批/驱动器</h4>
+      <div class="it"><div class="t">确认 5 件事（壳 IA 讨论中）</div><div class="s">来源: 对话「壳-核分层」· ask 卡未答 → 排队</div></div>
+      <div class="it"><div class="t">审批: 工单#128 将写 server/index.js</div><div class="s">来源: 执行会话审批卡 · 超时自动拒</div></div>
+      <div class="it"><div class="t">裁决: #132 登录方案二选一</div><div class="s">来源: 驱动器 need_input（夜间无人值守）</div></div>
+    </div>
+  </div>
+  <div class="legend">任务出 bug = 工单回执行队列（重派/换模型）不是你的待办；需要你拍板的（指派谁/放行/打回裁决/对话中没答的确认）才是你的待办。晨报=本页早上的聚合推送。</div>
+</div>
+
+<!-- ========== 模型观测（观测空间·壳内） ========== -->
+<div class="view" id="v-observe">
+  <h3>模型观测（code 壳内 · 基于任务 · 不跨壳；跨壳对比在总后台）</h3>
+  <div class="cards">
+    <div class="card"><small>DeepSeek-V4-Pro</small><br><b>20</b> 任务 · 一次通过 80%
+      <div style="margin-top:6px;font-size:11px;color:var(--gray)">通过率趋势（近4周）</div>
+      <div class="bar o"><i style="width:88%"></i></div><div class="bar o"><i style="width:75%"></i></div><div class="bar o"><i style="width:83%"></i></div><div class="bar o"><i style="width:80%"></i></div>
+      <small>avg bug 0.4 · 中位 18 分 · 均 ¥0.9</small></div>
+    <div class="card"><small>GLM-5.3</small><br><b>15</b> 任务 · 一次通过 73%
+      <div style="margin-top:6px;font-size:11px;color:var(--gray)">通过率趋势</div>
+      <div class="bar g"><i style="width:70%"></i></div><div class="bar g"><i style="width:80%"></i></div><div class="bar g"><i style="width:67%"></i></div><div class="bar g"><i style="width:73%"></i></div>
+      <small>avg bug 0.6 · 中位 24 分 · 均 ¥1.3</small></div>
+    <div class="card"><small>Kimi-K2.7-Code（观察中）</small><br><b>6</b> 任务 · 一次通过 67%
+      <div style="margin-top:6px;font-size:11px;color:var(--gray)">通过率趋势（样本少）</div>
+      <div class="bar"><i style="width:60%"></i></div><div class="bar"><i style="width:50%"></i></div><div class="bar"><i style="width:75%"></i></div><div class="bar"><i style="width:67%"></i></div>
+      <small>avg bug 0.8 · 中位 21 分 · 均 ¥1.0</small></div>
+  </div>
+  <div class="panel" style="margin-top:10px">
+    <h4>费用 / 时长 / token 看板（周粒度 · 可按难度档切换）</h4>
+    <div class="grid g3">
+      <div><div class="note">周成本（¥）</div>
+        <div class="bar"><i style="width:60%"></i></div><div class="bar"><i style="width:74%"></i></div><div class="bar"><i style="width:55%"></i></div><div class="bar"><i style="width:68%"></i></div>
+      </div>
+      <div><div class="note">中位时长（分）</div>
+        <div class="bar o"><i style="width:55%"></i></div><div class="bar o"><i style="width:62%"></i></div><div class="bar o"><i style="width:50%"></i></div><div class="bar o"><i style="width:58%"></i></div>
+      </div>
+      <div><div class="note">token（M，input+output）</div>
+        <div class="bar g"><i style="width:48%"></i></div><div class="bar g"><i style="width:70%"></i></div><div class="bar g"><i style="width:52%"></i></div><div class="bar g"><i style="width:61%"></i></div>
+      </div>
+    </div>
+    <table style="margin-top:10px"><tr><th>执行模型</th><th>难度档样本</th><th>一次过</th><th>avg bug</th><th>中位时长</th><th>均 token</th><th>均成本</th></tr>
+      <tr><td>DeepSeek-V4-Pro</td><td>小8/中9/大3</td><td>80%</td><td>0.4</td><td>18 分</td><td>38K</td><td>¥0.9</td></tr>
+      <tr><td>GLM-5.3</td><td>小6/中7/大2</td><td>73%</td><td>0.6</td><td>24 分</td><td>44K</td><td>¥1.3</td></tr>
+      <tr><td>Kimi-K2.7-Code</td><td>小3/中2/大1</td><td>67%</td><td>0.8</td><td>21 分</td><td>36K</td><td>¥1.0</td></tr>
+    </table>
+    <div class="note">口径：观测式（你指派、任务各异），非对照实验；样本量随任务积累，置信度标注随行。下钻=点模型看逐任务流水（含打回 bug 原因）。</div>
+  </div>
+</div>
+
+<!-- ========== 壳设置 ========== -->
+<div class="view" id="v-conf">
+  <div class="grid g3">
+    <div class="panel"><h4>执行模型名单（指派候选）</h4>
+      <div class="note">DeepSeek-V4-Pro · GLM-5.3 · Kimi-K2.7-Code（勾选出现在指派下拉；显式指派永远由你决定）</div></div>
+    <div class="panel"><h4>壳级装配（可调可关）</h4>
+      <div class="note">纪律层 · 验收模板（复测放行默认开）· 审批规则 · 连接器勾选 · 知识库范围（全局+本项目）——对应附 D 直接/工单两模式</div></div>
+    <div class="panel"><h4>入口</h4>
+      <div class="note">GitHub issue 同步（MCP github）· 晨报推送（我的待办聚合）· 渠道绑定</div></div>
+  </div>
+</div>
+
+<div class="foot">Code 壳工作台 · 原型 v2（四空间：对象/会话/待办/观测）｜ 讨论点：①规模与导航 ②工单执行面板 ③待办来源语义 ④模型观测口径 ⑤总后台原型下一步</div>
+
+<script>
+  function show(id){document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));document.getElementById(id).classList.add('on')}
+  document.querySelectorAll('.nav[data-v] , .nav').forEach(function(){});
+  document.querySelectorAll('.nav > button').forEach(function(b){
+    if(!b.dataset.v) return;
+    b.addEventListener('click',function(){
+      document.querySelectorAll('.nav > button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      var v=b.dataset.v;
+      if(v==='v-proj'){show('v-proj')}
+      else{show(v)}
+    });
+  });
+  function openProj(name){
+    document.getElementById('pjName').textContent=name;
+    show('v-inproj');
+    document.querySelectorAll('.nav > button').forEach(x=>x.classList.remove('on'));
+  }
+  function backProj(){show('v-proj');document.querySelector('.nav > button').classList.add('on')}
+  function openIssue(){/* 原型：面板已常驻显示工单#128 */alert('原型：此处打开 #128 执行面板（当前已展示 #128 样例）')}
+  document.querySelectorAll('button[data-pv]').forEach(function(b){
+    b.addEventListener('click',function(){
+      document.querySelectorAll('button[data-pv]').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      document.querySelectorAll('.pv').forEach(p=>p.classList.remove('on'));
+      document.getElementById(b.dataset.pv).classList.add('on');
+    });
+  });
+</script>
+</body>
+</html>
