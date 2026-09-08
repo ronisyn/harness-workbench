@@ -1,5 +1,5 @@
 // src/shared/ToolsetEditor.jsx - R1 单一事实源：工具启用集勾选（平台豁免恒开不可关）
-// 对话页⚙设置→工具 与 1.4 Agent 能力 共用；数据自管（GET/PUT /api/toolset）。
+// 统一后台 1.4 Agent 能力 使用（原对话页⚙设置抽屉已退役）；数据自管（GET/PUT /api/toolset）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 

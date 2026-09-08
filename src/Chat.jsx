@@ -1,15 +1,11 @@
 // src/Chat.jsx - 主界面（参照 3080 布局重构）
-// 顶栏(logo 左上 + 对话标题 + 权限/停止) + 左栏(模型切换上方 + 会话列表 + 设置下方) + 对话区
+// 顶栏(logo 左上 + 对话标题 + 权限/停止) + 左栏(模型切换上方 + 会话列表) + 对话区
+// 2026-09-09 去冗余：设置入口退役——能力/工具/规则/提案/高级参数/MCP/定时/厂商/模型市场统一在「🎛 后台」（1.1/1.4/1.5/1.8），本页聚焦对话
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, streamChat } from './api.js';
 import Knowledge from './Knowledge.jsx';
-import SettingsPanel from './shared/SettingsPanel.jsx';
-import CapSwitches from './shared/CapSwitches.jsx';
-import ToolsetEditor from './shared/ToolsetEditor.jsx';
-import RulesEditor from './shared/RulesEditor.jsx';
-import ProposalsManager from './shared/ProposalsManager.jsx';
 
 function Md({ text }) {
   return (
@@ -184,20 +180,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const curRef = useRef(null);      // 当前正在查看的会话 id（流式回调据此判断是否已切走，防跨会话污染）
   const busyConvRef = useRef(null); // 正在生成中的会话 id（发送时锁定，停止/结束时清空）
   const [stats, setStats] = useState({});
-  const [drawer, setDrawer] = useState(false);
-  const [drawerTab, setDrawerTab] = useState('caps');
   const [kbOpen, setKbOpen] = useState(false); // ④ 知识库面板
-  // R1/R2：能力开关/工具集/规则/提案/高级参数 已下沉共享组件自管，Chat 不再维护副本（见 shared/）
-  const [mcpText, setMcpText] = useState(''); // P11 MCP 配置 JSON（设置→MCP）
-  const [mcpStatus, setMcpStatus] = useState(''); // MCP 连接状态
-  const [provList, setProvList] = useState([]);
-  const [market, setMarket] = useState([]);
-  const [marketBusy, setMarketBusy] = useState(false);
-  const [selModels, setSelModels] = useState({});
+  // 2026-09-09 去冗余：对话页⚙设置抽屉退役——能力/工具/规则/提案已由共享组件在后台 1.4/1.5 呈现，
+  // 高级参数/MCP/定时任务→后台 1.8 设置，厂商/模型市场→后台 1.1 模型广场（服务端接口不变，仅入口迁移）
+  const [provList, setProvList] = useState([]); // 全量厂商+模型（openConv 恢复会话模型选择 / switchProvider 级联用）
   const [toast, setToast] = useState('');
-  const [toolcalls, setToolcalls] = useState([]);
-  const [tasks, setTasks] = useState([]);
-  const [newTask, setNewTask] = useState({ name: '', cron: '30 2 * * *', prompt: '' });
   const [queue, setQueue] = useState([]);       // 输入队列：执行中输入的消息排队，结束后自动发送
   const queueRef = useRef([]);                  // 队列同步 ref（回调判空/取队首不依赖闭包过期）
   const [renamingId, setRenamingId] = useState(null); // 正在重命名的会话 id（null=无）
@@ -315,7 +302,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
       return m;
     });
     setMsgs(msgsWithTraces);
-    setToolcalls(tc.toolcalls || []);
     loadStats(id);
     const c = convs.find((x) => x.id === id);
     setCurTitle(c?.title || '对话');
@@ -327,8 +313,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     const savedDraft = draftsRef.current[id] || '';
     setInput(savedDraft);
     inputRef.current = savedDraft;
-    // P3-2：切换瞬间先清空旧会话内容/统计/轨迹，避免加载期间错位残留（弱网可见明显）
-    setMsgs([]); setToolcalls([]); setStats({}); setLive(null);
+    // P3-2：切换瞬间先清空旧会话内容/统计，避免加载期间错位残留（弱网可见明显）
+    setMsgs([]); setStats({}); setLive(null);
     setCur(id);
     setStickBottom(true); // 切换会话：回到贴底跟随（避免停留在上一会话的滚动位置）
     actSeqRef.current = 0;
@@ -366,7 +352,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     try { await api.patchConversation(d.id, { provider, model: model || null }); } catch { /* ignore */ }
     await loadConvs();
     if (cur && inputRef.current) draftsRef.current[cur] = inputRef.current; // 离开当前会话：保留其草稿
-    setCur(d.id); setCurTitle('新对话'); setMsgs([]); setToolcalls([]); setStats({}); setStickBottom(true);
+    setCur(d.id); setCurTitle('新对话'); setMsgs([]); setStats({}); setStickBottom(true);
     setInput(''); inputRef.current = ''; // 新会话不继承任何会话的草稿
   };
 
@@ -550,10 +536,9 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
             setBusy(false); busyConvRef.current = null;
-            // 仍在看本会话才刷新统计/抽屉（防覆盖已切走会话的显示）
+            // 仍在看本会话才刷新统计（防覆盖已切走会话的显示）；消息轨迹已随 tool_done 实时入 msgs[].traces
             if (curRef.current === convId) {
               loadStats(convId);
-              api.toolcalls(convId).then((d) => setToolcalls(d.toolcalls || [])).catch(() => {});
             }
             // 智能起名：回复完成后若标题仍为默认，用 LLM 生成精髓标题（服务端仅默认名才更新，保护手动重命名）
             api.autoTitle(convId).then((d) => { if (d && d.ok && d.title) { setConvs((cs) => cs.map((x) => (x.id === convId ? { ...x, title: d.title } : x))); if (curRef.current === convId) setCurTitle(d.title); } }).catch(() => {});
@@ -645,8 +630,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
         if (busyRef.current) return; // 本页 SSE 直连渲染中，环仅作进度推进
         const last = items[items.length - 1];
         setLive({ last: (last.type === 'tool_start' || last.type === 'tool_done') && last.tool ? last.tool.name : last.type, ts: Date.now() });
-        // 同步轨迹抽屉数据（进行中也能看）
-        api.toolcalls(cur).then((x) => setToolcalls(x.toolcalls || [])).catch(() => {});
       } catch { /* 轮询失败静默（断网/会话删除） */ }
     }, 2500);
     return () => clearInterval(t);
@@ -662,70 +645,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     await api.patchConversation(cur, { preset });
     setConvs((cs) => cs.map((c) => (c.id === cur ? { ...c, preset } : c)));
     setToast('工具预设已切换为 ' + PRESET_LABEL[preset] + '（' + PRESET_TIP[preset] + '）');
-  };
-
-  const openDrawer = async (tab = 'caps') => {
-    setDrawer(true); setDrawerTab(tab);
-    try {
-      // R1/R2：能力开关/高级参数/工具/规则/提案面板为共享组件，各自自载（打开即渲染，无重复预载）；
-      // 此处仅预载仍需 Chat 侧状态的：厂商/市场/轨迹/定时/MCP
-      if (tab === 'providers') { const p = await api.providers().catch(() => ({ providers: [] })); setProvList(p.providers || []); }
-      if (tab === 'market') await loadMarket();
-      if (tab === 'trace' && cur) { const t = await api.toolcalls(cur).catch(() => ({ toolcalls: [] })); setToolcalls(t.toolcalls || []); }
-      if (tab === 'tasks') { const t = await api.tasks().catch(() => ({ tasks: [] })); setTasks(t.tasks || []); }
-      if (tab === 'mcp') {
-        try { const s = await api.getSettings(); setMcpText(JSON.stringify((s.settings?.mcp_servers || []), null, 2)); } catch { setMcpText('[]'); }
-        try { const m = await api.mcpStatus(); setMcpStatus('已配置 ' + (m.configured || []).length + ' 个 server；已连接 ' + (m.clients || []).length + ' 个：' + (m.clients || []).map((c) => c.id).join(', ')); } catch { setMcpStatus('查询失败'); }
-      }
-    } catch (e) { setToast('打开设置失败：' + (e.message || e)); }
-  };
-
-  // P11 MCP 配置保存 + 重连
-  const saveMcp = async () => {
-    let parsed = [];
-    try { parsed = JSON.parse(mcpText || '[]'); if (!Array.isArray(parsed)) throw new Error('需为数组'); }
-    catch (e) { setToast('MCP 配置格式错误：' + e.message); return; }
-    try {
-      await api.setSettings({ mcp_servers: parsed });
-      const r = await api.mcpReload();
-      setMcpStatus('已保存并重连：' + (r.results || []).map((x) => (x.ok ? '✅' : '❌') + x.id).join(' ') + '；注册工具 ' + (r.registeredTools || 0) + ' 个');
-      setToast('MCP 配置已保存并重连');
-    } catch (e) { setToast('保存失败：' + e.message); }
-  };
-
-  // R1：提案/规则/高级参数 已由共享组件自管（shared/ProposalsManager 等），见抽屉 tab 渲染
-  const loadTasks = async () => { try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ } };
-  const createTask = async () => {
-    try {
-      await api.createTask(newTask);
-      setNewTask({ name: '', cron: '30 2 * * *', prompt: '' });
-      setToast('定时任务已创建');
-      loadTasks();
-    } catch (ex) { setToast(ex.message); }
-  };
-  const toggleTask = async (id, enabled) => { await api.patchTask(id, { enabled }); loadTasks(); };
-  const delTask = async (id) => { if (!confirm('删除该定时任务？')) return; await api.deleteTask(id); loadTasks(); };
-
-  const loadMarket = async () => {
-    setMarketBusy(true);
-    try { const d = await api.marketList(); setMarket(d.sources); }
-    catch (ex) { setToast(ex.message); }
-    finally { setMarketBusy(false); }
-  };
-
-  const refreshMarket = async () => {
-    setMarketBusy(true);
-    try { await api.marketRefresh(); setToast('市场已刷新'); await loadMarket(); }
-    catch (ex) { setToast(ex.message); setMarketBusy(false); }
-  };
-
-  const connectMarket = async (source, models) => {
-    try {
-      const d = await api.marketConnect(source, models);
-      setToast(`已接入 ${d.inserted.length} 个模型`);
-      setSelModels({});
-      loadMarket();
-    } catch (ex) { setToast(ex.message); }
   };
 
   useEffect(() => {
@@ -798,7 +717,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
             ))}
           </div>
           <div className="rw-side-foot">
-            <button className="rw-btn" onClick={() => openDrawer('caps')}>⚙ 设置</button>
+            {/* 2026-09-09 去冗余：⚙设置抽屉退役——能力/工具/规则/提案/高级参数/MCP/定时任务统一在「🎛 后台」1.1/1.4/1.5/1.8 */}
             <span className="rw-user">{user.username}</span>
             <button className="rw-btn" onClick={onLogout} title="退出">↪</button>
           </div>
@@ -946,157 +865,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
           </div>
         </main>
       </div>
-
-      {/* 设置抽屉 */}
-      {drawer && (
-        <div className="rw-mask" onClick={() => setDrawer(false)}>
-          <div className="rw-drawer" onClick={(e) => e.stopPropagation()}>
-            <div className="rw-drawer-head">
-              <span>设置</span>
-              <div className="rw-drawer-tabs">
-                <button className={'rw-dtab' + (drawerTab === 'caps' ? ' sel' : '')} onClick={() => openDrawer('caps')}>能力</button>
-                <button className={'rw-dtab' + (drawerTab === 'providers' ? ' sel' : '')} onClick={() => openDrawer('providers')}>厂商</button>
-                <button className={'rw-dtab' + (drawerTab === 'market' ? ' sel' : '')} onClick={() => openDrawer('market')}>模型市场</button>
-                <button className={'rw-dtab' + (drawerTab === 'tools' ? ' sel' : '')} onClick={() => openDrawer('tools')}>工具</button>
-                <button className={'rw-dtab' + (drawerTab === 'rules' ? ' sel' : '')} onClick={() => openDrawer('rules')}>规则</button>
-                <button className={'rw-dtab' + (drawerTab === 'proposals' ? ' sel' : '')} onClick={() => openDrawer('proposals')}>提案</button>
-                <button className={'rw-dtab' + (drawerTab === 'mcp' ? ' sel' : '')} onClick={() => openDrawer('mcp')}>MCP</button>
-                <button className={'rw-dtab' + (drawerTab === 'trace' ? ' sel' : '')} onClick={() => openDrawer('trace')}>轨迹</button>
-                <button className={'rw-dtab' + (drawerTab === 'tasks' ? ' sel' : '')} onClick={() => openDrawer('tasks')}>定时</button>
-              </div>
-              <button className="rw-btn" onClick={() => setDrawer(false)} title="保存并返回对话">← 返回对话</button>
-            </div>
-            <div className="rw-drawer-body">
-              {drawerTab === 'caps' && (
-                <>
-                  <SettingsPanel compact />
-                  <CapSwitches onToast={setToast} showGroupTitle={false} />
-                </>
-              )}
-
-              {drawerTab === 'providers' && (
-                <div className="rw-providers">
-                  <div className="rw-cap-gtitle">已接入厂商（{provList.filter((p) => p.connected).length}）</div>
-                  {provList.filter((p) => p.connected).map((p) => (
-                    <div key={p.id} className="rw-provider">
-                      <div className="rw-provider-name">{p.name} <span className="rw-provider-key">{p.provider_key}</span></div>
-                      <div className="rw-provider-models">
-                        {p.models.length ? p.models.map((m) => (
-                          <span key={m.id} className="rw-provider-model">{m.model_id}{m.enabled ? '' : '（关）'}</span>
-                        )) : <span className="rw-muted">未接入模型</span>}
-                      </div>
-                    </div>
-                  ))}
-                  {provList.filter((p) => !p.connected).length > 0 && (
-                    <>
-                      <div className="rw-cap-gtitle">未配置 Key（{provList.filter((p) => !p.connected).length}）</div>
-                      {provList.filter((p) => !p.connected).map((p) => (
-                        <div key={p.id} className="rw-provider rw-provider-off">
-                          <div className="rw-provider-name">{p.name} <span className="rw-provider-key">{p.provider_key}</span></div>
-                          <div className="rw-provider-models"><span className="rw-muted">未配置 Key，无法加载模型（在 .env 填入 {p.api_key_env || 'API key'} 后重启接入）</span></div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {drawerTab === 'market' && (
-                <div className="rw-market">
-                  <div className="rw-market-head">
-                    <button className="rw-btn" onClick={refreshMarket} disabled={marketBusy}>{marketBusy ? '刷新中…' : '🔄 刷新市场'}</button>
-                    <span className="rw-market-hint">勾选→接入（归属该平台）</span>
-                  </div>
-                  {market.map((src) => (
-                    <div key={src.source} className="rw-market-src">
-                      <div className="rw-market-srcname">{src.source}（{src.count} 个）</div>
-                      <div className="rw-market-models">
-                        {src.models.slice(0, 40).map((m) => (
-                          <label key={m.id} className="rw-market-m">
-                            {/* selModels 键带源前缀：各市场源独立勾选，避免跨源串号错源接入 */}
-                            <input type="checkbox" checked={Boolean(selModels[src.source + '::' + m.id])} disabled={m.connected}
-                              onChange={(e) => setSelModels((s) => ({ ...s, [src.source + '::' + m.id]: e.target.checked }))} />
-                            <span className={m.connected ? 'conn' : ''}>{m.id}{m.connected ? ' ✓' : ''}</span>
-                          </label>
-                        ))}
-                      </div>
-                      {src.models.some((m) => selModels[src.source + '::' + m.id]) && (
-                        <button className="rw-btn pri" onClick={() => connectMarket(src.source, src.models.filter((m) => selModels[src.source + '::' + m.id]).map((m) => m.id))}>接入选中模型</button>
-                      )}
-                    </div>
-                  ))}
-                  {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
-                </div>
-              )}
-
-              {drawerTab === 'tools' && (
-                <div className="rw-trace"><ToolsetEditor onToast={setToast} /></div>
-              )}
-
-              {drawerTab === 'rules' && (
-                <div className="rw-trace"><RulesEditor onToast={setToast} /></div>
-              )}
-
-              {drawerTab === 'proposals' && (
-                <div className="rw-trace"><ProposalsManager onToast={setToast} /></div>
-              )}
-
-              {drawerTab === 'mcp' && (
-                <div className="rw-trace">
-                  <div className="rw-cap-gtitle">MCP 外部工具接入（P11）——连接 MCP server 后，其工具以 mcp_serverId_tool 名提供给模型</div>
-                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>{`配置格式（数组）：[ { id, command, args: [], env: { KEY: 值 } } ]。示例（GitHub MCP server）：
-[ { "id": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "你的token" } } ]`}</div>
-                  <textarea className="rw-input" rows="10" style={{ fontFamily: 'monospace', fontSize: 12 }}
-                    value={mcpText} onChange={(e) => setMcpText(e.target.value)} placeholder='[]' />
-                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button className="rw-btn" onClick={saveMcp}>保存并连接</button>
-                  </div>
-                  {mcpStatus && <div style={{ marginTop: 8, fontSize: 12 }}>{mcpStatus}</div>}
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>提示：密钥字段（键名含 token/key/secret/password 等）在页面显示为 <code>__REDACTED__</code> 占位，不会明文下发——直接保存（不改动该键）即保留服务器原值；需更换时才填入新 token。token 仅存于服务器 settings（不写入前端存储）；server 需服务器上可执行（npx/docker 等）。</div>
-                </div>
-              )}
-
-              {drawerTab === 'trace' && (
-                <div className="rw-trace">
-                  <div className="rw-cap-gtitle">工具调用轨迹（R5：与消息内工具过程共用同一 TraceCard 渲染）</div>
-                  {toolcalls.length ? toolcalls.map((t) => (
-                    // DB 行 → TraceCard item shape（名称/参数/结果/状态/耗时）；args/result 已含 O-11 格式化兜底
-                    <TraceCard key={t.id} items={[{ name: t.tool_name, args: (typeof t.args === 'string' ? safeJson(t.args) : t.args) ?? {}, result: t.result_summary, status: t.status || 'done', duration_ms: t.duration_ms || 0 }]} />
-                  )) : <div className="rw-empty">本会话暂无工具调用</div>}
-                </div>
-              )}
-
-              {drawerTab === 'tasks' && (
-                <div className="rw-tasks">
-                  <div className="rw-cap-gtitle">定时任务（cron：分 时 日 月 周）</div>
-                  <div className="rw-task-new">
-                    <input className="rw-input" placeholder="任务名称" value={newTask.name} onChange={(e) => setNewTask({ ...newTask, name: e.target.value })} />
-                    <input className="rw-input" placeholder="cron（如 30 2 * * * 每日2:30）" value={newTask.cron} onChange={(e) => setNewTask({ ...newTask, cron: e.target.value })} />
-                    <textarea className="rw-input" rows="2" placeholder="要 AI 执行的指令…" value={newTask.prompt} onChange={(e) => setNewTask({ ...newTask, prompt: e.target.value })} />
-                    <button className="rw-btn pri" onClick={createTask} disabled={!newTask.name || !newTask.prompt}>＋ 创建</button>
-                  </div>
-                  {tasks.map((t) => (
-                    <div key={t.id} className="rw-task-item">
-                      <div className="rw-task-head">
-                        <b>{t.name}</b>
-                        <span className={'rw-task-cron ' + (t.enabled ? 'on' : '')}>{t.enabled ? '● 运行中' : '○ 已暂停'}</span>
-                      </div>
-                      <div className="rw-task-meta">{t.cron} ｜ {t.provider}/{t.model}</div>
-                      <div className="rw-task-prompt">{String(t.prompt).slice(0, 100)}</div>
-                      {t.last_run && <div className="rw-task-last">上次：{String(t.last_run).slice(0, 16)}｜{String(t.last_result || '').slice(0, 60)}</div>}
-                      <div className="rw-task-ops">
-                        <button className="rw-btn" onClick={() => toggleTask(t.id, !t.enabled)}>{t.enabled ? '暂停' : '启用'}</button>
-                        <button className="rw-btn" onClick={() => delTask(t.id)}>删除</button>
-                      </div>
-                    </div>
-                  ))}
-                  {!tasks.length && <div className="rw-empty">暂无定时任务</div>}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {kbOpen && <Knowledge onClose={() => setKbOpen(false)} />}
 

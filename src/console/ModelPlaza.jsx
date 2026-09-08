@@ -1,4 +1,5 @@
-// src/console/ModelPlaza.jsx - 1.1 模型广场（§7.2：厂商发现/连接态 + key 临时测试 + 模型启停 + 市场拉取）
+// src/console/ModelPlaza.jsx - 1.1 模型广场（§7.2：厂商发现/连接态 + key 临时测试 + 模型启停 + 市场拉取/勾选接入）
+// 终审去冗余：对话页⚙设置抽屉退役后，"模型市场"刷新/勾选/接入动作迁入本板块（原只读快照升级为可操作）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 
@@ -7,6 +8,8 @@ export default function ModelPlaza() {
   const [market, setMarket] = useState([]);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);          // 市场刷新中
+  const [selModels, setSelModels] = useState({});   // 勾选接入（键带源前缀防跨源串号）
   // key 测试表单：按 provider_key 记录临时输入（不落库）
   const [testKey, setTestKey] = useState({});
   const [testing, setTesting] = useState('');
@@ -21,10 +24,11 @@ export default function ModelPlaza() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  const flash = async (fn, okTxt) => { try { await fn(); if (okTxt) { setMsg(okTxt); setTimeout(() => setMsg(''), 2000); } } catch { /* 错误已由调用方处理 */ } };
+
   const toggleModel = async (m) => {
-    try { await api.modelToggle(m.id, !Boolean(m.enabled)); setMsg((m.enabled ? '已停用 ' : '已启用 ') + m.model_id); load(); }
+    try { await api.modelToggle(m.id, !Boolean(m.enabled)); flash(() => load(), (m.enabled ? '已停用 ' : '已启用 ') + m.model_id); }
     catch (e) { setErr(e.message); }
-    setTimeout(() => setMsg(''), 2000);
   };
 
   const doTest = async (pk, baseUrl) => {
@@ -37,6 +41,21 @@ export default function ModelPlaza() {
       setTestRes((o) => ({ ...o, [pk]: (r.ok ? '✅ ' : '❌ ') + (r.note || ('连通 (status ' + (r.status || '?') + ')')) }));
     } catch (e) { setTestRes((o) => ({ ...o, [pk]: '❌ ' + (e.note || e.message) })); }
     finally { setTesting(''); }
+  };
+
+  const refreshMarket = async () => {
+    setBusy(true); setErr('');
+    try { await api.marketRefresh(); await load(); setMsg('市场已刷新'); setTimeout(() => setMsg(''), 2000); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const connectMarket = async (source, modelIds) => {
+    try {
+      const d = await api.marketConnect(source, modelIds);
+      setSelModels({});
+      flash(() => load(), '已接入 ' + (d.inserted || []).length + ' 个模型（' + source + '）');
+    } catch (e) { setErr(e.message); }
   };
 
   return (
@@ -77,24 +96,33 @@ export default function ModelPlaza() {
       ))}
       {provs.length === 0 && <div className="rw-console-ph"><div>暂无厂商（服务端启动时初始化）</div></div>}
 
-      <div className="rw-cap-gtitle" style={{ marginTop: 18 }}>市场快照（openrouter/dashscope/siliconflow/tokenhub）→ 勾选拉取</div>
-      <div className="rw-dash-muted" style={{ marginBottom: 8 }}>拉取动作在「对话页 → ⚙ 设置 → 模型市场」执行（market/connect）；此处展示各源模型数量与已接入标记。</div>
+      <div className="rw-cap-gtitle" style={{ marginTop: 18 }}>市场拉取与接入（openrouter/dashscope/siliconflow/tokenhub）</div>
+      <div className="rw-market-head" style={{ marginTop: 6 }}>
+        <button className="rw-btn" onClick={refreshMarket} disabled={busy}>{busy ? '刷新中…' : '🔄 刷新市场'}</button>
+        <span className="rw-market-hint">勾选快照模型 → 接入（归属该平台；已接入 ✓ 不可重复勾选）</span>
+      </div>
+      {err && <div className="rw-kb-err">{err}</div>}
+      {msg && <div className="rw-kb-msg">{msg}</div>}
       {market.map((s) => (
-        <div key={s.source} className="rw-provider">
-          <div className="rw-provider-name">
-            {s.source}
-            <code className="rw-provider-key">{s.count} 个快照模型</code>
-          </div>
-          <div className="rw-provider-models">
-            {(s.models || []).slice(0, 8).map((m) => (
-              <span key={m.id} className={'rw-provider-model' + (m.connected ? '' : ' dim')} title={m.connected ? '已接入' : '未接入'}>
-                {m.name || m.id}{m.connected ? ' ✓' : ''}
-              </span>
+        <div key={s.source} className="rw-market-src">
+          <div className="rw-market-srcname">{s.source}（{s.count} 个）</div>
+          <div className="rw-market-models">
+            {(s.models || []).slice(0, 40).map((m) => (
+              <label key={m.id} className="rw-market-m">
+                {/* selModels 键带源前缀：各市场源独立勾选，避免跨源串号错源接入 */}
+                <input type="checkbox" checked={Boolean(selModels[s.source + '::' + m.id])} disabled={m.connected}
+                  onChange={(e) => setSelModels((o) => ({ ...o, [s.source + '::' + m.id]: e.target.checked }))} />
+                <span className={m.connected ? 'conn' : ''}>{m.name || m.id}{m.connected ? ' ✓' : ''}</span>
+              </label>
             ))}
-            {(s.models || []).length > 8 && <span className="rw-dash-muted">…等 {(s.models || []).length} 个</span>}
+            {(s.models || []).length > 40 && <span className="rw-dash-muted">…等 {(s.models || []).length} 个（展示前 40）</span>}
           </div>
+          {s.models.some((m) => selModels[s.source + '::' + m.id]) && (
+            <button className="rw-btn pri" style={{ marginTop: 6 }} onClick={() => connectMarket(s.source, s.models.filter((m) => selModels[s.source + '::' + m.id]).map((m) => m.id))}>接入选中模型（{s.source}）</button>
+          )}
         </div>
       ))}
+      {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
       <div className="rw-console-note">壳默认模型分配在「1.3 Agent 开发（壳）」；会话显式选模型=绝对锁（C4），此处启停不影响已保存的显式会话选择，只影响模型菜单。</div>
     </div>
   );

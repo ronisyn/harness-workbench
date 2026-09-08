@@ -1,5 +1,5 @@
 // src/shared/SettingsPanel.jsx - R2 单一事实源：高级参数（温度/系统提示词/运行护栏/预算/上下文，schema 驱动）
-// 被 1.8 SettingsBoard 与对话页⚙设置→能力"高级参数"区共用；数据自管（GET/PUT /api/settings），消除双实现分叉。
+// 统一后台 1.8 设置使用（原对话页⚙设置抽屉已退役）；数据自管（GET/PUT /api/settings）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 

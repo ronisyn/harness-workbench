@@ -1,5 +1,5 @@
 // src/shared/CapSwitches.jsx - R1 单一事实源：能力开关（A/B/C 三组复选框）
-// 对话页⚙设置→能力 与 1.4 Agent 能力 共用；数据自管（GET/PUT /api/capabilities）。
+// 统一后台 1.4 Agent 能力 使用（原对话页⚙设置抽屉已退役）；数据自管（GET/PUT /api/capabilities）。
 // chips=紧凑网格（console 1.4 用）；缺省=纵向行列表（对话页抽屉用）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
