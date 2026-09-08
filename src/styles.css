@@ -215,6 +215,10 @@ body {
 .rw-provider-models { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
 .rw-provider-model { font-size: 11px; background: var(--rw-tint); border: 1px solid var(--rw-border);
   padding: 2px 7px; border-radius: 5px; }
+/* P3-17：未接入市场模型弱化样式（原引用 .dim 但无定义） */
+.rw-provider-model.dim { opacity: 0.5; }
+.rw-provider-model.on { border-color: #4caf50; color: #2e7d32; }
+.rw-provider-model.off { border-color: #ef9a9a; color: #c62828; }
 
 /* 模型市场 */
 .rw-market-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -232,6 +236,9 @@ body {
 .rw-trace-status { font-size: 10px; padding: 1px 8px; border-radius: 5px; }
 .rw-trace-status.done { background: #e8f5e9; color: #2e7d32; }
 .rw-trace-status.fail { background: #fdecea; color: #c62828; }
+/* P3-18：提案"待审"状态标签样式（原仅 done/fail 两态） */
+.rw-trace-status.pending { background: #fff8e6; color: #8a6d1a; }
+.rw-trace-status.queued, .rw-trace-status.running { background: #e3f2fd; color: #1565c0; }
 .rw-trace-args, .rw-trace-res { color: var(--rw-muted); word-break: break-all; line-height: 1.5; }
 
 .rw-toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--rw-ink);
@@ -240,8 +247,7 @@ body {
 
 /* ---------- ④ 知识库面板（上传入口 + 列表管理） ---------- */
 .rw-kb-mask { justify-content: center; background: rgba(20, 15, 8, 0.45); }
-.rw-kb-panel { width: 620px; max-width: 94vw; border-left: none; border-radius: 12px; max-height: 92vh; }
-.rw-kb-msg { margin-top: 8px; padding: 6px 10px; background: #e8f5e9; color: #2e7d32; border-radius: 6px; font-size: 12px; }
+.rw-kb-panel { width: 620px; max-width: 94vw; border-left: none; border-radius: 12px; max-height: 92vh; }.rw-kb-msg { margin-top: 8px; padding: 6px 10px; background: #e8f5e9; color: #2e7d32; border-radius: 6px; font-size: 12px; }
 .rw-kb-err { margin-top: 8px; padding: 6px 10px; background: #fdecea; color: #c62828; border-radius: 6px; font-size: 12px; }
 .rw-kb-filters { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
 .rw-kb-filters .rw-input { flex: 1; min-width: 120px; }
@@ -343,6 +349,9 @@ body {
   border-right: 1px solid var(--rw-border); }
 .rw-drawer-head { background: var(--rw-panel); }
 @media (max-width: 1280px) { .rw-drawer { max-width: 100%; } }
+/* P3-19：知识库弹层优先于上面"整页设置页"规则（同特异性靠后声明会覆盖 → 双类选择器提权） */
+.rw-mask.rw-kb-mask { justify-content: center; background: rgba(20, 15, 8, 0.45); }
+.rw-drawer.rw-kb-panel { width: 620px; max-width: 94vw; border-left: none; box-shadow: -12px 0 40px rgba(0,0,0,.12); max-height: 92vh; }
 
 /* --- 待处理审批/问询横幅（断连/刷新恢复入口） --- */
 .rw-pendbar { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px;

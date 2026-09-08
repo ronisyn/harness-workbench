@@ -40,6 +40,8 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
     try { const m = await api.marketList(); setMarket(m.sources || []); } catch { /* ignore */ }
   }, []);
   useEffect(() => { loadAll(); }, [loadAll]);
+  // P3-6：组件卸载（跳对话页/后台）中止迷你对话流，避免后台继续烧 token
+  useEffect(() => () => { if (miniRef.current) miniRef.current.abort(); }, []);
 
   const ensureConv = async () => {
     if (convRef.current) return convRef.current;

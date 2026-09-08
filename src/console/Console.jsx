@@ -28,8 +28,9 @@ function Placeholder({ text }) {
 }
 
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
-  const code = path.replace(/^\/console\/?/, '') || 'models-plaza';
-  const board = BOARDS[code] || BOARDS['models-plaza'];
+  const rawCode = path.replace(/^\/console\/?/, '') || '';
+  const code = BOARDS[rawCode] ? rawCode : 'models-plaza'; // P3-10：未知板块回退 1.1，导航高亮跟随实际展示
+  const board = BOARDS[code];
   // 板块可接收公共导航 props（AppsBoard 启动应用后跳对话页——审计 P1-3）
   const boardProps = { onGoChat };
   return (

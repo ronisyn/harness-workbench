@@ -142,7 +142,29 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const [modelList, setModelList] = useState([]);
   const [input, setInput] = useState('');
   const inputRef = useRef('');      // 输入框最新值同步 ref（切换会话存档草稿用，防闭包读到旧值）
-  const draftsRef = useRef({});     // 草稿按会话隔离：draftsRef[convId]=该会话未发送文字
+  // P3-7：草稿跨 Chat 挂载持久化（sessionStorage，前缀 rw_cdraft_ 与应用启动草稿 rw_draft_ 区分）
+  const draftsRef = useRef({});
+  const DRAFT_PREFIX = 'rw_cdraft_';
+  useEffect(() => {
+    try {
+      const saved = {};
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(DRAFT_PREFIX)) saved[String(k.slice(DRAFT_PREFIX.length))] = sessionStorage.getItem(k) || '';
+      }
+      draftsRef.current = saved;
+    } catch { /* ignore */ }
+  }, []);
+  const saveDraftsToStorage = () => {
+    try {
+      const snapshot = { ...draftsRef.current };
+      if (curRef.current && inputRef.current) snapshot[String(curRef.current)] = inputRef.current; // 含当前输入框
+      for (const [cid, txt] of Object.entries(snapshot)) {
+        if (txt) sessionStorage.setItem(DRAFT_PREFIX + cid, txt); else sessionStorage.removeItem(DRAFT_PREFIX + cid);
+      }
+    } catch { /* ignore */ }
+  };
+  useEffect(() => () => saveDraftsToStorage(), []);
   const [busy, setBusy] = useState(false);
   // WS4：设置 schema（GET /api/settings 返回）驱动渲染非 runtime 键（budget 等）
   const [settingsSchema, setSettingsSchema] = useState([]);
@@ -193,14 +215,18 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const pollTickRef = useRef(0); // 轮询计数：每 3 tick（~7.5s）补拉一次挂起审批/问询（断连恢复）
 
   const loadConvs = useCallback(async () => {
-    const d = await api.conversations();
-    setConvs(d.conversations);
+    try {
+      const d = await api.conversations();
+      setConvs(d.conversations);
+    } catch (e) { setToast('会话列表加载失败：' + (e.message || e)); } // P3-3：失败不伪装成"无会话"
   }, []);
 
   const loadStats = useCallback(async (convId) => {
     try { const d = await api.usageStats(convId); setStats(d.stats); } catch { /* ignore */ }
   }, []);
 
+  // P3-6：组件卸载（切首页/后台）中止进行中的流式请求，避免后台继续跑完烧 token
+  useEffect(() => () => { if (abortRef.current) { try { abortRef.current.abort(); } catch { /* ignore */ } } }, []);
   useEffect(() => {
     loadConvs();
     // 已接入厂商 + 各厂商模型列表（模型下拉用）
@@ -302,12 +328,15 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     const savedDraft = draftsRef.current[id] || '';
     setInput(savedDraft);
     inputRef.current = savedDraft;
+    // P3-2：切换瞬间先清空旧会话内容/统计/轨迹，避免加载期间错位残留（弱网可见明显）
+    setMsgs([]); setToolcalls([]); setStats({}); setLive(null);
     setCur(id);
     setStickBottom(true); // 切换会话：回到贴底跟随（避免停留在上一会话的滚动位置）
     actSeqRef.current = 0;
     lastActRef.current = 0;
-    setLive(null);
-    // 对话内模型：恢复该会话上次选择的厂商/模型（无记录则保持当前选择）
+    // 对话内模型：恢复该会话上次选择的厂商/模型；
+    // P3-9：会话从未选过模型（provider 为空）→ 显示"自动路由"（服务端回落壳默认/全局默认），
+    // 不被上一会话的显式选择"传染"成事实显式锁。
     const c = convs.find((x) => x.id === id);
     if (c?.provider) {
       const p = provList.find((x) => x.provider_key === c.provider);
@@ -318,13 +347,22 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
         setModelList(ms);
         setModel(c.model && ms.some((m) => m.model_id === c.model) ? c.model : (ms[0]?.model_id || ''));
       } else { setProvider(c.provider); setModelList([]); setModel(c.model || ''); }
+    } else if (!c) {
+      // 会话不存在（可能已被删/无权限）
+      setCurTitle('会话不存在或已删除');
+    } else {
+      // 无显式模型：置自动路由展示（不污染其它会话选择状态——发送仍由本会话模型栏为准）
+      setProvider('auto'); setModelList([]); setModel('__auto__');
     }
-    await loadMessages(id);
+    try { await loadMessages(id); }
+    catch { setCurTitle((c && c.title) || '对话'); setToast('加载该会话失败，请重试'); }
     fetchPending(); // 打开会话即检查服务端挂起的审批/问询（断连恢复入口）
   };
 
   const newConv = async () => {
-    const d = await api.createConversation('新对话', 'full');
+    let d;
+    try { d = await api.createConversation('新对话', 'full'); }
+    catch (e) { setToast('新建会话失败：' + (e.message || e)); return; }
     // 会话级模型：新会话继承当前选中的厂商/模型（打开即恢复）
     try { await api.patchConversation(d.id, { provider, model: model || null }); } catch { /* ignore */ }
     await loadConvs();
@@ -338,6 +376,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     if (!confirm('删除该会话及其消息？')) return;
     await api.deleteConversation(id);
     delete draftsRef.current[id]; // 删除会话同时清除其草稿
+    try { sessionStorage.removeItem(DRAFT_PREFIX + id); } catch { /* ignore */ }
     // 同时丢弃该会话的排队消息（防删后滞留误发——审计 P2-1）
     queueRef.current = queueRef.current.filter((x) => x.convId !== id);
     setQueue(queueRef.current);
@@ -386,7 +425,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (curTitle || '对话') + '.md';
+    const safeName = String(curTitle || '对话').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || '对话'; // P3-22 文件名净化
+    a.download = safeName + '.md';
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1500); // 延迟释放：立即 revoke 偶发截断下载
     setToast('对话已导出');
@@ -848,7 +888,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
               {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
             <select className="rw-select rw-model-sel" value={model} onChange={(e) => { const mv = e.target.value; setModel(mv); saveModelSel(provider, mv); }} title="模型（豆包/DeepSeek 等，随本对话保存）">
-              {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : <option value="">默认</option>}
+              {provider === 'auto' && <option value="__auto__">自动（由平台路由）</option>}
+              {modelList.length ? modelList.map((m) => <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>) : (provider !== 'auto' ? <option value="">默认</option> : null)}
             </select>
           </div>
           {pends && pends.items && pends.items.length > 0 && (
@@ -869,6 +910,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
           )}
           <div className="rw-msgs" ref={msgsBoxRef}>
             {!cur && <div className="rw-empty">← 新建或选择左侧会话，开始对话</div>}
+            {cur && !msgs.length && !busy && <div className="rw-empty">新会话 · 直接输入消息开始对话；任务类需求（修代码/查文件/联网等）将自动切换 Agent 模式</div>}
+            {cur && !msgs.length && busy && <div className="rw-empty">正在启动…</div>}
             {msgs.map((m, i) => (
               <div key={m.id || m._tmpId || i} className={'rw-msg ' + (m.role === 'user' ? 'me' : 'ai') + (m.streaming ? ' stream' : '')}>
                 <div className="rw-msg-role">{m.role === 'user' ? '我' : 'AI'}</div>
@@ -905,7 +948,13 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                         {m.error ? <div className="rw-err">⚠️ {m.error}</div> : null}
                         {!m.error && m.content && (m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />)}
                         {!m.error && !m.content && !m.thinking && m.streaming && <span className="rw-caret">▋</span>}
-                        {!m.error && !m.content && !m.streaming && <div className="rw-emptynote">（本轮未产生文本输出——结果见上方工具轨迹）</div>}
+                        {!m.error && !m.content && !m.streaming && (
+                          <div className="rw-emptynote">{
+                            m.traces && m.traces.length
+                              ? '（本轮只执行了工具操作、未产出文本——结果见上方工具轨迹）'
+                              : (m.plan && m.plan.length ? '（本轮仅规划，未产出正文）' : '（本轮未产生文本输出）')
+                          }</div>
+                        )}
                       </>
                     : <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
                 </div>
