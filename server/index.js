@@ -11,6 +11,8 @@ import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
+import { shellContext } from './shells.js';
+import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools } from './shellstore.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -141,12 +143,12 @@ app.put('/api/toolset', requireAuth, async (req, res) => {
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
   const rows = await db.query(
-    'SELECT id, channel, permission, preset, title, provider, model, project, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
+    'SELECT id, channel, permission, preset, title, provider, model, project, shell_id, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
   res.json({ ok: true, conversations: rows });
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
-  const { title, permission, preset, provider, model, project } = req.body || {};
+  const { title, permission, preset, provider, model, project, shell } = req.body || {};
   // P24(O-22) permission 服务端白名单：非法值拒绝（原实现无校验，非法字符串在 checkPerm 静默全拒易踩坑）
   const perm = permission === undefined || permission === null ? 'full' : String(permission);
   if (!['read', 'write', 'guard', 'full'].includes(perm)) {
@@ -154,10 +156,16 @@ app.post('/api/conversations', requireAuth, async (req, res) => {
   }
   // P25(O-25)：会话可指定 project（projects/<project>/AGENTS.md 项目记忆注入），缺省 default
   const proj = project === undefined || project === null ? 'default' : String(project).replace(/[\\/.]/g, '_').slice(0, 60) || 'default';
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model, project) VALUES (?,?,?,?,?,?,?)',
+  // B1：会话可选指定壳（skey；缺失/禁用/非法 → NULL=默认壳语义，存量行为不变）
+  let shellId = null;
+  if (shell !== undefined && shell !== null && String(shell)) {
+    const sr = (await db.query('SELECT id FROM shells WHERE skey=? AND status="enabled"', [String(shell)]))[0];
+    shellId = sr ? sr.id : null;
+  }
+  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model, project, shell_id) VALUES (?,?,?,?,?,?,?,?)',
     [req.user.id, title || '新对话', perm, ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
-      provider || null, model || null, proj]);
-  res.json({ ok: true, id: r.insertId });
+      provider || null, model || null, proj, shellId]);
+  res.json({ ok: true, id: r.insertId, shellId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
@@ -379,7 +387,7 @@ function resolveRoute(content, provider, model, defOverrides) {
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
-  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const convProvider = convs[0].provider || null;
   const convModel = convs[0].model || null;
@@ -409,6 +417,15 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const convMode = convs[0].mode || 'chat';
   const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
   const convProject = convs[0].project || 'default';
+  // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
+  const convShellId = convs[0].shell_id || null;
+  let convShellCtx = null;
+  if (convShellId) {
+    try {
+      const sr = (await db.query('SELECT skey, persona, domain_text FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
+      convShellCtx = sr ? shellContext(sr) : null;
+    } catch { convShellCtx = null; }
+  }
 
   // 存用户消息
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
@@ -497,6 +514,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // （无持久状态：本轮生效，用户放行/下一条新指令自然解除）。命中则本轮注入只读约束。
   const READONLY_INTENT_RE = /(?:只(?:规划|调研|研究|分析|设计|查证|评估|看看|读一下|查一下|先别改|先别执行)|先(?:规划|调研|设计|分析|出方案|评估|查证|看看|看一下方案|别动手)|别动手|不要动手|只读规划|先别改|先别执行|先别做|出个方案|出方案|先出方案|只读)/i;
   const readonlyIntent = READONLY_INTENT_RE.test(String(content).slice(0, 60));
+  // B1：壳语境注入（非 default 壳且带 persona 时扩展语境；默认壳/无 persona=保持现状，不改内核自述）
+  if (convShellCtx && convShellCtx.persona) {
+    messages.push({ role: 'system', content: '【壳语境：' + convShellCtx.key + '】' + (convShellCtx.domain ? '领域说明：' + convShellCtx.domain + '\n' : '') + convShellCtx.persona });
+  }
   if (readonlyIntent) {
     messages.push({
       role: 'system',
@@ -1064,6 +1085,36 @@ app.post('/api/contracts/:id/answer', requireAuth, async (req, res) => {
   await db.query('UPDATE task_contracts SET status="queued", last_ask=NULL, updated_at=NOW() WHERE id=?', [c.id]);
   if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户答复】' + String(answer).slice(0, 2000)]);
   res.json({ ok: true, status: 'queued' });
+});
+
+// ---------- B1 壳管理 API ----------
+app.get('/api/shells', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, shells: await listShells() }); }
+  catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.get('/api/shells/:key', requireAuth, async (req, res) => {
+  const s = await getShellByKey(req.params.key);
+  if (!s) return res.status(404).json({ ok: false, message: '壳不存在' });
+  res.json({ ok: true, shell: s, tools: await shellTools(req.params.key) });
+});
+app.post('/api/shells', requireAuth, async (req, res) => {
+  const { pack } = req.body || {};
+  if (!pack) return res.status(400).json({ ok: false, message: 'body.pack 必填' });
+  try { const r = await importShell(pack); res.json({ ok: true, ...r }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.post('/api/shells/:key/clone', requireAuth, async (req, res) => {
+  const { newKey, name } = req.body || {};
+  try { const r = await cloneShell(req.params.key, newKey, name); res.json({ ok: true, ...r }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.patch('/api/shells/:key', requireAuth, async (req, res) => {
+  try { const r = await patchShell(req.params.key, req.body || {}); res.json({ ok: r.ok }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.delete('/api/shells/:key', requireAuth, async (req, res) => {
+  try { const r = await disableShell(req.params.key); res.json({ ok: r }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 静态前端 ----------

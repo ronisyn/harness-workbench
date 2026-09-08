@@ -280,6 +280,41 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     INDEX idx_ce_contract (contract_id)
   )`,
+  // ---- B1 壳定义层（v2.6 基线 §3）：shells 壳行 / shell_tools 三态 / shell_settings 壳级覆盖 ----
+  `CREATE TABLE IF NOT EXISTS shells (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    skey VARCHAR(32) UNIQUE NOT NULL,
+    name VARCHAR(64) NOT NULL,
+    description VARCHAR(255),
+    persona JSON,
+    domain_text TEXT,
+    model_policy JSON,
+    tools_preset VARCHAR(8) DEFAULT 'standard',
+    tools_force_on JSON,
+    tools_force_off JSON,
+    knowledge_scopes JSON,
+    skills_allow JSON,
+    guardrails JSON,
+    channels JSON,
+    ui_brand JSON,
+    eval_ref VARCHAR(255),
+    status VARCHAR(10) DEFAULT 'enabled',
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW()
+  )`,
+  `CREATE TABLE IF NOT EXISTS shell_tools (
+    shell_id INT NOT NULL,
+    tool_name VARCHAR(64) NOT NULL,
+    mode VARCHAR(8) NOT NULL,
+    PRIMARY KEY (shell_id, tool_name)
+  )`,
+  `CREATE TABLE IF NOT EXISTS shell_settings (
+    shell_id INT NOT NULL,
+    skey VARCHAR(64) NOT NULL,
+    svalue JSON,
+    updated_at DATETIME DEFAULT NOW(),
+    PRIMARY KEY (shell_id, skey)
+  )`,
 ];
 
 export async function initSchema() {
@@ -297,6 +332,8 @@ export async function initSchema() {
     // 2026-09 对话内模型：conversations 记录每会话选中的 provider/model（前端打开会话时恢复、切换即保存）
     "ALTER TABLE conversations ADD COLUMN provider VARCHAR(32)",
     "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
+    // B1 壳维度：会话归属壳（NULL=默认壳语义，保持存量行为不变）
+    'ALTER TABLE conversations ADD COLUMN shell_id INT NULL',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
@@ -313,4 +350,12 @@ export async function initSchema() {
       await pool.query('INSERT IGNORE INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW())', [k, v]);
     } catch { /* 表不可用则跳过 */ }
   }
+  // B1 种子：default 中性壳（persona=NULL=保持现状行为；幂等）
+  try {
+    await pool.query(
+      `INSERT IGNORE INTO shells (skey, name, description, persona, tools_preset, status, created_at, updated_at)
+       VALUES ('default','默认壳','系统保留中性壳（无 persona，行为=现状）',NULL,'standard','enabled',NOW(),NOW())`,
+      []
+    );
+  } catch { /* 表不可用则跳过 */ }
 }
