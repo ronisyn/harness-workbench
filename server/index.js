@@ -11,10 +11,10 @@ import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
-import { shellContext } from './shells.js';
+import { shellContext, rowToPack } from './shells.js';
 import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
-import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools } from './shellstore.js';
+import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -85,6 +85,20 @@ app.get('/api/models', requireAuth, async (req, res) => {
   const defs = await getSetting('default_models', null); // { glm: 'glm-5.3', deepseek: '...' }
   const over = (defs && typeof defs === 'object') ? defs : {};
   res.json({ ok: true, providers: activeProviders(config.keys).map((p) => ({ ...p, defaultModel: over[p.id] || p.defaultModel })) });
+});
+
+// M2-① 模型广场：models.enabled 启停（菜单闸门；显式会话锁不受影响——C4 显式=绝对锁不被覆盖）
+// body { enabled: bool }；审计 model:toggle
+app.put('/api/models/:id', requireAuth, async (req, res) => {
+  try {
+    const mid = Number(req.params.id) || 0;
+    const enabled = req.body ? Boolean(req.body.enabled) : false;
+    const r = await db.query('UPDATE models SET enabled=? WHERE id=?', [enabled ? 1 : 0, mid]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '模型不存在' });
+    const m = (await db.query('SELECT id, model_id, name FROM models WHERE id=?', [mid]))[0];
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'model:' + (enabled ? 'enable' : 'disable'), String(m ? m.model_id : mid)]);
+    res.json({ ok: true, id: mid, enabled });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 能力开关 ----------
@@ -292,6 +306,36 @@ app.get('/api/providers', requireAuth, async (req, res) => {
     ok: true,
     providers: providers.map((p) => ({ ...p, connected: Boolean(p.api_key_env && config.keys[p.api_key_env]), models: byProvider[p.id] || [] })),
   });
+});
+
+// M2-① 模型广场：厂商 key 临时连通测试（不落库——§8 凭证不进 DB 明文；仅本次请求内存使用）
+// body { baseUrl, apiKey }；POST {base}/chat/completions 最小探测（1 token）
+app.post('/api/providers/test', requireAuth, async (req, res) => {
+  try {
+    const { baseUrl, apiKey } = req.body || {};
+    const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+    const key = String(apiKey || '').trim();
+    if (!base || !key) return res.status(400).json({ ok: false, message: 'baseUrl 与 apiKey 必填' });
+    if (!/^https?:\/\//.test(base)) return res.status(400).json({ ok: false, message: 'baseUrl 需以 http(s):// 开头' });
+    const probe = await fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+      body: JSON.stringify({ model: '__probe__', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (probe.status === 200) return res.json({ ok: true, status: probe.status, note: '连通' });
+    const j = await probe.json().catch(() => ({}));
+    // 400 通常=模型名非法但鉴权通过；401/403=key 无效
+    const authed = ![401, 403].includes(probe.status);
+    const hint = authed
+      ? '鉴权通过但模型名被拒（400，正常：探测用假模型名）——需先用该厂商真实模型名再验'
+      : ('鉴权失败（' + probe.status + '）：' + String(j.error?.message || j.message || '')).slice(0, 300);
+    res.json({ ok: authed, status: probe.status, note: hint });
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    const dead = /fetch failed|ECONNREFUSED|ENOTFOUND|timed out|abort/i.test(msg);
+    res.json({ ok: false, note: dead ? '无法连通：' + msg.slice(0, 200) : '测试异常：' + msg.slice(0, 200) });
+  }
 });
 
 // ---------- 对话 ----------
@@ -1161,6 +1205,14 @@ app.get('/api/shells/:key', requireAuth, async (req, res) => {
   const s = await getShellByKey(req.params.key);
   if (!s) return res.status(404).json({ ok: false, message: '壳不存在' });
   res.json({ ok: true, shell: s, tools: await shellTools(req.params.key) });
+});
+// M2-① 壳开发：导出 pack（DB 镜像 → pack 对象，文件权威/DB 镜像语义见 §3.2）
+app.get('/api/shells/:key/export', requireAuth, async (req, res) => {
+  try {
+    const pack = await exportShell(req.params.key);
+    if (!pack) return res.status(404).json({ ok: false, message: '壳不存在' });
+    res.json({ ok: true, pack });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 app.post('/api/shells', requireAuth, async (req, res) => {
   const { pack } = req.body || {};

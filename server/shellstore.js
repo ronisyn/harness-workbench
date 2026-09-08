@@ -72,17 +72,29 @@ export async function disableShell(key) {
   return r.affectedRows > 0;
 }
 
+// patch：可改 name/description/persona/status/modelPolicy（模型广场"设置壳默认模型"用；pack 其余字段走 import 全量替换）
 export async function patchShell(key, patch) {
   const allow = ['name', 'description', 'persona', 'status'];
   const set = [], params = [];
   for (const k of allow) {
     if (patch[k] !== undefined) { set.push(k + '=?'); params.push(typeof patch[k] === 'object' ? JSON.stringify(patch[k]) : patch[k]); }
   }
+  if (patch.modelPolicy !== undefined) {
+    const mp = (patch.modelPolicy && typeof patch.modelPolicy === 'object') ? patch.modelPolicy : {};
+    set.push('model_policy=?');
+    params.push(JSON.stringify({ defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '', allowModels: Array.isArray(mp.allowModels) ? mp.allowModels : [], budgetYuan: mp.budgetYuan || 0, qualityCostBias: mp.qualityCostBias == null ? null : mp.qualityCostBias }));
+  }
   if (!set.length) return { ok: true };
-  if (set.includes('status=') && String(patch.status) === 'enabled') { /* fine */ }
   set.push('updated_at=NOW()');
   const r = await db.query(`UPDATE shells SET ${set.join(', ')} WHERE skey=?`, [...params, String(key)]);
   return { ok: r.affectedRows > 0 };
+}
+
+// export：壳行 → pack 对象（1.3 壳开发"导出 pack"；DB 镜像为权威当前态，文件权威性见 §3.2 双写）
+export async function exportShell(key) {
+  const s = await getShellByKey(key);
+  if (!s) return null;
+  return rowToPack(s);
 }
 
 export async function shellTools(key) {
