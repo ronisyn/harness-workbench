@@ -1,7 +1,7 @@
 # RW-Agent 平台化改造总方案
 
-> 版本：v2.18（2026-09-08 R1/R2/R5 双实现重构回填：附录 D 增"R1/R2/R5 单一事实源重构"记录；仅收录已达成共识，不含讨论过程）
-> 状态：✅ 基线定稿（B1/B2/B3/④知识库/⑤观测/M1/M2/⑥模板库/D9 应用 v1/全面自检修复/R1R2R5 重构已完成）
+> 版本：v2.19（2026-09-09 今日全部交付终审回填：附录 D 增"终审 v1（场景/业务/逻辑/数据/交互）"修复批 3–6 记录 + 附两份审计报告；仅收录已达成共识，不含讨论过程）
+> 状态：✅ 基线定稿（B1/B2/B3/④知识库/⑤观测/M1/M2/⑥模板库/D9 应用 v1/全面自检修复/R1R2R5 重构/终审修复批 3–6 已完成）
 > 单一权威：本文为平台化改造唯一方案文档；修订=直接修订本文件并升版本号，不另立同层文档。
 > 约束：**未获用户明确指令，不进行任何代码/网页改动**；本文只描述方案。
 
@@ -343,6 +343,24 @@
   - **R5 轨迹**：抽屉"轨迹"tab 复用消息流内 TraceCard（tool_calls DB 行→TraceCard shape 映射，共用中文化/折叠/diff/文件打开），删除抽屉专用第二套内联渲染；补前端 safeJson 兜底。
 - **验收**：本地单测 50/50、selfcheck 12/12、build 通过；JS bundle 456→448KB（去重约 8KB）；/console/agent-caps、agent-evo、settings、/chat 路由 200；bundle 含共享组件文案。共享组件数据链路=既有 /api/capabilities|toolset|access-rules|proposals|settings（无新接口）。
 - **边界**：仍保留的本地面板（providers 展示/market/tasks 定时/mcp）在 console 无对应板块，非双实现不抽；统一后对话页"高级参数"比原抽屉多展示 schema 中 fake_continue_warn/consecutive_fail_guard/max_concurrent_chats 等键（一致性优先，行为不变）。
+
+## 附录 D 续：终审 v1——今日全部交付（场景/业务/逻辑/数据/交互）审计与修复批 5/5b/6（2026-09-08~09）
+
+- **范围**：对今日交付（B1/B2/B3/④/⑤/M1/M2/⑥/D9/全面自检修复/R1R2R5 重构）做第二遍全面自检——场景完整、业务语义、逻辑一致、数据无孤儿、交互闭环，查冗余/冲突/缺陷。审计报告（`proposals/_audit/`）：final-regression-audit（12 点清单 40/40 呈现核对 + 新发现 A–F）、final-frontend-audit（P1=0、P2=1、P3=9，前端逐项定位）。编号接续首次全面自检批 1–4（925efc9/014609c/67e7a6a/b856edb，见 v2.17/v2.18 回填），本次为批 5 起。
+- **修复批 5（`6ca5601`，终审 A–F + P2-1 前端 + P3 前端收尾，已部署）**：
+  - **A provider 哨兵归一**：Web 主对话发送 `provider:'auto'`/`model:'__auto__'` 前端哨兵（此前直通服务端被当作"显式选择"，挡住 F1 壳默认/档案路由）——服务端在 body 与会话列两处将 `auto`/`__auto__` 归一为 null=未显式，壳默认（第三级）/档案（第二级）路由对 Web 主对话生效（修复 014609c×67e7a6a 接线冲突）。
+  - **C modelPolicy 部分更新保真**：patchShell 对 modelPolicy 做部分更新时读旧行合并，保留旧 budgetYuan/allowModels/qualityCostBias（此前整对象覆盖丢失预算/白名单）。
+  - **D 启动关键列自检**补 shells.pack_extra（与 F2 迁移列一致，防旧库缺列运行崩）。
+  - **E PATCH /api/conversations 404 口径**：非本人/不存在会话返回 404（原 200 ok:true 与 DELETE 口径不一致，掩盖越权/幻影更新）。
+  - **F 删执行中会话先停流**：前端 delConv 先 stopChat+abort 再删，防残留 agent 继续烧 token。
+  - **P2-1 提案首部语义还原（前端）**：create 组装 `# 提案：标题\n\n> 状态：待审\n\n`（状态行不带 emoji，防状态正则误捕 `🆕 待审`）；新建后清查看区旧内容。
+  - **P3 前端收尾**：共享组件成功清 err + console 无 onToast 也可见成功 msg（P3-1/2）；历史轨迹 args safeJson 与 R5 一致（P3-3）；caps 传 onToast（P3-4）；CapSwitches chips 紧凑模式（P3-5）；EvoBoard err 实捕（P3-7）；SettingsBoard 去重复 note（P3-8）；去嵌套层 + 死 CSS 清理（P3-9）。
+  - 验收：单测 50/50、selfcheck 12/12。
+- **修复批 5b（`5420ac9`，服务端，已部署）**：提案列表标题解析剥 `提案：` 前缀——create 正文首行 `# 提案：X`，列表应显示纯标题 X（旧实现带冗余前缀，与 fx3 E2E 断言一致；旧 `# 提案：` 文件同步受益）。
+  - 验收：fx3 E2E **6/6 PASS**（A1 body auto→壳默认、A2 无 body→壳默认、C 保留 budget/allowModels、E 404、P2-1 标题解析）。
+- **修复批 6（`a0dfb90`，孤儿防护，已部署）**：删会话 × agent 收尾竞态——SSE 断连后 agent 若已完成计算、收尾落库（assistant/telemetry）与客户端"删会话"并发时，先删后写产生孤儿（实测孤儿 telemetry 指向已删会话 conv375/376/377）。修复：DELETE /api/conversations/:id 先 abort 该会话 inflight agent 再删；先删 conversations 行（存在校验即刻关门）后清子表；telemetry/assistant/error 占位落库改**原子 `INSERT…SELECT … WHERE EXISTS(会话)`**（会话已删则假→不插），stopped 占位加 convAlive 预检。
+  - 验收：孤儿清理后全绿重跑——e2e-final **18/18 PASS**（含"无孤儿残留"t=0/rv=0/k=0/c=0）、selfcheck 12/12、单测 50/50；fx3 6/6 复测仍全过。
+- **终审基线**：本地=origin/main=`a0dfb90`，服务器 880 运行同 HEAD（bundle 部署 + `git push origin main`）；无残留测试孤儿。
 
 
 
