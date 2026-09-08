@@ -8,7 +8,7 @@ import RulesEditor from '../shared/RulesEditor.jsx';
 export default function CapsBoard() {
   return (
     <div className="rw-cap-group">
-      <CapSwitches />
+      <CapSwitches chips />
       <ToolsetEditor />
       <RulesEditor />
     </div>

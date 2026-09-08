@@ -9,11 +9,13 @@ export default function EvoBoard() {
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
-    try {
-      const [t, a] = await Promise.all([api.tasks().catch(() => ({ tasks: [] })), api.audit(60).catch(() => ({ audit: [] }))]);
-      setTasks(t.tasks || []);
-      setAudit(a.audit || []);
-    } catch (e) { setErr(e.message); }
+    setErr('');
+    const [t, a] = await Promise.all([
+      api.tasks().then((d) => ({ tasks: d.tasks || [] })).catch((e) => { setErr('定时任务加载失败：' + (e.message || e)); return { tasks: [] }; }),
+      api.audit(60).then((d) => ({ audit: d.audit || [] })).catch((e) => { setErr('审计加载失败：' + (e.message || e)); return { audit: [] }; }),
+    ]);
+    setTasks(t.tasks || []);
+    setAudit(a.audit || []);
   }, []);
   useEffect(() => { load(); }, [load]);
 

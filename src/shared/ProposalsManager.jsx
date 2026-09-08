@@ -20,8 +20,15 @@ export default function ProposalsManager({ onToast }) {
   };
   const create = async () => {
     if (!propTitle.trim() || !propDraft.trim()) { setErr('标题与正文必填'); return; }
-    try { await api.createProposal(propTitle, propDraft); setPropTitle(''); setPropDraft(''); if (onToast) onToast('提案已创建：' + propTitle); load(); }
-    catch (e) { setErr(e.message); }
+    try {
+      // P2-1：还原"# 提案：标题 + 状态行"约定首部——服务端列表按首个 '# ' 行取标题、'状态：' 行取状态；
+      // 注意状态行不带 emoji 前缀（状态正则 [^·\n]+ 会把 '🆕 待审' 整个捕获，导致前端 '待审' 判定失效）
+      const body = '# 提案：' + propTitle.trim() + '\n\n> 状态：待审\n\n' + propDraft;
+      await api.createProposal(propTitle.trim(), body);
+      setPropTitle(''); setPropDraft(''); setContent(''); // 新建后同时清空查看中的旧提案（避免滞留）
+      if (onToast) onToast('提案已创建：' + propTitle.trim() + '（存档 proposals/）');
+      load();
+    } catch (e) { setErr(e.message); }
   };
   return (
     <div>

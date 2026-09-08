@@ -203,7 +203,8 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   if (model !== undefined) { set.push('model=?'); params.push(model || null); }
   if (!set.length) return res.json({ ok: true });
   params.push(req.params.id, req.user.id);
-  await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
+  const r = await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
+  if (!r.affectedRows) return res.status(404).json({ ok: false, message: '会话不存在或无权修改' }); // E：与 DELETE 同口径
   res.json({ ok: true });
 });
 
@@ -445,12 +446,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
   const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { return res.status(404).json({ ok: false, message: '会话不存在' }); }
-  const convProvider = convs[0].provider || null;
-  const convModel = convs[0].model || null;
+  const convProvider = (convs[0].provider === 'auto') ? null : (convs[0].provider || null);
+  const convModel = (convs[0].model === '__auto__') ? null : (convs[0].model || null);
   // C4 显式模型绝对锁（2026-09 批3）：解析优先级 = ①body 显式传的 provider/model（用户本轮刚切换）→
-  // ②会话已保存的 provider/model（用户此前选择，persist 在会话）→ ③默认（deepseek 或 default_model 配置）。
+  // ②会话已保存的 provider/model（用户此前选择，persist 在会话）→ ③档案→壳默认→全局默认（B3/F1）。
   // 关键修复：原实现只读 body（缺省默认 deepseek），完全忽略会话保存值 → 用户切 GLM 后若 body 丢参即静默回 deepseek=冒充（O-14）。
   // 显式选择（body 或会话里非 auto 的 provider）是绝对锁：不允许被自动路由/回退覆盖。
+  // 'auto'/'__auto__' 是前端"自动路由"哨兵（C4=未显式选择语义）：归一为 null 才能继续走 B3 档案/F1 壳默认两级——
+  // 否则 !wantProvider 恒 false，F1 壳默认与档案路由对 Web 主对话永不生效（审计 A，014609c×67e7a6a 接线冲突）。
+  if (String(provider || '') === 'auto') provider = null;
+  if (String(model || '') === '__auto__') model = null;
   let wantProvider = provider || convProvider;
   let wantModel = model || convModel;
   // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认

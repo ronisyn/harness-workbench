@@ -204,9 +204,6 @@ body {
 .rw-cap-item.col { flex-direction: column; align-items: stretch; cursor: default; border-top: 1px dashed var(--rw-border); margin-top: 8px; padding-top: 10px; }
 .rw-cap-item.col:hover { color: inherit; }
 .rw-cap-item.col .rw-input { width: 100%; box-sizing: border-box; font: inherit; }
-.rw-limrow { display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
-.rw-limrow label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--rw-muted); flex: 1; min-width: 90px; }
-.rw-limrow .rw-input { padding: 4px 6px; font-size: 12px; }
 
 /* 厂商 */
 .rw-provider { border: 1px solid var(--rw-border); border-radius: 10px; padding: 10px; margin-bottom: 10px; }
@@ -239,7 +236,7 @@ body {
 /* P3-18：提案"待审"状态标签样式（原仅 done/fail 两态） */
 .rw-trace-status.pending { background: #fff8e6; color: #8a6d1a; }
 .rw-trace-status.queued, .rw-trace-status.running { background: #e3f2fd; color: #1565c0; }
-.rw-trace-args, .rw-trace-res { color: var(--rw-muted); word-break: break-all; line-height: 1.5; }
+.rw-trace-res { color: var(--rw-muted); word-break: break-all; line-height: 1.5; }
 
 .rw-toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: var(--rw-ink);
   color: #fff; padding: 9px 20px; border-radius: 10px; font-size: 13px; z-index: 200;
@@ -284,8 +281,6 @@ body {
 .rw-diff-l { min-height: 1.2em; }
 .rw-diff-l.del { color: #ff8f8f; background: rgba(255, 80, 80, 0.12); }
 .rw-diff-l.add { color: #8fe3a0; background: rgba(80, 220, 120, 0.10); }
-.rw-diff-details { margin-top: 4px; }
-.rw-diff-details summary { cursor: pointer; font-size: 12px; color: var(--rw-muted); user-select: none; }
 
 /* 活动轮询条：旁观/断连页面实时显示会话执行状态 */
 .rw-livebar { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #eef6ff; border-bottom: 1px solid var(--rw-border); font-size: 13px; color: #1a5fb4; position: sticky; top: 0; z-index: 5; }

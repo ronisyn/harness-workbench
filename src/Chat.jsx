@@ -138,7 +138,6 @@ function groupTraces(traces) {
 const PERM_LABEL = { read: '只读', write: '读写', full: '完全', guard: '需审批' };
 const PRESET_LABEL = { all: '全量', standard: '标准', minimal: '精简' };
 const PRESET_TIP = { all: '暴露全部 61 工具（默认）', standard: 'core+pro 52 个，隐藏 expert 高危/改自身类', minimal: '仅 core 21 个文件/查证/规划类' };
-const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
 export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialConvId }) {
   const [convs, setConvs] = useState([]);
@@ -230,7 +229,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
       const active = d.providers.filter((p) => p.connected);
       setProviders(active.map((p) => ({ id: p.provider_key, name: p.name })));
       setProvList(d.providers);
-      if (active[0]) {
+      // B：仅当尚未打开任何会话时才以首家厂商设默认——已开会话的模型由 openConv 恢复（显式/auto 不在此覆盖，防竞态把 auto 覆盖成首家厂商）
+      if (!curRef.current && active[0]) {
         setProvider(active[0].provider_key);
         const ms = active[0].models.filter((m) => m.enabled);
         setModelList(ms);
@@ -306,7 +306,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     }
     const msgsWithTraces = md.messages.map((msg) => {
       let m = msg.role === 'assistant' && byMsg[msg.id]
-        ? { ...msg, traces: byMsg[msg.id].map((t) => ({ name: t.tool_name, args: t.args, result: t.result_summary, status: t.status, duration_ms: t.duration_ms, seq: 0 })) }
+        // P3-3：历史轨迹 args 也过 safeJson（DB 存 JSON 字符串→对象；与 R5 抽屉同口径，humanTarget/文件打开可用）
+        ? { ...msg, traces: byMsg[msg.id].map((t) => ({ name: t.tool_name, args: safeJson(t.args) ?? {}, result: t.result_summary, status: t.status, duration_ms: t.duration_ms, seq: 0 })) }
         : msg;
       if (msg.role === 'assistant' && msg.reasoning) m = { ...m, think: msg.reasoning }; // 历史思考过程回显
       return m;
@@ -370,6 +371,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const delConv = async (id, e) => {
     e.stopPropagation();
     if (!confirm('删除该会话及其消息？')) return;
+    // F：若删的是正在执行中的会话，先中止流（防 SSE 继续跑完写消息/烧 token/落孤儿）
+    if (busyConvRef.current === id || (abortRef.current && curRef.current === id)) {
+      api.stopChat(id).catch(() => {});
+      if (abortRef.current) { try { abortRef.current.abort(); } catch { /* ignore */ } }
+    }
     await api.deleteConversation(id);
     delete draftsRef.current[id]; // 删除会话同时清除其草稿
     try { sessionStorage.removeItem(DRAFT_PREFIX + id); } catch { /* ignore */ }
@@ -960,10 +966,10 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
             </div>
             <div className="rw-drawer-body">
               {drawerTab === 'caps' && (
-                <div className="rw-cap-group">
+                <>
                   <SettingsPanel compact />
-                  <CapSwitches groupNames={GROUP_NAME} showGroupTitle={false} />
-                </div>
+                  <CapSwitches onToast={setToast} showGroupTitle={false} />
+                </>
               )}
 
               {drawerTab === 'providers' && (

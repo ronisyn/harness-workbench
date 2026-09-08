@@ -427,7 +427,7 @@ export async function initSchema() {
     const missing = [];
     const checks = [
       ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'],
-      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['knowledge', 'shell_id'],
+      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'],
     ];
     for (const [tbl, col] of checks) {
       const r = await pool.query('SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', [tbl, col]);

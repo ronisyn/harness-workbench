@@ -6,7 +6,7 @@ export default function SettingsBoard() {
   return (
     <div>
       <SettingsPanel />
-      <div className="rw-console-note">MCP/规则/能力开关等见对应板块（1.4/对话页⚙设置——同一共享组件，改一处两处生效）。</div>
+      <div className="rw-console-note">MCP 在「对话页 ⚙ 设置 → MCP」；能力/工具/规则见 1.4 Agent 能力（与对话页同一共享组件）。</div>
     </div>
   );
 }

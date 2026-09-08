@@ -81,9 +81,22 @@ export async function patchShell(key, patch) {
   }
   if (patch.persona !== undefined) { set.push('persona=?'); params.push(JSON.stringify(patch.persona === null ? null : String(patch.persona))); }
   if (patch.modelPolicy !== undefined) {
+    // 归一写入但保留未提交字段旧值：UI 只存 defaultProvider/defaultModel，若整体重建会抹掉已配 budgetYuan/allowModels
+    // （F1 后 budgetYuan 有运行语义——审计 C）；读取旧 model_policy 做缺省保留
+    const oldRow = await getShellByKey(String(key));
+    let oldMp = {};
+    if (oldRow && oldRow.model_policy != null) {
+      try { oldMp = typeof oldRow.model_policy === 'string' ? JSON.parse(oldRow.model_policy) : (oldRow.model_policy || {}); } catch { oldMp = {}; }
+    }
     const mp = (patch.modelPolicy && typeof patch.modelPolicy === 'object') ? patch.modelPolicy : {};
     set.push('model_policy=?');
-    params.push(JSON.stringify({ defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '', allowModels: Array.isArray(mp.allowModels) ? mp.allowModels : [], budgetYuan: mp.budgetYuan || 0, qualityCostBias: mp.qualityCostBias == null ? null : mp.qualityCostBias }));
+    params.push(JSON.stringify({
+      defaultProvider: mp.defaultProvider !== undefined ? (mp.defaultProvider || '') : (oldMp.defaultProvider || ''),
+      defaultModel: mp.defaultModel !== undefined ? (mp.defaultModel || '') : (oldMp.defaultModel || ''),
+      allowModels: Array.isArray(mp.allowModels) ? mp.allowModels : (Array.isArray(oldMp.allowModels) ? oldMp.allowModels : []),
+      budgetYuan: mp.budgetYuan !== undefined ? (mp.budgetYuan || 0) : (oldMp.budgetYuan || 0),
+      qualityCostBias: mp.qualityCostBias !== undefined ? mp.qualityCostBias : (oldMp.qualityCostBias != null ? oldMp.qualityCostBias : null),
+    }));
   }
   if (!set.length) return { ok: true };
   set.push('updated_at=NOW()');
