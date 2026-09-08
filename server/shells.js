@@ -76,6 +76,7 @@ export function packToRow(pack) {
     ui_brand: pack.uiBrand ? JSON.stringify(pack.uiBrand) : null,
     eval_ref: (pack.eval && pack.eval.goldenSetRef) || null,
     intent_rules: pack.intentRules ? JSON.stringify(pack.intentRules) : null,
+    task_profiles: pack.taskProfiles ? JSON.stringify(pack.taskProfiles) : null,
   };
 }
 
@@ -111,5 +112,6 @@ export function rowToPack(row) {
     channels: { domainHosts: Array.isArray(jsafe(row.channels, [])) ? jsafe(row.channels, []) : [], bindings: {} },
     eval: { goldenSetRef: row.eval_ref || null },
     intentRules: jsafe(row.intent_rules, null) || undefined,
+    taskProfiles: jsafe(row.task_profiles, null) || undefined,
   };
 }

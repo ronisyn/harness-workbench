@@ -13,6 +13,7 @@ import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
 import { shellContext } from './shells.js';
 import { classifyIntent } from './intent.js';
+import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools } from './shellstore.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -396,11 +397,29 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // ②会话已保存的 provider/model（用户此前选择，persist 在会话）→ ③默认（deepseek 或 default_model 配置）。
   // 关键修复：原实现只读 body（缺省默认 deepseek），完全忽略会话保存值 → 用户切 GLM 后若 body 丢参即静默回 deepseek=冒充（O-14）。
   // 显式选择（body 或会话里非 auto 的 provider）是绝对锁：不允许被自动路由/回退覆盖。
-  const wantProvider = provider || convProvider;
-  const wantModel = model || convModel;
+  let wantProvider = provider || convProvider;
+  let wantModel = model || convModel;
   // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认
   let defOverrides = null;
   try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
+  // B3：任务档案点名（仅"显式点名"，不自动猜；C4 显式模型=绝对锁，本层不覆盖）
+  let profileSuggestion = null;
+  if (convs[0].shell_id && !wantProvider && !wantModel) {
+    try {
+      const pRow = (await db.query('SELECT task_profiles FROM shells WHERE id=? AND status="enabled"', [convs[0].shell_id]))[0];
+      const profs = (pRow && pRow.task_profiles) || null;
+      const hit = resolveTaskProfile(content, profs || undefined);
+      if (hit && hit.profile && hit.profile.modelHint && hit.profile.modelHint.defaultProvider) {
+        const cand = findProvider(hit.profile.modelHint.defaultProvider);
+        if (cand && config.keys[cand.keyEnv]) {
+          const mdl = hit.profile.modelHint.defaultModel || cand.defaultModel;
+          profileSuggestion = { key: hit.profile.key, name: hit.profile.name, provider: cand.id, model: mdl, qualityCostBias: hit.profile.modelHint.qualityCostBias == null ? null : hit.profile.modelHint.qualityCostBias };
+          wantProvider = profileSuggestion.provider;
+          wantModel = profileSuggestion.model;
+        }
+      }
+    } catch { profileSuggestion = null; }
+  }
   const route = resolveRoute(content, wantProvider || 'auto', wantModel || '__auto__', defOverrides);
   provider = route.provider;
   model = route.model;
@@ -598,6 +617,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         [req.user.id, 'intent:' + cl.label, JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) }).slice(0, 900), convShellId]);
     }
   } catch { /* 意图事件失败不影响对话 */ }
+  // B3：任务档案路由灰字事件（档案点名生效时；显式模型优先不受影响；不入消息正文/导出）
+  if (profileSuggestion) {
+    try {
+      send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
+        [req.user.id, 'route:' + profileSuggestion.key, JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) }).slice(0, 900), convShellId]);
+    } catch { /* 路由事件失败不影响对话 */ }
+  }
 
   const t0 = Date.now();
   let firstTokenMs = 0;

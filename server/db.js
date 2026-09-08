@@ -342,6 +342,8 @@ export async function initSchema() {
     'ALTER TABLE audit_log ADD COLUMN shell_id INT NULL',
     // B2：壳级意图词表（intentRules，v1.1 可选字段）
     'ALTER TABLE shells ADD COLUMN intent_rules JSON',
+    // B3：壳级任务档案（taskProfiles，v1.2 可选字段）
+    'ALTER TABLE shells ADD COLUMN task_profiles JSON',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
