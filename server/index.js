@@ -1040,7 +1040,7 @@ app.get('/api/proposals', requireAuth, async (req, res) => {
     const list = files.map((f) => {
       try {
         const raw = fs.readFileSync(path.join(PROPOSALS_DIR, f), 'utf8');
-        const title = (String(raw).split('\n').find((l) => l.startsWith('# ')) || '# ' + f).replace(/^#\s*/, '').slice(0, 80);
+        const title = (String(raw).split('\n').find((l) => l.startsWith('# ')) || '# ' + f).replace(/^#\s*/, '').replace(/^提案\s*[:：]\s*/, '').slice(0, 80);
         const status = (String(raw).match(/状态：([^·\n]+)/) || [])[1] || '待审';
         return { file: f, title: title.trim(), status: status.trim(), size: raw.length };
       } catch { return { file: f, title: f, status: '?', size: 0 }; }
