@@ -44,6 +44,18 @@ test('qualityCostBias 允许空(null)（rowToPack/clone 用）', () => {
   assert.equal(validatePack({ shellPackVersion: 1, key: 'code', name: 'x', modelPolicy: { qualityCostBias: null } }).ok, true);
 });
 
+test('rowToPack/toolsThreeState 兼容 mysql2 已反序列化的 JSON 值（clone 三态不丢）', () => {
+  const row = { skey: 'code', name: '代码壳', description: '', persona: 'p', domain_text: 'd',
+    model_policy: { defaultProvider: 'deepseek', defaultModel: 'm', allowModels: [], budgetYuan: 0, qualityCostBias: 3 },
+    tools_preset: 'standard', tools_force_on: [], tools_force_off: ['run_command'],
+    knowledge_scopes: ['global'], skills_allow: [], guardrails: [], channels: [], eval_ref: null };
+  const p = rowToPack(row);
+  assert.deepEqual(p.tools.forceOff, ['run_command']);
+  assert.equal(p.modelPolicy.defaultProvider, 'deepseek');
+  assert.equal(toolsThreeState(row).forceOff[0], 'run_command');
+  assert.equal(shellContext(row).persona, 'p');
+});
+
 test('默认壳 key 常量', () => {
   assert.equal(SHELL_DEFAULT_KEY, 'default');
   assert.equal(isKeyOk('default'), true);

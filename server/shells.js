@@ -12,6 +12,14 @@ export const PACK_ALLOWED_KEYS = [
   'intentRules', 'taskProfiles', 'credentials',
 ];
 
+// JSON 列兼容读取：mysql2 对 JSON 列已自动反序列化为对象/数组/字符串，
+// 旧库/手写值可能是 JSON 文本——统一"已是对象直接用，是文本才尝试 parse，parse 失败按原文"。
+function jsafe(v, def) {
+  if (v === undefined || v === null) return def;
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return v; }
+}
+
 export function isKeyOk(key) {
   return typeof key === 'string' && /^[a-z0-9][a-z0-9-]{0,31}$/.test(key);
 }
@@ -72,36 +80,34 @@ export function packToRow(pack) {
 
 // 壳行 → 三态工具集（force_on/force_off 提取；供 B 系列工具解析层使用）
 export function toolsThreeState(row) {
-  const on = (() => { try { return JSON.parse(row.tools_force_on || '[]'); } catch { return []; } })();
-  const off = (() => { try { return JSON.parse(row.tools_force_off || '[]'); } catch { return []; } })();
+  const on = jsafe(row.tools_force_on, []);
+  const off = jsafe(row.tools_force_off, []);
   return { forceOn: Array.isArray(on) ? on : [], forceOff: Array.isArray(off) ? off : [] };
 }
 
 // 壳行 → 会话注入用的 persona/domain 摘要（中性壳=null 保持现状）
 export function shellContext(row) {
   if (!row) return null;
-  let persona = null;
-  try { persona = row.persona ? JSON.parse(row.persona) : null; } catch { persona = String(row.persona || null); }
-  return { key: row.skey, persona: persona || null, domain: row.domain_text || '' };
+  const persona = jsafe(row.persona, null);
+  return { key: row.skey, persona: (persona && typeof persona === 'string' && persona) ? persona : null, domain: row.domain_text || '' };
 }
 
-// 壳行 → pack 对象（供 clone/export；JSON 字段回读）
+// 壳行 → pack 对象（供 clone/export；JSON 字段兼容已解析值）
 export function rowToPack(row) {
-  const j = (v, def) => { try { const x = JSON.parse(v); return x == null ? def : x; } catch { return def; } };
-  const mp = j(row.model_policy, {});
+  const mp = jsafe(row.model_policy, {}) || {};
   return {
     shellPackVersion: 1,
     key: row.skey,
     name: row.name,
     description: row.description || '',
-    identity: { persona: j(row.persona, null), tone: '', forbidden: [] },
+    identity: { persona: jsafe(row.persona, null), tone: '', forbidden: [] },
     domain: { agendsText: row.domain_text || '', terms: [] },
-    modelPolicy: { defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '', allowModels: mp.allowModels || [], budgetYuan: mp.budgetYuan || 0, qualityCostBias: mp.qualityCostBias == null ? null : mp.qualityCostBias },
-    tools: { presetBase: row.tools_preset || 'standard', forceOn: j(row.tools_force_on, []), forceOff: j(row.tools_force_off, []), mcps: [], connectors: [] },
-    knowledge: { scopes: j(row.knowledge_scopes, ['global']), importRefs: [] },
-    skills: { allow: j(row.skills_allow, []), defaultsAutoLoad: [] },
-    guardrails: { accessRules: j(row.guardrails, []), approvalMode: 'default', sensitiveDefaults: [] },
-    channels: { domainHosts: j(row.channels, []), bindings: {} },
+    modelPolicy: { defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '', allowModels: Array.isArray(mp.allowModels) ? mp.allowModels : [], budgetYuan: mp.budgetYuan || 0, qualityCostBias: mp.qualityCostBias == null ? null : mp.qualityCostBias },
+    tools: { presetBase: row.tools_preset || 'standard', forceOn: Array.isArray(jsafe(row.tools_force_on, [])) ? jsafe(row.tools_force_on, []) : [], forceOff: Array.isArray(jsafe(row.tools_force_off, [])) ? jsafe(row.tools_force_off, []) : [], mcps: [], connectors: [] },
+    knowledge: { scopes: Array.isArray(jsafe(row.knowledge_scopes, ['global'])) ? jsafe(row.knowledge_scopes, ['global']) : ['global'], importRefs: [] },
+    skills: { allow: Array.isArray(jsafe(row.skills_allow, [])) ? jsafe(row.skills_allow, []) : [], defaultsAutoLoad: [] },
+    guardrails: { accessRules: Array.isArray(jsafe(row.guardrails, [])) ? jsafe(row.guardrails, []) : [], approvalMode: 'default', sensitiveDefaults: [] },
+    channels: { domainHosts: Array.isArray(jsafe(row.channels, [])) ? jsafe(row.channels, []) : [], bindings: {} },
     eval: { goldenSetRef: row.eval_ref || null },
   };
 }
