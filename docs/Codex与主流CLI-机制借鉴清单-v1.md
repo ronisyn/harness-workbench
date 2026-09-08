@@ -66,7 +66,7 @@
 
 ### P3（低价值/成本高，暂缓）
 5. **✅ MCP 生态接入（Codex/Claude Code 支持 MCP 工具服务器）**（2026-09-06 落地，状态见 docs/MCP接入状态.md）
-   - 落地：server/mcp.js + 设置→MCP 面板（配置存 settings 表 mcp_servers）；github MCP server 已接入 26 个工具，
+   - 落地：server/mcp.js + 后台→系统→1.8 设置→MCP 管理面板（配置存 settings 表 mcp_servers；对话页⚙设置抽屉已 2026-09-09 退役）；github MCP server 已接入 26 个工具，
      以 mcp_github_<tool> 命名并入 execTool 主通道（权限 write 级 + 纪律钩子 + 审计脱敏，不再绕过平台纪律层）；
      含密钥 env 键（匹配 token|secret|key|password|apikey）一律 __REDACTED__ 不下发前端；断线看门狗 60s 自动重连并同步工具。
      已实测：mcp_github_list_commits 返回 ronisyn/harness-workbench 真实提交（与远程一致）。
