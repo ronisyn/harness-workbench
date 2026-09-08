@@ -14,6 +14,8 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
   const [recent, setRecent] = useState([]);     // 最近会话（跳对话页用）
   // —— 看板 ——
   const [stats, setStats] = useState(null);
+  const [statsLoaded, setStatsLoaded] = useState(false);
+  const [statsErr, setStatsErr] = useState(false);
   const [shells, setShells] = useState([]);
   const [kbCount, setKbCount] = useState(0);
   const [tasks, setTasks] = useState([]);
@@ -28,7 +30,9 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
       // 迷你对话绑定最近会话（没有则等首次发送时创建）
       if (list.length) setConv((c) => c || list[0].id);
     } catch { /* ignore */ }
-    try { const s = await api.usageStats(); setStats(s.stats); } catch { /* ignore */ }
+    try { const s = await api.usageStats(); setStats(s.stats); setStatsErr(false); }
+    catch { setStatsErr(true); }
+    finally { setStatsLoaded(true); }
     try { const sh = await api.shells(); setShells((sh.shells || []).filter((x) => x.status === 'enabled')); } catch { /* ignore */ }
     try { const kb = await api.knowledgeList({}); setKbCount((kb.knowledge || []).length); } catch { /* ignore */ }
     try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ }
@@ -85,7 +89,11 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
         {
           onThinking: () => patchMiniTail((x) => ({ ...x, thinking: true })),
           onDelta: (d) => { acc += d; patchMiniTail((x) => ({ ...x, content: acc, thinking: false })); },
-          onDone: () => patchMiniTail((x) => ({ ...x, thinking: false })),
+          onDone: () => {
+            patchMiniTail((x) => ({ ...x, thinking: false }));
+            // P3-23：迷你对话新会话也智能命名（与对话页一致；服务端仅默认名才更新）
+            api.autoTitle(convId).then((d) => { if (d && d.ok && d.title) setRecent((prev) => prev.map((c) => (c.id === convId ? { ...c, title: d.title } : c))); }).catch(() => {});
+          },
           onError: (m) => patchMiniTail((x) => ({ ...x, content: '⚠ ' + m, thinking: false })),
         }, ac.signal);
     } catch (e) {
@@ -121,7 +129,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
                 {m.role === 'user' ? '我：' : m.thinking ? '🤔 思考中…' : 'AI：'}
                 {m.role === 'ai' && !m.thinking && <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
                 {m.role === 'user' && <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span>}
-                {m.role === 'ai' && !m.content && !m.thinking && '（无文本输出）'}
+                {m.role === 'ai' && !m.content && !m.thinking && '（未产生文本——可能执行了工具操作，点「💬 对话页」查看完整轨迹）'}
               </div>
             ))}
           </div>
@@ -153,7 +161,9 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
                 <div className="rw-dash-num"><b>{stats.tokensOut}</b><span>输出 tok</span></div>
                 <div className="rw-dash-num"><b>¥{Number(stats.cost || 0).toFixed(3)}</b><span>费用</span></div>
               </div>
-            ) : <div className="rw-dash-hint">加载中…</div>}
+            ) : statsErr
+              ? <div className="rw-dash-hint">用量加载失败 <button className="rw-btn" onClick={loadAll}>重试</button></div>
+              : <div className="rw-dash-hint">{statsLoaded ? '暂无用量数据' : '加载中…'}</div>}
             <div className="rw-dash-foot">模型观测下钻（按模型/壳/日）随统一后台 1.2（M2）</div>
           </section>
 

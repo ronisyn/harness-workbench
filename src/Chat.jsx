@@ -435,6 +435,10 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   // P1-F2 快捷键：Ctrl+Enter 发送 / Ctrl+N 新对话 / Ctrl+E 导出
   useEffect(() => {
     const onKey = (e) => {
+      // P3-20：内联编辑（会话重命名/其它 input）中按全局快捷键不应触发主对话动作
+      const t = e.target;
+      const inInline = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && !(t.closest && t.closest('.rw-inputrow'));
+      if (inInline) return;
       if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); send(); }
       if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newConv(); }
       if (e.ctrlKey && (e.key === 'e' || e.key === 'E')) { e.preventDefault(); exportConv(); }
@@ -669,29 +673,31 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
 
   const openDrawer = async (tab = 'caps') => {
     setDrawer(true); setDrawerTab(tab);
-    const d = await api.capabilities();
-    setCaps(d.list);
-    api.getSettings().then((s) => {
-      setSettingsSchema(s.schema || []);
-      setSval(s.settings || {});
-      if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
-      if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
-      if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
-      if (s.settings?.round_cap !== undefined) setLimRounds(Number(s.settings.round_cap));
-      if (s.settings?.loop_guard !== undefined) setLimLoop(Number(s.settings.loop_guard));
-      if (s.settings?.max_parallel_tools !== undefined) setLimParallel(Number(s.settings.max_parallel_tools));
-    }).catch(() => {});
-    if (tab === 'providers') { const p = await api.providers(); setProvList(p.providers); }
-    if (tab === 'market') await loadMarket();
-    if (tab === 'trace' && cur) { const t = await api.toolcalls(cur); setToolcalls(t.toolcalls || []); }
-    if (tab === 'tasks') { const t = await api.tasks(); setTasks(t.tasks || []); }
-    if (tab === 'tools') { const t = await api.getToolset(); setToolList(t.tools || []); }
-    if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
-    if (tab === 'proposals') { try { const p = await api.proposals(); setProposals(p.proposals || []); setPropContent(''); } catch { setProposals([]); } }
-    if (tab === 'mcp') {
-      try { const s = await api.getSettings(); setMcpText(JSON.stringify((s.settings?.mcp_servers || []), null, 2)); } catch { setMcpText('[]'); }
-      try { const m = await api.mcpStatus(); setMcpStatus('已配置 ' + (m.configured || []).length + ' 个 server；已连接 ' + (m.clients || []).length + ' 个：' + (m.clients || []).map((c) => c.id).join(', ')); } catch { setMcpStatus('查询失败'); }
-    }
+    try {
+      const d = await api.capabilities().catch(() => ({ list: [] })); // P3-4：单点失败不中断整个抽屉
+      setCaps(d.list || []);
+      api.getSettings().then((s) => {
+        setSettingsSchema(s.schema || []);
+        setSval(s.settings || {});
+        if (s.settings?.temperature !== undefined) setTemperature(Number(s.settings.temperature) || 1.0);
+        if (s.settings?.systemPrompt !== undefined) setSysPrompt(String(s.settings.systemPrompt));
+        if (s.settings?.time_budget_min !== undefined) setLimBudget(Number(s.settings.time_budget_min));
+        if (s.settings?.round_cap !== undefined) setLimRounds(Number(s.settings.round_cap));
+        if (s.settings?.loop_guard !== undefined) setLimLoop(Number(s.settings.loop_guard));
+        if (s.settings?.max_parallel_tools !== undefined) setLimParallel(Number(s.settings.max_parallel_tools));
+      }).catch(() => {});
+      if (tab === 'providers') { const p = await api.providers().catch(() => ({ providers: [] })); setProvList(p.providers || []); }
+      if (tab === 'market') await loadMarket();
+      if (tab === 'trace' && cur) { const t = await api.toolcalls(cur).catch(() => ({ toolcalls: [] })); setToolcalls(t.toolcalls || []); }
+      if (tab === 'tasks') { const t = await api.tasks().catch(() => ({ tasks: [] })); setTasks(t.tasks || []); }
+      if (tab === 'tools') { const t = await api.getToolset().catch(() => ({ tools: [] })); setToolList(t.tools || []); }
+      if (tab === 'rules') { try { const r = await api.getRules(); setRules(r.rules || []); } catch { setRules([]); } }
+      if (tab === 'proposals') { try { const p = await api.proposals(); setProposals(p.proposals || []); setPropContent(''); } catch { setProposals([]); } }
+      if (tab === 'mcp') {
+        try { const s = await api.getSettings(); setMcpText(JSON.stringify((s.settings?.mcp_servers || []), null, 2)); } catch { setMcpText('[]'); }
+        try { const m = await api.mcpStatus(); setMcpStatus('已配置 ' + (m.configured || []).length + ' 个 server；已连接 ' + (m.clients || []).length + ' 个：' + (m.clients || []).map((c) => c.id).join(', ')); } catch { setMcpStatus('查询失败'); }
+      }
+    } catch (e) { setToast('打开设置失败：' + (e.message || e)); }
   };
 
   // P11 MCP 配置保存 + 重连
@@ -800,7 +806,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
 
   const toggleCap = async (key, v) => {
     setCaps((c) => c.map((x) => (x.key === key ? { ...x, enabled: v } : x)));
-    await api.setCapabilities({ [key]: v });
+    try { await api.setCapabilities({ [key]: v }); }
+    catch (e) { setCaps((c) => c.map((x) => (x.key === key ? { ...x, enabled: !v } : x))); setToast('开关保存失败：' + (e.message || e)); } // P3-5：失败回滚+提示
   };
 
   useEffect(() => {
@@ -1280,12 +1287,6 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
    - 工具名中文化 + 目标摘要（轨迹行是给人看的，不是给 AI 看的）
    - ThinkBox：思考区流式期间自动贴底；结束后可自由开合细读
    - TracePanel：整轮工具过程收进单一可折叠面板，默认摘要一行
-   ============================================================ */
-/* ============================================================
-   阅读体验 v3（2026-09）：轨迹/思考对人友好
-   - 工具名中文化 + 目标摘要（轨迹行是给人看的）
-   - ThinkBox：思考区流式贴底、结束可开合细读
-   - TracePanel：整轮工具过程收进单一可折叠面板
    ============================================================ */
 const TRACE_LABEL = {
   read_file: '读取文件', write_file: '写入文件', append_file: '追加内容', edit_file: '修改文件',
