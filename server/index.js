@@ -16,6 +16,7 @@ import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
 import { parseKnowledgeUpload } from './knowledge.js';
+import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk } from './templates.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -1334,6 +1335,56 @@ app.delete('/api/knowledge/:id', requireAuth, async (req, res) => {
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '知识条目不存在或无权删除' });
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:delete', 'id=' + req.params.id]);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- ⑥ 任务模板库 API（§6.5/D9 半成品：templates/<key>/tpl.json 随仓库 git；只读服务端，装配动作下发到壳） ----------
+// 列表
+app.get('/api/templates', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, templates: listTemplates() }); }
+  catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 详情
+app.get('/api/templates/:key', requireAuth, async (req, res) => {
+  const t = getTemplate(req.params.key);
+  if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
+  res.json({ ok: true, template: t });
+});
+// 开任务指令（壳内"从模板开任务"入口的提示文本；goal=本次具体目标可空）
+app.post('/api/templates/:key/prompt', requireAuth, async (req, res) => {
+  const t = getTemplate(req.params.key);
+  if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
+  const prompt = buildLaunchPrompt(t, (req.body || {}).goal || '');
+  await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:prompt', req.params.key]);
+  res.json({ ok: true, prompt });
+});
+// 应用至壳：模板的 taskProfile（+skills.allow 并入）装配到指定壳 → 壳内会话点名该档案即按模板生效
+app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
+  try {
+    const t = getTemplate(req.params.key);
+    if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
+    const frag = toProfileFragment(t);
+    if (!frag) return res.status(400).json({ ok: false, message: '模板缺少可用 taskProfile' });
+    const shellKey = String((req.body || {}).shellKey || '').trim();
+    if (!isTplKeyOk(shellKey)) return res.status(400).json({ ok: false, message: 'shellKey 非法' });
+    const sh = (await db.query('SELECT id, skey, task_profiles, skills_allow FROM shells WHERE skey=? AND status="enabled"', [shellKey]))[0];
+    if (!sh) return res.status(404).json({ ok: false, message: '壳不存在或未启用（default 壳不装配模板档案）' });
+    if (shellKey === 'default') return res.status(400).json({ ok: false, message: 'default 保留壳不可装配' });
+    // 档案合并：同 key 覆盖，新增追加（去重）
+    let profiles = [];
+    try { profiles = typeof sh.task_profiles === 'string' ? JSON.parse(sh.task_profiles) : (sh.task_profiles || []); } catch { profiles = []; }
+    if (!Array.isArray(profiles)) profiles = [];
+    const idx = profiles.findIndex((p) => p && p.key === frag.key);
+    if (idx >= 0) profiles[idx] = { ...profiles[idx], ...frag }; else profiles.push(frag);
+    // 技能 allow 并入（去重）
+    let skillsAllow = [];
+    try { skillsAllow = typeof sh.skills_allow === 'string' ? JSON.parse(sh.skills_allow) : (sh.skills_allow || []); } catch { skillsAllow = []; }
+    if (!Array.isArray(skillsAllow)) skillsAllow = [];
+    for (const s of (Array.isArray(t.skills) ? t.skills : [])) if (!skillsAllow.includes(s)) skillsAllow.push(s);
+    await db.query('UPDATE shells SET task_profiles=?, skills_allow=?, updated_at=NOW() WHERE id=?',
+      [JSON.stringify(profiles), JSON.stringify(skillsAllow), sh.id]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:apply', 'template=' + req.params.key + ' shell=' + shellKey + ' profile=' + frag.key]);
+    res.json({ ok: true, shellKey, profile: frag.key, profiles: profiles.length, skills: skillsAllow.length });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 

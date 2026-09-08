@@ -74,6 +74,11 @@ export const api = {
   reviewsList: (params) => request('/api/reviews?' + new URLSearchParams(params || {}).toString()),
   reviewsAdd: (conversationId, result, bugReason) => request('/api/reviews', { method: 'POST', body: JSON.stringify({ conversationId, result, bugReason }) }),
   audit: (limit) => request('/api/audit?limit=' + (Number(limit) || 100)),
+  // ⑥ 任务模板库
+  templates: () => request('/api/templates'),
+  templateGet: (key) => request('/api/templates/' + encodeURIComponent(key)),
+  templatePrompt: (key, goal) => request('/api/templates/' + encodeURIComponent(key) + '/prompt', { method: 'POST', body: JSON.stringify({ goal }) }),
+  templateApply: (key, shellKey) => request('/api/templates/' + encodeURIComponent(key) + '/apply', { method: 'POST', body: JSON.stringify({ shellKey }) }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

@@ -1,0 +1,24 @@
+{
+  "templateVersion": 1,
+  "key": "small-fix",
+  "name": "小修",
+  "description": "通用：范围明确的代码小修（改 bug / 微调 / 文案 / 配置）。低模型档即可，改动小、验收聚焦改动点。",
+  "targetShell": "code",
+  "taskProfile": {
+    "key": "small-fix",
+    "name": "小修",
+    "match": ["小修", "小改", "quick fix"],
+    "modelHint": { "defaultProvider": "deepseek", "defaultModel": "deepseek-v4-flash", "qualityCostBias": 3 }
+  },
+  "skills": ["task-approach"],
+  "acceptanceTemplate": {
+    "checks": [
+      "改动范围与本任务描述一致，未顺手改动无关文件",
+      "改动后语法/自检通过，相关测试不回归",
+      "给出改动文件清单与关键 diff 说明"
+    ],
+    "verifyCmds": ["node --check <改动文件>"],
+    "note": "模板化验收点；落到 create_contract 时替换 <改动文件> 为实际清单"
+  },
+  "guide": "按【小修】档案处理：先读相关文件确认现状，再只做最小改动（不重构、不扩需求）；完成后自检语法与相关测试并汇报改动清单。"
+}
