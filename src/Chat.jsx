@@ -129,11 +129,13 @@ const PRESET_LABEL = { all: '全量', standard: '标准', minimal: '精简' };
 const PRESET_TIP = { all: '暴露全部 61 工具（默认）', standard: 'core+pro 52 个，隐藏 expert 高危/改自身类', minimal: '仅 core 21 个文件/查证/规划类' };
 const GROUP_NAME = { A: '渲染能力', B: '工具能力', C: '平台能力' };
 
-export default function Chat({ user, onLogout }) {
+export default function Chat({ user, onLogout, onGoHome, initialConvId }) {
   const [convs, setConvs] = useState([]);
   const [cur, setCur] = useState(null);
   const [curTitle, setCurTitle] = useState('');
   const [msgs, setMsgs] = useState([]);
+  // M1：灰字系统行（意图/路由回显；不入历史/导出，仅本轮展示——§6.1/6.2 回显语义）
+  const [sysline, setSysline] = useState(null); // { intent: {label,echo} | null, route: {profile,suggestProvider,suggestModel,echo} | null, ts }
   const [providers, setProviders] = useState([]);
   const [provider, setProvider] = useState('deepseek');
   const [model, setModel] = useState('');
@@ -215,6 +217,17 @@ export default function Chat({ user, onLogout }) {
     }).catch(() => {});
   }, [loadConvs]);
 
+  // M1：从总览首页直达会话（/chat?conv=<id>）——convs 加载完成后打开指定会话一次
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (initialConvId && convs.length && !autoOpenedRef.current) {
+      autoOpenedRef.current = true;
+      const target = convs.find((c) => c.id === Number(initialConvId));
+      if (target) openConv(target.id);
+      else { setCurTitle('会话不存在或已删除'); }
+    }
+  }, [initialConvId, convs, loadMessages]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const switchProvider = (pid) => {
     setProvider(pid);
     if (pid === 'auto') { setModelList([]); setModel('__auto__'); saveModelSel(pid, '__auto__'); return; }
@@ -233,6 +246,22 @@ export default function Chat({ user, onLogout }) {
       await api.patchConversation(cur, { provider: pid || null, model: mid || null });
       setConvs((cs) => cs.map((x) => (x.id === cur ? { ...x, provider: pid || null, model: mid || null } : x)));
     } catch { /* 静默：模型选择保存失败不打断 */ }
+  };
+
+  // M1：一键退回默认（route 灰字行旁）——清除该会话显式 provider/model，回落自动路由（C4：未显式选择才可被路由接管）
+  const revertToDefault = async () => {
+    if (!cur) return;
+    try {
+      await api.patchConversation(cur, { provider: null, model: null });
+      setConvs((cs) => cs.map((x) => (x.id === cur ? { ...x, provider: null, model: null } : x)));
+      // 会话无显式选择：前端回"自动路由"显示（模型下拉置 auto）
+      const p = provList.find((x) => x.provider_key === 'auto');
+      setProvider(p ? 'auto' : 'deepseek');
+      setModelList([]);
+      setModel('__auto__');
+      setSysline((prev) => ({ ...(prev || {}), route: null }));
+      setToast('已退回默认：本会话按自动路由选择模型');
+    } catch (e) { setToast(e.message); }
   };
 
   // 加载会话全部（消息+轨迹+统计）；openConv 与活动轮询完成刷新共用
@@ -401,6 +430,7 @@ export default function Chat({ user, onLogout }) {
     const tmpId = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     setMsgs((m) => [...m, { role: 'user', content: text }]);
     let acc = '';
+    setSysline(null); // 新一轮开始：清空上一轮灰字（意图/路由回显仅当轮展示）
     setMsgs((m) => [...m, { _tmpId: tmpId, role: 'assistant', content: '', streaming: true, traces: [], think: '', plan: null, thinking: true, approvals: [], asks: [] }]);
     const ac = new AbortController();
     abortRef.current = ac;
@@ -451,6 +481,9 @@ export default function Chat({ user, onLogout }) {
             // 结构化问询：追加选项卡片
             patchLast((x) => ({ ...x, asks: [...(x.asks || []), { id: q.id, question: q.question, options: q.options || [], chosen: null }] }));
           },
+          // M1 灰字回显（系统行，不入历史/导出）：意图识别 + 档案路由建议（§6.1/6.2/§8）
+          onIntent: (ev) => setSysline((prev) => ({ intent: { label: ev.label, echo: ev.echo || '' }, route: (prev && prev.route) || null, ts: Date.now() })),
+          onRoute: (ev) => setSysline((prev) => ({ intent: (prev && prev.intent) || null, route: { profile: ev.profile, suggestProvider: ev.suggestProvider, suggestModel: ev.suggestModel, echo: ev.echo || '' }, ts: Date.now() })),
           onDone: () => {
             patchLast((x) => ({ ...x, streaming: false, thinking: false }));
             setBusy(false); busyConvRef.current = null;
@@ -734,11 +767,12 @@ export default function Chat({ user, onLogout }) {
 
   return (
     <div className="rw-shell">
-      {/* 顶栏：logo 左上 + 对话标题 + 操作 */}
+      {/* 顶栏：logo 左上 + 对话标题 + 操作（M1：logo/首页 → 总览首页） */}
       <header className="rw-topbar">
-        <div className="rw-logo" onClick={() => { setCur(null); setMsgs([]); }}>Roni Workbench</div>
+        <div className="rw-logo" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">Roni Workbench</div>
         <div className="rw-conv-title">{curTitle || 'Roni Workbench'}</div>
         <div className="rw-top-actions">
+          <button className="rw-btn" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">🏠 首页</button>
           <button className="rw-btn" onClick={() => setKbOpen(true)} title="知识库：上传/管理（④）">📚 知识</button>
           {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}
           {cur && (
@@ -856,6 +890,22 @@ export default function Chat({ user, onLogout }) {
             ))}
             <div ref={bottomRef} />
           </div>
+          {/* M1：灰字系统行——意图/路由回显，仅当轮展示、不入历史与导出（§8） */}
+          {sysline && (sysline.intent || sysline.route) && (
+            <div className="rw-sysline">
+              {sysline.intent && sysline.intent.label && (
+                <span className="rw-sysline-intent">
+                  <span className="rw-sysline-tag">意图</span>{sysline.intent.echo || sysline.intent.label}
+                </span>
+              )}
+              {sysline.route && sysline.route.profile && (
+                <span className="rw-sysline-route">
+                  <span className="rw-sysline-tag">路由</span>{sysline.route.echo || ('已按档案 ' + sysline.route.profile + ' 使用 ' + sysline.route.suggestModel)}
+                  {cur && <button className="rw-btn rw-sysline-revert" onClick={revertToDefault} title="清除本会话显式模型选择，回落自动路由">↩ 退回默认</button>}
+                </span>
+              )}
+            </div>
+          )}
           <div className="rw-stats">
             {Object.keys(stats).length > 0 && (
               <span>{stats.rounds} 轮 · {stats.steps} 步 ｜ LLM {(stats.llmMs / 1000).toFixed(1)}s ｜ 输入 {stats.tokensIn} tok · 输出 {stats.tokensOut} tok{stats.cost ? ' ｜ ¥' + Number(stats.cost).toFixed(4) : ''}</span>

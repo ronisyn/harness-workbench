@@ -65,8 +65,9 @@ export const api = {
 
 // SSE 流式对话（带轨迹流式回调）：
 // onDelta / onThinking(round) / onThink(text) / onToolStart / onToolDone / onPlan / onApproval / onDone / onError；signal 可中止
+// M1：onIntent / onRoute —— 意图识别与档案路由的灰字回显（系统行，不入历史；§6.1/6.2/§8）
 export async function streamChat({ conversationId, content, provider, model }, handlers, signal) {
-  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onApproval, onAsk, onDone, onError } = handlers || {};
+  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onApproval, onAsk, onIntent, onRoute, onDone, onError } = handlers || {};
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -99,6 +100,8 @@ export async function streamChat({ conversationId, content, provider, model }, h
         else if (j.type === 'plan') onPlan?.(j.plan);
         else if (j.type === 'approval') onApproval?.(j);
         else if (j.type === 'ask') onAsk?.(j);
+        else if (j.type === 'intent') onIntent?.(j);
+        else if (j.type === 'route') onRoute?.(j);
         else if (j.type === 'done') onDone?.(j.usage || {});
         else if (j.type === 'error') onError?.(j.message);
       } catch { /* ignore */ }

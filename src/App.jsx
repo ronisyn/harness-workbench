@@ -1,7 +1,9 @@
-// src/App.jsx - 根组件：登录态管理 + 主界面
+// src/App.jsx - 根组件：登录态管理 + M1 路由分发（总览首页 `/` 默认 / 对话页 `/chat`；v2.12 §7.3/D4）
+// 不引入路由库：按 location.pathname 分发；对话页可带 ?conv= 直达会话；登录成功默认落首页。
 import React, { useState, useEffect } from 'react';
 import Login from './Login.jsx';
 import Chat from './Chat.jsx';
+import Dashboard from './Dashboard.jsx';
 import { api, getToken, clearToken } from './api.js';
 
 // 错误边界：渲染崩溃兜底（不白屏；显示错误并刷新恢复）
@@ -10,7 +12,6 @@ class Boundary extends React.Component {
   static getDerivedStateFromError(err) { return { err }; }
   render() {
     if (this.state.err) {
-
       const e = this.state.err;
       return (
         <div className="rw-fatal">
@@ -27,6 +28,19 @@ class Boundary extends React.Component {
 export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
+  // M1：路径状态（/chat=对话页；其余含 / 与未知路径 → 总览首页）
+  const [path, setPath] = useState(location.pathname);
+  const go = (p) => { history.pushState(null, '', p); setPath(p); };
+  const [convParam, setConvParam] = useState('');
+
+  // 登录后默认落总览首页（D4：登录先见总览首页）；已登录直接访问 /chat?conv= 支持直达会话
+  const enterChat = (convId) => { setConvParam(convId || ''); go(convId ? '/chat?conv=' + convId : '/chat'); };
+
+  useEffect(() => {
+    const onPop = () => { setPath(location.pathname); setConvParam(new URLSearchParams(location.search).get('conv') || ''); };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   useEffect(() => {
     if (!getToken()) { setReady(true); return; }
@@ -35,5 +49,13 @@ export default function App() {
 
   if (!ready) return <div className="rw-loading">Roni Workbench 加载中…</div>;
   if (!user) return <Login onLogin={setUser} />;
-  return <Boundary><Chat user={user} onLogout={() => { clearToken(); setUser(null); }} /></Boundary>;
+  const onLogout = () => { clearToken(); setUser(null); };
+  const isChat = path === '/chat';
+  return (
+    <Boundary>
+      {isChat
+        ? <Chat key={convParam || 'chat'} user={user} initialConvId={convParam || null} onGoHome={() => go('/')} onLogout={onLogout} />
+        : <Dashboard user={user} onGoChat={enterChat} onLogout={onLogout} />}
+    </Boundary>
+  );
 }

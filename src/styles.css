@@ -469,3 +469,50 @@ body {
 .rw-chat-modelbar .rw-select { width: auto; max-width: 220px; }
 .rw-chat-model-lb { font-size: 12px; color: var(--rw-red); font-weight: 600; margin-right: 4px; }
 .rw-chat-model-note { font-size: 11px; color: var(--rw-dim); }
+
+/* ================= M1 总览首页 / 灰字系统行（v2.12 §7.3 / §8） ================= */
+/* 灰字系统行：意图/路由回显，不入历史与导出 */
+.rw-sysline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 20px 0;
+  font-size: 11.5px; color: var(--rw-muted); background: var(--rw-panel); letter-spacing: 0.2px; }
+.rw-sysline-tag { font-size: 10px; background: var(--rw-tint); color: var(--rw-red); border-radius: 4px;
+  padding: 0 5px; margin-right: 4px; font-weight: 600; }
+.rw-sysline-route { display: inline-flex; align-items: center; gap: 6px; }
+.rw-sysline-revert { font-size: 11px; padding: 1px 8px; border-radius: 5px; }
+
+/* 总览首页布局 */
+.rw-dash { padding: 18px 22px; overflow-y: auto; height: calc(100% - 52px); background: var(--rw-bg); }
+.rw-dash-card { background: var(--rw-panel); border: 1px solid var(--rw-border); border-radius: 14px;
+  padding: 16px 18px; box-shadow: 0 6px 18px var(--rw-shadow); }
+.rw-dash-title { font-weight: 700; font-size: 15px; margin-bottom: 10px; color: var(--rw-red); letter-spacing: 0.3px; }
+.rw-dash-sub { font-weight: 400; font-size: 11px; color: var(--rw-muted); margin-left: 6px; }
+.rw-dash-hint { color: var(--rw-muted); font-size: 12.5px; }
+.rw-dash-foot { margin-top: 12px; font-size: 11px; color: var(--rw-muted); border-top: 1px dashed var(--rw-border); padding-top: 8px; }
+
+/* 迷你对话 */
+.rw-dash-mini .rw-dash-mini-box { min-height: 120px; max-height: 40vh; overflow-y: auto; background: var(--rw-bg);
+  border: 1px solid var(--rw-border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
+.rw-dash-mini-line { padding: 2px 0; }
+.rw-dash-mini-line.user { color: var(--rw-red-dark); font-weight: 600; }
+.rw-dash-mini-line.ai { color: var(--rw-ink); }
+.rw-dash-mini-input { display: flex; gap: 8px; }
+.rw-dash-mini-input .rw-input { flex: 1; }
+.rw-dash-recent { margin-top: 10px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rw-dash-recent-lb { font-size: 11.5px; color: var(--rw-muted); }
+.rw-dash-recent-empty { font-size: 11.5px; color: var(--rw-muted); }
+.rw-dash-recent-item { font-size: 12px; border: 1px solid var(--rw-border); background: var(--rw-panel);
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; color: var(--rw-ink); max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rw-dash-recent-item:hover { border-color: var(--rw-red); color: var(--rw-red); }
+
+/* 看板数字 / 行 */
+.rw-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+.rw-dash-nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.rw-dash-num { text-align: center; background: var(--rw-bg); border: 1px solid var(--rw-border); border-radius: 10px; padding: 8px 2px; }
+.rw-dash-num b { display: block; font-size: 17px; color: var(--rw-red); }
+.rw-dash-num span { font-size: 10.5px; color: var(--rw-muted); }
+.rw-dash-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; font-size: 13px; flex-wrap: wrap; }
+.rw-dash-row b { color: var(--rw-ink); }
+.rw-dash-key { font-size: 10.5px; background: var(--rw-tint); color: var(--rw-red); border-radius: 4px; padding: 0 5px; }
+.rw-dash-muted { font-size: 11.5px; color: var(--rw-muted); }
+.rw-dash-result { font-size: 12px; color: var(--rw-muted); background: var(--rw-bg); border-radius: 6px;
+  padding: 5px 8px; margin-top: 4px; width: 100%; line-height: 1.5; word-break: break-all; }
