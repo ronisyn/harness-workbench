@@ -153,12 +153,19 @@ async function agentLimits() {
       collapseKeep: pick('collapse_keep_msgs', 0) || 80,
       collapseChars: pick('collapse_trigger_chars', 0) || 30000,
       collapseInput: pick('collapse_input_chars', 0) || 18000,
-      failGuardN: pick('consecutive_fail_guard', 0) || 3,
+      // F4 连续失败：schema hint=0 关闭，须与"无行缺省 3"区分（0||3 会把显式 0 变 3——修复）
+      failGuardN: failPick('consecutive_fail_guard', 3),
       rev: pick('__policy_rev', 0),
     };
   } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 }; }
   limitsCacheAt = Date.now();
   return limitsCache;
+  // 行存在时按值（含 0=关）；行缺失时才用默认——与 pick 的"缺省回退"区分
+  function failPick(k, d) {
+    const r = rows.find((x) => x.skey === k);
+    if (!r) return d;
+    try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
+  }
 }
 
 // P13 提示三层（2026-09 批1）：ENV_MAP 拆为【身份/环境/纪律】三层——

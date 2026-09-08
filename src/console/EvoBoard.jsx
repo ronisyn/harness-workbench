@@ -59,9 +59,9 @@ export default function EvoBoard() {
       </div>
 
       <div className="rw-cap-gtitle" style={{ marginTop: 16 }}>修订提案（proposals 文件；审批后按 §11 受控合并）</div>
-      <div className="rw-console-toolbar">
-        {proposals.map((f) => (
-          <button key={f} className="rw-btn" onClick={() => view(f)} title={f}>{String(f).split('/').pop()}</button>
+      <div className="rw-console-toolbar" style={{ alignItems: 'flex-start' }}>
+        {proposals.map((p) => (
+          <button key={p.file} className="rw-btn" onClick={() => view(p.file)} title={p.file}>{p.title}</button>
         ))}
         {proposals.length === 0 && <span className="rw-dash-muted">（暂无提案文件）</span>}
       </div>

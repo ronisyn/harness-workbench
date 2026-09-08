@@ -25,7 +25,8 @@ export default function CapsBoard() {
   };
   const toggleTool = async (name, on) => {
     try {
-      const cur = tools.filter((x) => x.enabled).map((x) => x.name);
+      // 启用集只含非豁免项（defaultOn=平台豁免恒开，服务端强制；计算时排除防假状态——审计 P2-4）
+      const cur = tools.filter((x) => x.enabled && !x.defaultOn).map((x) => x.name);
       const next = on ? [...cur, name] : cur.filter((n) => n !== name);
       await api.setToolset(next);
       setTools((ts) => ts.map((x) => (x.name === name ? { ...x, enabled: on } : x)));
@@ -50,11 +51,11 @@ export default function CapsBoard() {
         </div>
       ))}
 
-      <div className="rw-cap-gtitle">工具启用集（平台豁免工具恒可用；会话内还受壳 preset∩force 约束）</div>
+      <div className="rw-cap-gtitle">工具启用集（平台豁免工具恒可用不可关；会话内还受壳 preset∩force 约束）</div>
       <div className="rw-console-toolbar">
         {tools.map((t) => (
-          <label key={t.name} className="rw-market-m">
-            <input type="checkbox" checked={Boolean(t.enabled)} onChange={(e) => toggleTool(t.name, e.target.checked)} />
+          <label key={t.name} className="rw-market-m" title={t.defaultOn ? '平台豁免工具：恒可用不可关闭' : undefined}>
+            <input type="checkbox" checked={Boolean(t.enabled)} disabled={Boolean(t.defaultOn)} onChange={(e) => toggleTool(t.name, e.target.checked)} />
             <span>{t.name}</span>
           </label>
         ))}

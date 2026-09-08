@@ -379,7 +379,12 @@ export async function initSchema() {
     'ALTER TABLE knowledge ADD COLUMN shell_id INT NULL',
   ];
   for (const sql of MIGRATIONS) {
-    try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }
+    try { await pool.query(sql); }
+    catch (e) {
+      // 仅"列已存在"可静默（幂等）；其余失败（权限/锁/断连）记日志便于定位——否则列漂移后主链路 500 难查
+      const msg = String((e && e.message) || e);
+      if (!/Duplicate column|already exists|Duplicate entry/i.test(msg)) console.error('[db] migration error:', msg);
+    }
   }
   // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；单段成本提醒默认关（0）；
   // 任务总账默认 100（会话 24h 真上限，与 agent.js 回退值/蓝图一致）；存量旧值 20/30 由部署迁移校正
@@ -409,5 +414,21 @@ export async function initSchema() {
               COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(duration_ms),0) AS duration_ms
        FROM model_telemetry GROUP BY shell_id, provider, model, DATE(created_at)`,
   ];
-  for (const sql of VIEWS) { try { await pool.query(sql); } catch { /* 视图创建失败跳过 */ } }
+  for (const sql of VIEWS) {
+    try { await pool.query(sql); }
+    catch (e) { console.error('[db] view error:', (e && e.message) || e); }
+  }
+  // 启动自检：关键新列缺失即醒目告警（正常 initSchema 应全过；缺失=迁移被跳过/手工建库，主链路将 500）
+  try {
+    const missing = [];
+    const checks = [
+      ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'],
+      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['knowledge', 'shell_id'],
+    ];
+    for (const [tbl, col] of checks) {
+      const r = await pool.query('SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', [tbl, col]);
+      if (!(r[0] && r[0][0] && Number(r[0][0].c) > 0)) missing.push(tbl + '.' + col);
+    }
+    if (missing.length) console.error('[db] 启动自检：关键列缺失（迁移可能被跳过）→ ' + missing.join(', '));
+  } catch { /* 自检失败不阻断 */ }
 }

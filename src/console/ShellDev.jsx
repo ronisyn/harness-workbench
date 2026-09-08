@@ -37,11 +37,16 @@ export default function ShellDev() {
   useEffect(() => { loadShells(); api.providers().then((p) => setProvs(p.providers || [])).catch(() => {}); }, [loadShells]);
 
   const showDetail = async (key) => {
-    await loadDetail(key);
-    const sh = shells.find((s) => s.skey === key);
-    let mp = null;
-    if (sh && sh.model_policy) { try { mp = typeof sh.model_policy === 'string' ? JSON.parse(sh.model_policy) : sh.model_policy; } catch { mp = null; } }
-    if (mp) setMpSel((o) => ({ ...o, [key]: { defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '' } }));
+    // 默认模型从详情行读（listShells 摘要不含 model_policy；detail.shell=SELECT * 全行，mysql2 已解析 JSON）
+    try {
+      const d = await api.shellGet(key);
+      const sh = d.shell;
+      setDetail({ shell: sh, tools: d.tools || [] });
+      const mp = sh && sh.model_policy ? ((typeof sh.model_policy === 'string') ? JSON.parse(sh.model_policy) : sh.model_policy) : null;
+      if (mp && (mp.defaultProvider || mp.defaultModel)) {
+        setMpSel((o) => ({ ...o, [key]: { defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '' } }));
+      }
+    } catch (e) { setErr(e.message); }
   };
 
   const doImport = async () => {
@@ -50,7 +55,7 @@ export default function ShellDev() {
       const pack = JSON.parse(packText);
       const r = await api.shellImport(pack);
       setMsg('导入成功：' + r.key + '（' + r.mode + '）');
-      loadShells(); loadDetail(r.key);
+      loadShells(); showDetail(r.key);
     } catch (e) { setErr('导入失败：' + e.message); }
     finally { setBusy(false); }
   };
@@ -113,9 +118,9 @@ export default function ShellDev() {
         </div>
       ))}
 
-      {/* 壳详情配置 */}
+      {/* 壳详情配置（key=壳：切壳强制重挂载，defaultValue/受控编辑不回显残留旧壳值——审计 P2-3） */}
       {detail && (
-        <div className="rw-provider">
+        <div className="rw-provider" key={detail.shell.skey}>
           <div className="rw-cap-gtitle">配置：{detail.shell.skey}</div>
           <div className="rw-cap-item col">
             <span>描述</span>

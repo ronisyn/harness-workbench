@@ -217,7 +217,9 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   // ② 级联清理全部子表：原实现只删 messages，遗留 tool_calls/usage_stats/agent_runs 等孤儿（实测 tool_calls 77% 为孤儿），污染用量统计口径
   const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
-  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'bg_tasks', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
+  // 契约事件（contract_events 挂在 task_contracts 下、无 conversation_id）须先按其所属契约清理，避免孤儿
+  try { await db.query('DELETE FROM contract_events WHERE contract_id IN (SELECT id FROM task_contracts WHERE conv_id=?)', [req.params.id]); } catch { /* 表未建则跳过 */ }
+  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
     try {
       await db.query(`DELETE FROM ${t} WHERE ${t === 'task_contracts' ? 'conv_id' : 'conversation_id'}=?`, [req.params.id]);
     } catch { /* 个别表未建则跳过 */ }
@@ -227,6 +229,9 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
 });
 
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
+  // P0 归属校验：本人 或 渠道共享会话(account_id NULL 且非 web)——与会话列表口径一致，防枚举他人会话读消息
+  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))', [req.params.id, req.user.id]))[0];
+  if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
   const rows = await db.query('SELECT id, role, content, reasoning, model, provider, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
   res.json({ ok: true, messages: rows });
 });
@@ -283,6 +288,8 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 
 // 会话轨迹（工具调用记录）
 app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
+  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))', [req.params.id, req.user.id]))[0];
+  if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
   const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, message_id, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 100', [req.params.id]);
   res.json({ ok: true, toolcalls: rows });
 });
@@ -665,16 +672,19 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (cl.label === 'act-high') highGuardIntent = true;
     send({ type: 'intent', label: cl.label, echo: cl.echo, hit: cl.hit });
     if (cl.label !== 'chat' || cl.echo) {
+      // §8 审计脱敏：sample=用户原文可能含 sk-/ghp_ 等 → redactSecrets
+      const detail = JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) });
       await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-        [req.user.id, 'intent:' + cl.label, JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) }).slice(0, 900), convShellId]);
+        [req.user.id, 'intent:' + cl.label, redactSecrets(detail).slice(0, 900), convShellId]);
     }
   } catch { /* 意图事件失败不影响对话 */ }
   // B3：任务档案路由灰字事件（档案点名生效时；显式模型优先不受影响；不入消息正文/导出）
   if (profileSuggestion) {
     try {
       send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
+      const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) });
       await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-        [req.user.id, 'route:' + profileSuggestion.key, JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) }).slice(0, 900), convShellId]);
+        [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId]);
     } catch { /* 路由事件失败不影响对话 */ }
   }
 

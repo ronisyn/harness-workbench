@@ -31,6 +31,13 @@ export default function SettingsBoard() {
     catch (e) { setErr(e.message); }
     setTimeout(() => setMsg(''), 2200);
   };
+  // 温度滑块即时保存 debounce（拖动高频 onChange 避免写库风暴）
+  const tempTimer = React.useRef(null);
+  const setTempDebounced = (v) => {
+    setExtra((o) => ({ ...o, temperature: v }));
+    clearTimeout(tempTimer.current);
+    tempTimer.current = setTimeout(() => setOne('temperature', v), 400);
+  };
 
   return (
     <div className="rw-cap-group">
@@ -38,11 +45,10 @@ export default function SettingsBoard() {
       {err && <div className="rw-kb-err">{err}</div>}
       {msg && <div className="rw-kb-msg">{msg}</div>}
       <div className="rw-cap-item col">
-        <span style={{ marginBottom: 4 }}>温度（{extra.temperature.toFixed(2)}）</span>
-        <input type="range" min="0" max="1.5" step="0.05" value={extra.temperature}
-          onChange={(e) => setExtra((o) => ({ ...o, temperature: Number(e.target.value) }))}
-          onMouseUp={() => setOne('temperature', extra.temperature)}
-          onTouchEnd={() => setOne('temperature', extra.temperature)} />
+        <span style={{ marginBottom: 4 }}>温度（{extra.temperature.toFixed(2)}；拖动/键盘均可，松开即保存）</span>
+        {/* width:100% 覆盖 .rw-cap-item input 15px 全局（Chat 抽屉同款 inline flex:1，此处显式撑宽——审计 P2-5） */}
+        <input type="range" min="0" max="1.5" step="0.05" value={extra.temperature} style={{ width: '100%', height: 18, accentColor: 'var(--rw-red)' }}
+          onChange={(e) => setTempDebounced(Number(e.target.value))} />
       </div>
       <div className="rw-cap-item col">
         <span style={{ marginBottom: 4 }}>系统提示词（用户自定义指令；留空=不注入）</span>
@@ -58,7 +64,13 @@ export default function SettingsBoard() {
               <span style={{ marginBottom: 4 }}>{s.label}（{s.hint || ''}）</span>
               <input className="rw-input" type="number" min={s.min || 0} value={sval[s.key] ?? s.def ?? 0}
                 onChange={(e) => setSval((o) => ({ ...o, [s.key]: e.target.value }))}
-                onBlur={(e) => setOne(s.key, e.target.value)} />
+                onBlur={(e) => {
+                  // 数值归一：空/非法/低于下限 → 回退默认（防 '' / '-' / 负数直接落库——审计 P2-5）
+                  const raw = Number(e.target.value);
+                  const v = Number.isFinite(raw) ? Math.max(s.min || 0, raw) : (s.def ?? 0);
+                  setSval((o) => ({ ...o, [s.key]: v }));
+                  setOne(s.key, v);
+                }} />
             </div>
           ))}
         </div>

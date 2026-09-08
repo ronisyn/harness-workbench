@@ -17,7 +17,7 @@ export const BOARDS = {
   'agent-dev': { group: 'Agent', label: '1.3 Agent 开发（壳）', render: () => <ShellDevBoard /> },
   'agent-caps': { group: 'Agent', label: '1.4 Agent 能力', render: () => <CapsBoard /> },
   'agent-evo': { group: 'Agent', label: '1.5 Agent 进化', render: () => <EvoBoard /> },
-  'agent-apps': { group: 'Agent', label: '1.6 Agent 广场（应用）', render: () => <AppsBoard /> },
+  'agent-apps': { group: 'Agent', label: '1.6 Agent 广场（应用）', render: (p) => <AppsBoard {...p} /> },
   'kb': { group: '知识库', label: '1.7 知识库', render: () => <KbBoard /> },
   'settings': { group: '系统', label: '1.8 设置', render: () => <SettingsBoard /> },
 };
@@ -30,6 +30,8 @@ function Placeholder({ text }) {
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
   const code = path.replace(/^\/console\/?/, '') || 'models-plaza';
   const board = BOARDS[code] || BOARDS['models-plaza'];
+  // 板块可接收公共导航 props（AppsBoard 启动应用后跳对话页——审计 P1-3）
+  const boardProps = { onGoChat };
   return (
     <div className="rw-shell">
       <header className="rw-topbar">
@@ -57,7 +59,7 @@ export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
             </div>
           ))}
         </aside>
-        <main className="rw-console-main">{board.render()}</main>
+        <main className="rw-console-main">{board.render(boardProps)}</main>
       </div>
     </div>
   );

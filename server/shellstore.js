@@ -73,12 +73,13 @@ export async function disableShell(key) {
 }
 
 // patch：可改 name/description/persona/status/modelPolicy（模型广场"设置壳默认模型"用；pack 其余字段走 import 全量替换）
+// persona 为 MySQL JSON 列：入库必须 JSON 序列化（裸文本会 Invalid JSON text）；name/description/status 为标量列直接落
 export async function patchShell(key, patch) {
-  const allow = ['name', 'description', 'persona', 'status'];
   const set = [], params = [];
-  for (const k of allow) {
+  for (const k of ['name', 'description', 'status']) {
     if (patch[k] !== undefined) { set.push(k + '=?'); params.push(typeof patch[k] === 'object' ? JSON.stringify(patch[k]) : patch[k]); }
   }
+  if (patch.persona !== undefined) { set.push('persona=?'); params.push(JSON.stringify(patch.persona === null ? null : String(patch.persona))); }
   if (patch.modelPolicy !== undefined) {
     const mp = (patch.modelPolicy && typeof patch.modelPolicy === 'object') ? patch.modelPolicy : {};
     set.push('model_policy=?');

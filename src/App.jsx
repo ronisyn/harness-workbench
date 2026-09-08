@@ -30,9 +30,14 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
   // M1/M2：路径状态（/chat=对话页；/console* =统一后台；其余含 / 与未知路径 → 总览首页）
+  // path 只存 pathname（不含 query）：query(conv) 单独经 convParam，避免 /chat?conv= 匹配失效（审计 P1-1）
   const [path, setPath] = useState(location.pathname);
-  const go = (p) => { history.pushState(null, '', p); setPath(p); };
-  const [convParam, setConvParam] = useState('');
+  const go = (p) => {
+    history.pushState(null, '', p);
+    setPath(location.pathname); // pushState 后同步取真实 pathname（剥 query）
+  };
+  // mount 即解析 query（直开/刷新 /chat?conv=N 也生效——审计 P1-2）
+  const [convParam, setConvParam] = useState(() => new URLSearchParams(location.search).get('conv') || '');
 
   // 登录后默认落总览首页（D4）；已登录直接访问 /chat?conv= /console/* 直达
   const enterChat = (convId, draft) => {
@@ -55,7 +60,7 @@ export default function App() {
 
   if (!ready) return <div className="rw-loading">Roni Workbench 加载中…</div>;
   if (!user) return <Login onLogin={setUser} />;
-  const onLogout = () => { clearToken(); setUser(null); };
+  const onLogout = () => { api.logout().catch(() => {}); clearToken(); setUser(null); };
   const home = () => go('/');
   let view = null;
   if (path === '/chat') view = <Chat key={convParam || 'chat'} user={user} initialConvId={convParam || null} onGoHome={home} onGoConsole={enterConsole} onLogout={onLogout} />;

@@ -1,7 +1,7 @@
 // src/Knowledge.jsx - ④ 知识库管理面板（④批次授权的前端上传入口：global / shell 目标）
 // 上传链：选文件(xlsx/csv/txt/md/json) → base64 → /api/knowledge/import → 服务端解析按行入库；
 // 附带当前账号知识列表（scope/shell 过滤 + 删除）。
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from './api.js';
 
 const SCOPES = [
@@ -22,6 +22,7 @@ export default function Knowledge({ onClose, embedded }) {
   const [rows, setRows] = useState([]);         // 列表
   const [fScope, setFScope] = useState('');     // 列表过滤
   const [q, setQ] = useState('');
+  const fileRef = useRef(null);                 // 文件 input（两种形态共用 ref 清空）
 
   const loadShells = useCallback(async () => {
     try {
@@ -65,7 +66,8 @@ export default function Knowledge({ onClose, embedded }) {
       const d = await api.knowledgeImport({ name: fileName, data: fileData, scope, shellKey: scope === 'shell' ? shellKey : undefined, hasHeader });
       setMsg(`已导入：新增 ${d.inserted} 条 / 更新 ${d.updated} 条（共解析 ${d.total} 条）`);
       setFileName(''); setFileData('');
-      if (document.getElementById('kb-file')) document.getElementById('kb-file').value = '';
+      // 清空文件框：ref 方式（两种形态各自挂 ref；getElementById 在 embedded 下 id 不同会清空失败——审计 P3-15）
+      if (fileRef.current) fileRef.current.value = '';
       loadList();
     } catch (ex) { setErr(ex.message); }
     finally { setBusy(false); }
@@ -101,7 +103,7 @@ export default function Knowledge({ onClose, embedded }) {
             )}
             <label className="rw-cap-item col">
               <span style={{ marginBottom: 4 }}>文件</span>
-              <input id="kb-file-embed" className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={pickFile} />
+              <input ref={fileRef} className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={pickFile} />
             </label>
             <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} />
@@ -174,7 +176,7 @@ export default function Knowledge({ onClose, embedded }) {
             )}
             <label className="rw-cap-item col">
               <span style={{ marginBottom: 4 }}>文件（xlsx/xls/csv 按行结构化：首列=标题、整行=内容；txt/md 按空行分段；json 数组）</span>
-              <input id="kb-file" className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={pickFile} />
+              <input ref={fileRef} className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={pickFile} />
             </label>
             <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} />

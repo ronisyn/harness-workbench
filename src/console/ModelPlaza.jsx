@@ -33,8 +33,9 @@ export default function ModelPlaza() {
     setTesting(pk); setErr('');
     try {
       const r = await api.providerTest(baseUrl, key);
-      setTestRes((o) => ({ ...o, [pk]: (r.ok ? '✅ 连通（' + (r.status || '') + '）' : '❌ ' + r.note) }));
-    } catch (e) { setTestRes((o) => ({ ...o, [pk]: '❌ ' + e.message })); }
+      // ok=true：key 连通（400=探测模型名被拒但鉴权过，服务端 note 已说明）；ok=false：note 含具体原因
+      setTestRes((o) => ({ ...o, [pk]: (r.ok ? '✅ ' : '❌ ') + (r.note || ('连通 (status ' + (r.status || '?') + ')')) }));
+    } catch (e) { setTestRes((o) => ({ ...o, [pk]: '❌ ' + (e.note || e.message) })); }
     finally { setTesting(''); }
   };
 

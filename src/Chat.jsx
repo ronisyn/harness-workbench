@@ -338,6 +338,9 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     if (!confirm('删除该会话及其消息？')) return;
     await api.deleteConversation(id);
     delete draftsRef.current[id]; // 删除会话同时清除其草稿
+    // 同时丢弃该会话的排队消息（防删后滞留误发——审计 P2-1）
+    queueRef.current = queueRef.current.filter((x) => x.convId !== id);
+    setQueue(queueRef.current);
     if (cur === id) { setCur(null); setCurTitle(''); setMsgs([]); setStats({}); setInput(''); inputRef.current = ''; }
     loadConvs();
   };
@@ -357,12 +360,16 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   };
 
   // —— 待处理审批/问询（断连/刷新后恢复：SSE 断开期间挂起的审批/问询仍在服务端等待，这里补拉并渲染横幅）——
+  const pendDismissRef = useRef({}); // { key: ts }：某集合 dismiss 后 30s 内同集合不重弹（审计 P2-6：防"暂不处理"后轮询同 key 静默压制永远不恢复）
   const fetchPending = async () => {
     try {
       const [a, q] = await Promise.all([api.approvals(), api.asks()]);
       const items = [...(a.pending || []).map((x) => ({ kind: 'a', ...x })), ...(q.pending || []).map((x) => ({ kind: 'q', ...x }))];
       const key = items.length ? JSON.stringify(items.map((x) => x.id).sort()) : '';
-      setPends((prev) => (prev && prev.key === key ? prev : { key, items }));
+      setPends((prev) => {
+        if (prev && prev.key === key && !(prev.dismissedAt && Date.now() - prev.dismissedAt > 30000)) return prev;
+        return { key, items, dismissedAt: null };
+      });
     } catch { /* 忽略 */ }
   };
 
@@ -527,7 +534,9 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     const content = input.trim();
     if (!content || !cur) return;
     if (busyRef.current) {
-      queueRef.current = [...queueRef.current, content];
+      // 队列项携带归属会话：任务中切会话/删会话不会串发（审计 P2-1）
+      const item = { convId: cur, text: content, uid: Date.now() + '-' + Math.random().toString(36).slice(2, 7) };
+      queueRef.current = [...queueRef.current, item];
       setQueue(queueRef.current); setInput(''); inputRef.current = ''; delete draftsRef.current[cur]; // 已入队将发送：不留草稿
       setToast('⏳ 任务执行中：已排队 ' + queueRef.current.length + ' 条，结束后自动发送');
       return;
@@ -536,26 +545,31 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   };
 
   // flushQueue：上一轮结束后自动发送下一条排队消息（function 声明提升，runText 同步路径可安全调用）
+  // 只消费归属==当前会话的首条（其余会话排队消息保留——切回该会话后由结束轮自动续发/手动点发）
   async function flushQueue() {
     if (busyRef.current || !curRef.current) return;
     const q = queueRef.current;
     if (!q.length) return;
-    const next = q[0];
-    queueRef.current = q.slice(1);
+    const idx = q.findIndex((it) => it.convId === curRef.current);
+    if (idx < 0) return; // 无本会话排队项（可能已切走/删会话）
+    const next = q[idx];
+    queueRef.current = q.filter((_, i) => i !== idx);
     setQueue(queueRef.current);
-    setToast('▶ 自动发送排队消息（剩 ' + queueRef.current.length + ' 条）');
-    await runText(curRef.current, next);
+    setToast('▶ 自动发送排队消息（剩 ' + queueRef.current.filter((it) => it.convId === curRef.current).length + ' 条）');
+    await runText(curRef.current, next.text);
   }
 
-  // 队列管理：逐条移除 / 全部清空（停止后队列保留，用户可自主决定续发或丢弃）
-  const removeQueueAt = (i) => {
-    const q = queueRef.current.filter((_, idx) => idx !== i);
+  // 队列管理：逐条移除（按项引用） / 清空本会话（停止后队列保留，用户可自主决定续发或丢弃）
+  const removeQueueAt = (item) => {
+    const q = queueRef.current.filter((x) => x !== item);
     queueRef.current = q; setQueue(q);
     setToast(q.length ? '已移除该条排队消息' : '队列已清空');
   };
   const clearQueue = () => {
-    queueRef.current = []; setQueue([]);
-    setToast('已清空全部排队消息');
+    // 仅清当前会话排队项（其它会话项保留——防跨会话误清）
+    const q = queueRef.current.filter((x) => x.convId !== cur);
+    queueRef.current = q; setQueue(q);
+    setToast('已清空本会话排队消息');
   };
 
   // 活动轮询（旁观/断连兜底）：当前会话每 2.5s 拉事件环增量；
@@ -844,7 +858,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                 ? <span key={x.id} className="rw-pend-item"><span className="rw-pend-tag">审批</span><code className="rw-pend-code">{x.desc}</code>
                   <button className="rw-btn pri" onClick={() => decideApprovalMsg(x.id, 'approve')}>批准</button><button className="rw-btn" onClick={() => decideApprovalMsg(x.id, 'reject')}>拒绝</button></span>
                 : <span key={x.id} className="rw-pend-item"><span className="rw-pend-tag">问询</span>{x.question}{(x.options || []).map((o) => <button key={o.value} className="rw-btn" onClick={() => answerAskMsg(x.id, o.value)}>{o.label}</button>)}</span>))}
-              <button className="rw-btn" onClick={() => setPends((p) => (p ? { ...p, items: [] } : p))}>暂不处理</button>
+              <button className="rw-btn" onClick={() => setPends((p) => (p ? { ...p, items: [], dismissedAt: Date.now() } : p))}>暂不处理（30s 后可再提醒）</button>
             </div>
           )}
           {live && (
@@ -922,22 +936,21 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
           </div>
           <div className="rw-inputbar">
             <div className="rw-inputbox">
-              {queue.length > 0 && (
+              {queue.some((x) => x.convId === cur) && (
                 <div className="rw-queuepanel">
                   <div className="rw-queuehead">
                     <span className={'rw-queuestate' + (busy ? ' on' : '')}>{busy ? '⏳ 任务执行中' : '⏸ 已停止'}</span>
-                    <span className="rw-queuecnt">排队 <b>{queue.length}</b> 条</span>
+                    <span className="rw-queuecnt">本会话排队 <b>{queue.filter((x) => x.convId === cur).length}</b> 条</span>
                     <span className="rw-queueops">
-                      {!busy && <button className="rw-btn" onClick={flushQueue} title="按顺序发送全部排队消息">▶ 开始发送</button>}
-                      <button className="rw-btn" onClick={clearQueue} title="丢弃全部排队消息">🗑 清空</button>
+                      {!busy && <button className="rw-btn" onClick={flushQueue} title="发送本会话排队消息">▶ 开始发送</button>}
+                      <button className="rw-btn" onClick={clearQueue} title="丢弃本会话排队消息">🗑 清空</button>
                     </span>
                   </div>
                   <div className="rw-queuelist">
-                    {queue.map((q, i) => (
-                      <div className="rw-queueitem" key={i}>
-                        <span className="rw-queueidx">{i + 1}</span>
-                        <span className="rw-queuetxt">{q}</span>
-                        <button className="rw-queuedel" onClick={() => removeQueueAt(i)} title="移除该条">✕</button>
+                    {queue.filter((it) => it.convId === cur).map((q) => (
+                      <div className="rw-queueitem" key={q.uid}>
+                        <span className="rw-queuetxt">{q.text}</span>
+                        <button className="rw-queuedel" onClick={() => removeQueueAt(q)} title="移除该条">✕</button>
                       </div>
                     ))}
                   </div>
@@ -1063,14 +1076,15 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                       <div className="rw-market-models">
                         {src.models.slice(0, 40).map((m) => (
                           <label key={m.id} className="rw-market-m">
-                            <input type="checkbox" checked={Boolean(selModels[m.id])} disabled={m.connected}
-                              onChange={(e) => setSelModels((s) => ({ ...s, [m.id]: e.target.checked }))} />
+                            {/* selModels 键带源前缀：各市场源独立勾选，避免跨源串号错源接入 */}
+                            <input type="checkbox" checked={Boolean(selModels[src.source + '::' + m.id])} disabled={m.connected}
+                              onChange={(e) => setSelModels((s) => ({ ...s, [src.source + '::' + m.id]: e.target.checked }))} />
                             <span className={m.connected ? 'conn' : ''}>{m.id}{m.connected ? ' ✓' : ''}</span>
                           </label>
                         ))}
                       </div>
-                      {Object.keys(selModels).filter((k) => selModels[k]).length > 0 && (
-                        <button className="rw-btn pri" onClick={() => connectMarket(src.source, Object.keys(selModels).filter((k) => selModels[k]))}>接入选中模型</button>
+                      {src.models.some((m) => selModels[src.source + '::' + m.id]) && (
+                        <button className="rw-btn pri" onClick={() => connectMarket(src.source, src.models.filter((m) => selModels[src.source + '::' + m.id]).map((m) => m.id))}>接入选中模型</button>
                       )}
                     </div>
                   ))}

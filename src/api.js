@@ -11,7 +11,12 @@ async function request(path, opts = {}) {
     ...opts,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) throw new Error(data.message || `请求失败 (${res.status})`);
+  if (!res.ok || data.ok === false) {
+    // note=服务端排障字段（如 providers/test 的鉴权失败/无法连通原因）；并入错误信息避免被吞
+    const err = new Error(data.message || data.note || `请求失败 (${res.status})`);
+    err.status = res.status; err.note = data.note || '';
+    throw err;
+  }
   return data;
 }
 
@@ -54,6 +59,7 @@ export const api = {
   deleteTask: (id) => request('/api/tasks/' + id, { method: 'DELETE' }),
   approvals: () => request('/api/approvals'),
   decideApproval: (id, decision) => request('/api/approvals/' + id, { method: 'POST', body: JSON.stringify({ decision }) }),
+  asks: () => request('/api/asks'),
   decideAsk: (id, option) => request('/api/asks/' + id, { method: 'POST', body: JSON.stringify({ option }) }),
   stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
   // B1 壳 + ④ 知识库
