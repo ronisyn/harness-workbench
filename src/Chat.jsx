@@ -254,9 +254,8 @@ export default function Chat({ user, onLogout, onGoHome, initialConvId }) {
     try {
       await api.patchConversation(cur, { provider: null, model: null });
       setConvs((cs) => cs.map((x) => (x.id === cur ? { ...x, provider: null, model: null } : x)));
-      // 会话无显式选择：前端回"自动路由"显示（模型下拉置 auto）
-      const p = provList.find((x) => x.provider_key === 'auto');
-      setProvider(p ? 'auto' : 'deepseek');
+      // 会话无显式选择：前端回"自动路由"显示（模型下拉置 auto；会话 provider=null 由服务端回落默认路由）
+      setProvider('auto');
       setModelList([]);
       setModel('__auto__');
       setSysline((prev) => ({ ...(prev || {}), route: null }));
