@@ -12,6 +12,7 @@ import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
 import { shellContext } from './shells.js';
+import { classifyIntent } from './intent.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools } from './shellstore.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -420,11 +421,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
   const convShellId = convs[0].shell_id || null;
   let convShellCtx = null;
+  let shellIntentRules = null;
   let shellToolsOn = [], shellToolsOff = [];
   if (convShellId) {
     try {
-      const sr = (await db.query('SELECT skey, persona, domain_text FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
+      const sr = (await db.query('SELECT skey, persona, domain_text, intent_rules FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
       convShellCtx = sr ? shellContext(sr) : null;
+      if (sr && sr.intent_rules != null) shellIntentRules = sr.intent_rules;
       const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
       for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
     } catch { convShellCtx = null; }
@@ -585,6 +588,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       if (!res.writableEnded) { res.write(`data: ${JSON.stringify(obj)}\n\n`); armSseHeartbeat(); }
     } catch { /* 连接已关，忽略 */ }
   };
+
+  // B2：意图识别灰字事件（只发事件+审计，不改消息正文/导出，不影响现有 needsTools 行为路径）
+  try {
+    const cl = classifyIntent(content, shellIntentRules || undefined);
+    send({ type: 'intent', label: cl.label, echo: cl.echo, hit: cl.hit });
+    if (cl.label !== 'chat' || cl.echo) {
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
+        [req.user.id, 'intent:' + cl.label, JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) }).slice(0, 900), convShellId]);
+    }
+  } catch { /* 意图事件失败不影响对话 */ }
 
   const t0 = Date.now();
   let firstTokenMs = 0;

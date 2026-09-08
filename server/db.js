@@ -340,6 +340,8 @@ export async function initSchema() {
     'ALTER TABLE usage_stats ADD COLUMN shell_id INT NULL',
     'ALTER TABLE tool_calls ADD COLUMN shell_id INT NULL',
     'ALTER TABLE audit_log ADD COLUMN shell_id INT NULL',
+    // B2：壳级意图词表（intentRules，v1.1 可选字段）
+    'ALTER TABLE shells ADD COLUMN intent_rules JSON',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

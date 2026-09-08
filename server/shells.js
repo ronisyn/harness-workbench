@@ -75,6 +75,7 @@ export function packToRow(pack) {
     channels: JSON.stringify((pack.channels && pack.channels.domainHosts) || []),
     ui_brand: pack.uiBrand ? JSON.stringify(pack.uiBrand) : null,
     eval_ref: (pack.eval && pack.eval.goldenSetRef) || null,
+    intent_rules: pack.intentRules ? JSON.stringify(pack.intentRules) : null,
   };
 }
 
@@ -109,5 +110,6 @@ export function rowToPack(row) {
     guardrails: { accessRules: Array.isArray(jsafe(row.guardrails, [])) ? jsafe(row.guardrails, []) : [], approvalMode: 'default', sensitiveDefaults: [] },
     channels: { domainHosts: Array.isArray(jsafe(row.channels, [])) ? jsafe(row.channels, []) : [], bindings: {} },
     eval: { goldenSetRef: row.eval_ref || null },
+    intentRules: jsafe(row.intent_rules, null) || undefined,
   };
 }

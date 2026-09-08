@@ -1,7 +1,7 @@
 // test/shells.test.mjs - B1 壳定义基座纯函数单测（无需服务器）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validatePack, packToRow, toolsThreeState, shellContext, isKeyOk, SHELL_DEFAULT_KEY } from '../server/shells.js';
+import { validatePack, packToRow, rowToPack, toolsThreeState, shellContext, isKeyOk, SHELL_DEFAULT_KEY } from '../server/shells.js';
 
 test('validatePack 通过合法 pack', () => {
   const r = validatePack({ shellPackVersion: 1, key: 'code', name: '代码壳' });
