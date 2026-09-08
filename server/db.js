@@ -315,6 +315,35 @@ const SCHEMA = [
     updated_at DATETIME DEFAULT NOW(),
     PRIMARY KEY (shell_id, skey)
   )`,
+  // ---- ⑤ 模型观测数据面（v2.10 §8）：model_telemetry 执行事实表 + reviews 复测记录 ----
+  `CREATE TABLE IF NOT EXISTS model_telemetry (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT,
+    account_id INT,
+    shell_id INT,
+    provider VARCHAR(32),
+    model VARCHAR(128),
+    profile_key VARCHAR(64),
+    difficulty VARCHAR(8),
+    tokens_in INT DEFAULT 0,
+    tokens_out INT DEFAULT 0,
+    cache_hit INT DEFAULT 0,
+    cache_miss INT DEFAULT 0,
+    cost DECIMAL(10,4) DEFAULT 0,
+    duration_ms INT DEFAULT 0,
+    created_at DATETIME DEFAULT NOW(),
+    KEY idx_telemetry_time (created_at),
+    KEY idx_telemetry_shell_model (shell_id, provider, model)
+  )`,
+  `CREATE TABLE IF NOT EXISTS reviews (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT,
+    account_id INT,
+    result VARCHAR(8) NOT NULL,
+    bug_reason TEXT,
+    created_at DATETIME DEFAULT NOW(),
+    KEY idx_reviews_conv (conversation_id)
+  )`,
 ];
 
 export async function initSchema() {
@@ -368,4 +397,13 @@ export async function initSchema() {
       []
     );
   } catch { /* 表不可用则跳过 */ }
+  // ⑤ 观测视图（幂等）：按 壳×厂商×模型×日 的执行事实聚合
+  const VIEWS = [
+    `CREATE OR REPLACE VIEW v_model_telemetry_daily AS
+       SELECT shell_id, provider, model, DATE(created_at) AS d, COUNT(*) AS execs,
+              COALESCE(SUM(tokens_in),0) AS tokens_in, COALESCE(SUM(tokens_out),0) AS tokens_out,
+              COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(duration_ms),0) AS duration_ms
+       FROM model_telemetry GROUP BY shell_id, provider, model, DATE(created_at)`,
+  ];
+  for (const sql of VIEWS) { try { await pool.query(sql); } catch { /* 视图创建失败跳过 */ } }
 }

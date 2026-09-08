@@ -680,6 +680,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
       const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellToolsOn, shellToolsOff };
+      // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
+      // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
+      let teleBase = null;
+      try { teleBase = ((await db.query('SELECT COALESCE(MAX(id),0) m FROM usage_stats WHERE conversation_id=?', [conversationId]))[0] || {}).m || 0; } catch { teleBase = null; }
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -723,6 +727,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         // 用户点击停止：不落 assistant/统计，但不再提前 return（避免泄漏 inflight/abortMap）
         send({ type: 'stopped' });
         skipStore = true;
+      }
+      // ⑤ model_telemetry 落表：本次执行消耗（id>teleBase 的新增 usage_stats 行=本执行真实消耗，round/collapse 均属执行；
+      // summary/title 等旁路（摘要/自动标题）不入执行口径——§8 观测事实表按"执行模型×难度×档案"归集）
+      if (!skipStore && teleBase !== null) {
+        try {
+          const agg = (await db.query('SELECT COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COALESCE(SUM(cost),0) cost, COUNT(*) n FROM usage_stats WHERE conversation_id=? AND id>? AND kind IN ("round","collapse")', [conversationId, teleBase]))[0] || {};
+          // 仅真实发生 LLM 执行才落观测（护栏前置拦截/零消耗不产生空行污染 execs 口径）
+          if ((agg.n || 0) > 0) {
+            await db.query('INSERT INTO model_telemetry (conversation_id, account_id, shell_id, provider, model, profile_key, difficulty, tokens_in, tokens_out, cache_hit, cache_miss, cost, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())',
+              [conversationId, req.user.id, convShellId, provider, model, profileSuggestion ? profileSuggestion.key : null, null, agg.tin || 0, agg.tout || 0, agg.hit || 0, agg.miss || 0, agg.cost || 0, Date.now() - t0]);
+          }
+        } catch { /* 观测落表失败不影响对话 */ }
       }
       if (!skipStore) {
         answer = result.content || '（无输出）';
@@ -1160,6 +1176,48 @@ app.patch('/api/shells/:key', requireAuth, async (req, res) => {
 app.delete('/api/shells/:key', requireAuth, async (req, res) => {
   try { const r = await disableShell(req.params.key); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:disable', req.params.key]); res.json({ ok: r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
+// ---------- ⑤ 模型观测数据面 API（复测 reviews 读写 + telemetry 视图查询；§8） ----------
+// 复测记录写入：result ∈ pass|bug；bug 必填 bug_reason（§6.4 打回必填原因）
+app.post('/api/reviews', requireAuth, async (req, res) => {
+  try {
+    const { conversationId, result, bugReason } = req.body || {};
+    if (!conversationId || !['pass', 'bug'].includes(result)) return res.status(400).json({ ok: false, message: 'conversationId 与 result(pass|bug) 必填' });
+    if (result === 'bug' && !String(bugReason || '').trim()) return res.status(400).json({ ok: false, message: '打回(bug)必须填写原因' });
+    const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
+    if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
+    const r = await db.query('INSERT INTO reviews (conversation_id, account_id, result, bug_reason) VALUES (?,?,?,?)', [conversationId, req.user.id, result, result === 'bug' ? String(bugReason).trim() : null]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'review:' + result, 'conversation=' + conversationId + (result === 'bug' ? ' reason=' + String(bugReason).trim().slice(0, 200) : '')]);
+    res.json({ ok: true, id: r.insertId });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 复测记录读取：GET /api/reviews?conversation_id=N（该会话全部复测记录，倒序）
+app.get('/api/reviews', requireAuth, async (req, res) => {
+  try {
+    const cid = Number(req.query.conversation_id) || 0;
+    if (cid) {
+      const rows = await db.query('SELECT id, conversation_id, result, bug_reason, created_at FROM reviews WHERE conversation_id=? AND account_id=? ORDER BY id DESC', [cid, req.user.id]);
+      return res.json({ ok: true, reviews: rows });
+    }
+    const rows = await db.query('SELECT id, conversation_id, result, bug_reason, created_at FROM reviews WHERE account_id=? ORDER BY id DESC LIMIT 100', [req.user.id]);
+    res.json({ ok: true, reviews: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// telemetry 每日视图：GET /api/telemetry/daily?days=30[&shell_id=&provider=&model=]（§6.4 归集：模型×难度×档案、按壳、按天）
+app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const conds = ['d >= DATE_SUB(CURDATE(), INTERVAL ? DAY)'];
+    const params = [days];
+    if (Number(req.query.shell_id)) { conds.push('shell_id = ?'); params.push(Number(req.query.shell_id)); }
+    if (req.query.provider) { conds.push('provider = ?'); params.push(String(req.query.provider)); }
+    if (req.query.model) { conds.push('model = ?'); params.push(String(req.query.model)); }
+    const rows = await db.query(`SELECT shell_id, provider, model, d, execs, tokens_in, tokens_out, cost, duration_ms FROM v_model_telemetry_daily WHERE ${conds.join(' AND ')} ORDER BY d DESC, cost DESC`, params);
+    // 附：总览行（同口径合计，便于前端首屏）
+    const ov = (await db.query(`SELECT COALESCE(SUM(execs),0) execs, COALESCE(SUM(tokens_in),0) tokens_in, COALESCE(SUM(tokens_out),0) tokens_out, COALESCE(SUM(cost),0) cost, COALESCE(SUM(duration_ms),0) duration_ms FROM v_model_telemetry_daily WHERE ${conds.join(' AND ')}`, params))[0] || {};
+    res.json({ ok: true, days, total: ov, rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 静态前端 ----------
