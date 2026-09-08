@@ -227,3 +227,33 @@ commit `1932d6a`：4 files changed, +8/-6（原 750c629 经 --amend 补全消息
 1. **主会话 reload_platform 一次生效两个待重启项**：① hooks.js 文案修复（698ae1e，09-07 提交，今日实测仍未生效）；② grep_search 单文件支持（3e0ad41，今日提交）。reload 后 E2E 两条：grep_search 传单文件（如本日志 md）应返回命中；工具 hookNote 括号恢复正常（不再出现「默node」）。reload 后按 kb id=10 清理 kb id=8 过时句。
 2. P2-4 双模型交叉验证 ⬜ 连续第 3 次滞留清单：若 09 月无审计需求，建议主会话在 Codex 清单 §4 显式标注「延后至 2026-10 再评估」或删除，避免每日复读占版面。
 3. 09-06 遗留建议#1（测试会话统一 project=reg-test / 旧验证会话清理 routine）仍未拍板；conv185 消息数超归档门槛，主会话可按需 conv_summarize。
+
+---
+
+## 2026-09-08（主会话 reload_platform 与验证记录 · 白天 12:2x 北京时间）
+
+> 承接 09-08 05:00 自我进化日报「明日建议#1-3」与 09-06/09-07 遗留待拍板项；本条目由主会话（外部验证会话）执行并记录，供后续会话与明晨任务直接引用。
+
+### reload_platform（一次重启生效两项待重启改动）
+- 重启前：rw-test.service pid 397107（启动 09-07 02:32，早于 698ae1e/3e0ad41）；无 in-flight agent 运行，重启安全。
+- `systemctl restart rw-test`（12:22 CST）→ 新 pid 405957（12:22:23 启动），health 200，MCP github 26 工具重连正常。
+- 生效项：① hooks.js 全角括号修复 `698ae1e`（09-07 提交，此前运行进程仍输出「语法检查通过**默**node --check）」）；② grep_search 单文件支持 `3e0ad41`（09-08 提交）。
+
+### E2E（走 880 运行态 API：admin 登录 → 新建 conv#271 project=reg-test → POST /api/chat 实跑，tool_calls 表为实证）
+1. **grep_search 单文件**：{path=`docs/archive/daily-evolve-log.md`（单文件路径）, pattern=grep_search} → **matches 8 条命中**（行 33/47/184/197/213/217/220/227），files=[该 md 自身] ✅ 单文件不再恒空（修复前该路径恒返回空）。
+2. **hookNote 括号恢复**：write_file `/tmp/rw-e2e-bad.js`（`const x = ;` 语法错）→ hookNote=`⚠️ 语法检查失败：Command failed: node --check /tmp/rw-e2e-bad.js（请修复后再提交）`；write_file `/tmp/rw-e2e-ok.js` → hookNote=`语法检查通过（node --check）` ✅ 全角括号正常（不再出现「默node」）。
+- 冒烟 scratch 文件已清理；E2E 会话 conv#271 保留（project=reg-test，标题 `__e2e_reload_0908__`，工具留痕可查）。
+
+### 知识库维护
+- kb id=8：删除过时句「grep_search 只支持目录路径（单文件路径返回空）；」✅（该体检记录其余内容保留）。
+- kb id=10：状态「已提交待 reload 生效」→「已生效（2026-09-08 主会话 reload_platform + E2E 通过后更新）」，正文按实证同步。
+
+### conv185 归档
+- conv185（scheduled_tasks#4 专用会话 channel=task）消息数 12 已超归档门槛 → 执行 `summarizeConversation(185)`（同 conv_summarize 默认路径；12 条 <80 → 结构化 v1）✅ conv_summaries 已落 185 行（updated_at 2026-09-08 04:23:57Z）。
+
+### 拍板（消除每日复读）
+1. **P2-4 双模型交叉验证 → 延后至 2026-10 再评估**（09 月无审计需求）。Codex 清单 §4 已显式标注（docs/Codex与主流CLI-机制借鉴清单-v1.md）。
+2. **测试会话 project 策略 → 采用「验证/回归测试会话统一 project=reg-test」**（沿用 conv#262 先例；今日 conv#271 为首例正式应用），default 会话列表/统计不再被自动化验证会话污染；「旧验证会话自动清理 routine」暂不引入（删除属数据操作，需要时人工放行单删）。
+
+### git 状态提示
+- 本记录与 Codex 清单标注将 commit 到服务器本地仓库；服务器 origin/main 仍落后 7 个 commit（698ae1e…0e58d7e，均未推送 GitHub）。建议主会话在合适时点统一 push 同步（DEV 本地与文档基线跟随）。
