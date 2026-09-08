@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, streamChat } from './api.js';
+import Knowledge from './Knowledge.jsx';
 
 function Md({ text }) {
   return (
@@ -154,6 +155,7 @@ export default function Chat({ user, onLogout }) {
   const [stats, setStats] = useState({});
   const [drawer, setDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState('caps');
+  const [kbOpen, setKbOpen] = useState(false); // ④ 知识库面板
   const [caps, setCaps] = useState([]);
   const [toolList, setToolList] = useState([]); // 5.3c 工具启用集（设置→工具）
   const [rules, setRules] = useState([]); // P6 allow/deny 规则层（设置→规则）
@@ -737,6 +739,7 @@ export default function Chat({ user, onLogout }) {
         <div className="rw-logo" onClick={() => { setCur(null); setMsgs([]); }}>Roni Workbench</div>
         <div className="rw-conv-title">{curTitle || 'Roni Workbench'}</div>
         <div className="rw-top-actions">
+          <button className="rw-btn" onClick={() => setKbOpen(true)} title="知识库：上传/管理（④）">📚 知识</button>
           {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}
           {cur && (
             <select className="rw-select" value={curPerm} onChange={(e) => changePermission(e.target.value)} title="会话权限">
@@ -1142,6 +1145,8 @@ export default function Chat({ user, onLogout }) {
           </div>
         </div>
       )}
+
+      {kbOpen && <Knowledge onClose={() => setKbOpen(false)} />}
 
       {toast && <div className="rw-toast">{toast}</div>}
     </div>

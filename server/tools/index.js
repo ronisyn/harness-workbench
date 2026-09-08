@@ -586,20 +586,23 @@ export const TOOLS = [
       return { total: items.length, done: doneCount, results: aligned };
     } },
 
-  // ---------- 知识库（F19：global 全会话可见 / conv 仅本会话；正文大段用 kb_search 取） ----------
-  { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
-    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'conv'], desc: 'global=全会话 | conv=仅当前会话(默认)' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
+  // ---------- 知识库（④：global 全会话可见 / shell 仅所属壳会话可见(§4) / conv 仅本会话；正文大段用 kb_search 取） ----------
+  { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'shell', 'conv'], desc: 'global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
-      const scope = a.scope === 'global' ? 'global' : 'conv';
+      const scope = ['global', 'shell', 'conv'].includes(a.scope) ? a.scope : 'conv';
       const title = String(a.title || '').trim().slice(0, 200);
       const body = String(a.body || '').slice(0, 8000);
       if (!title) throw new Error('title 必填');
-      // D1 去重：同账号+同 scope(+同会话) 下 title 已存在 → 覆盖更新（同名条目不重复堆积；精确 title 匹配防误并）
+      // ④ shell 私有：必须会话在真实壳内（default 保留壳=中性语义，无壳私有）
+      const shellId = (scope === 'shell' && ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
+      if (scope === 'shell' && !shellId) throw new Error('当前会话不在壳内，无法写 scope=shell 壳私有知识；请改用 scope=global（全局）或 conv（本会话）');
+      // D1 去重：同账号+同 scope(+同会话/同壳) 下 title 已存在 → 覆盖更新（同名条目不重复堆积；精确 title 匹配防误并）
       // E2 防激进覆盖：同名且新旧内容差异显著（字符集合 Jaccard 相似度 <0.35 且新旧均非空）时，
       // 默认拒绝覆盖并回显旧内容片段，让调用方确认（overwrite:true 显式覆盖）或换 title——避免无意冲掉高价值旧记忆
       const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
-      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, title]);
+      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND (shell_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, shellId, title]);
       if (exist.length) {
         const oldB = String(exist[0].body || '');
         const jac = (() => {
@@ -616,22 +619,26 @@ export const TOOLS = [
         await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
         return { saved: true, id: exist[0].id, updated: true, scope, title };
       }
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, title, body) VALUES (?,?,?,?,?)', [ctx.accountId, scope, convId, title, body]);
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, title, body) VALUES (?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, title, body]);
       return { saved: true, id: r.insertId, updated: false, scope, title };
     } },
-  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=自己scope=conv + 全部global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
+  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
     params: { q: { type: 'string', required: true, desc: '关键词' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) return { items: [] };
+      // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义
+      const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
       const like = '%' + String(a.q).split(/\s+/).filter(Boolean).join('%') + '%';
-      const rows = await db.query('SELECT id, scope, title, body, created_at FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="conv" AND conversation_id=?)) AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8',
-        [ctx.accountId, ctx.conversationId || -1, like, like]);
+      const rows = await db.query('SELECT id, scope, title, body, created_at FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?)) AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8',
+        [ctx.accountId, shellId, ctx.conversationId || -1, like, like]);
       return { items: rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title, body: String(r.body || '').slice(0, 1200), createdAt: r.created_at })) };
     } },
   { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id）', permission: 'write',
     params: { id: { type: 'number', required: true } },
     run: async (a, ctx) => {
-      const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [a.id, ctx.accountId]);
+      // ④ 可见范围删除保护：仅能删自己账号且当前会话可见范围的条目（防误删他壳/他会话私有记忆）
+      const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
+      const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?))', [a.id, ctx.accountId, shellId, ctx.conversationId || -1]);
       return { deleted: r.affectedRows > 0 };
     } },
 

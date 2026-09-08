@@ -56,6 +56,11 @@ export const api = {
   decideApproval: (id, decision) => request('/api/approvals/' + id, { method: 'POST', body: JSON.stringify({ decision }) }),
   decideAsk: (id, option) => request('/api/asks/' + id, { method: 'POST', body: JSON.stringify({ option }) }),
   stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
+  // B1 壳 + ④ 知识库
+  shells: () => request('/api/shells'),
+  knowledgeList: (params) => request('/api/knowledge?' + new URLSearchParams(params || {}).toString()),
+  knowledgeImport: (body) => request('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
+  knowledgeDelete: (id) => request('/api/knowledge/' + id, { method: 'DELETE' }),
 };
 
 // SSE 流式对话（带轨迹流式回调）：

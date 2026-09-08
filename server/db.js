@@ -226,16 +226,18 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     UNIQUE KEY uq_conv_skill (conversation_id, skill_name)
   )`,
-  // ---- 知识库（F19：scope=global 全部会话可见；scope=conv 仅本会话；标题索引入提示，正文按需 kb_search） ----
+  // ---- 知识库（F19/④：scope=global 全部会话可见 / scope=shell 仅所属壳会话可见（§4 壳私有+全局共享）/ scope=conv 仅本会话；标题索引入提示，正文按需 kb_search） ----
   `CREATE TABLE IF NOT EXISTS knowledge (
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_id INT NOT NULL,
     scope VARCHAR(8) DEFAULT 'conv',
     conversation_id INT,
+    shell_id INT,
     title VARCHAR(200) NOT NULL,
     body TEXT,
     created_at DATETIME DEFAULT NOW(),
-    KEY idx_kb_scope (account_id, scope)
+    KEY idx_kb_scope (account_id, scope),
+    KEY idx_kb_shell (shell_id)
   )`,
   // ---- 长务务现场（断点恢复：每会话一条；running→completed|interrupted|paused） ----
   `CREATE TABLE IF NOT EXISTS agent_runs (
@@ -373,6 +375,8 @@ export async function initSchema() {
     'ALTER TABLE shells ADD COLUMN intent_rules JSON',
     // B3：壳级任务档案（taskProfiles，v1.2 可选字段）
     'ALTER TABLE shells ADD COLUMN task_profiles JSON',
+    // ④：知识库壳私有维度（scope=shell 条目挂所属壳；存量行 shell_id=NULL 不受影响）
+    'ALTER TABLE knowledge ADD COLUMN shell_id INT NULL',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

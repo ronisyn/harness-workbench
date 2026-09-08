@@ -15,6 +15,7 @@ import { shellContext } from './shells.js';
 import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools } from './shellstore.js';
+import { parseKnowledgeUpload } from './knowledge.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
@@ -489,12 +490,15 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     }
   } catch { /* 技能目录不可用时静默跳过 */ }
-  // F19 知识注入：会话+全局知识条目（前 5 条带 300 字正文摘要；其余仅标题），主题相关可用 kb_search 取全
+  // F19 知识注入（④：global 全部 + shell 仅本会话所属壳私有 + conv 本会话；§4 壳私有+全局共享）：
+  // 会话可见知识（前 5 条带 300 字正文摘要；其余仅标题），主题相关可用 kb_search 取全
   try {
-    const kb = await db.query('SELECT id, scope, title, body FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="conv" AND conversation_id=?)) ORDER BY id DESC LIMIT 12', [req.user.id, conversationId]);
+    // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义
+    const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
+    const kb = await db.query('SELECT id, scope, title, body FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?)) ORDER BY id DESC LIMIT 12', [req.user.id, kbShellId, conversationId]);
     if (kb.length) {
       const lines = kb.map((k, i) => {
-        const tag = k.scope === 'global' ? '全局' : '会话';
+        const tag = k.scope === 'global' ? '全局' : k.scope === 'shell' ? '壳私有' : '会话';
         const snip = i < 5 && k.body ? '\n  ' + String(k.body).replace(/\n+/g, ' ').slice(0, 300) : '';
         return '- [' + tag + '] ' + k.title + snip;
       });
@@ -679,7 +683,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellToolsOn, shellToolsOff };
+      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
       let teleBase = null;
@@ -1217,6 +1221,67 @@ app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
     // 附：总览行（同口径合计，便于前端首屏）
     const ov = (await db.query(`SELECT COALESCE(SUM(execs),0) execs, COALESCE(SUM(tokens_in),0) tokens_in, COALESCE(SUM(tokens_out),0) tokens_out, COALESCE(SUM(cost),0) cost, COALESCE(SUM(duration_ms),0) duration_ms FROM v_model_telemetry_daily WHERE ${conds.join(' AND ')}`, params))[0] || {};
     res.json({ ok: true, days, total: ov, rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- ④ 知识库管理 API（§6.3/§8：管理视图按账号展示；会话可见语义由 F19/kb_* 各自生效） ----------
+// 列表：GET /api/knowledge?scope=global|shell|conv[&shell_id=&q=]；scope=空=全部（管理视图）
+app.get('/api/knowledge', requireAuth, async (req, res) => {
+  try {
+    const conds = ['k.account_id=?'];
+    const params = [req.user.id];
+    const scope = String(req.query.scope || '');
+    if (['global', 'shell', 'conv'].includes(scope)) { conds.push('k.scope=?'); params.push(scope); }
+    if (scope === 'shell' && Number(req.query.shell_id)) { conds.push('k.shell_id=?'); params.push(Number(req.query.shell_id)); }
+    if (req.query.q) { const like = '%' + String(req.query.q).trim() + '%'; conds.push('(k.title LIKE ? OR k.body LIKE ?)'); params.push(like, like); }
+    const rows = await db.query(
+      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
+       FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
+       WHERE ${conds.join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
+    res.json({ ok: true, knowledge: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 上传导入：POST /api/knowledge/import { name, data(base64), scope: global|shell|conv, shellKey?, conversationId? }
+// 解析后批量入库：同 (账号,scope,shell_id/会话) 下 title 已存在 → 更新 body（幂等覆盖），否则新增
+app.post('/api/knowledge/import', requireAuth, async (req, res) => {
+  try {
+    const { name, data, scope, shellKey, conversationId } = req.body || {};
+    if (!name || !data) return res.status(400).json({ ok: false, message: 'name 与 data(base64) 必填' });
+    const sc = ['global', 'shell', 'conv'].includes(scope) ? scope : 'global';
+    let shellId = null;
+    if (sc === 'shell') {
+      const sh = shellKey ? (await db.query('SELECT id FROM shells WHERE skey=? AND status="enabled"', [String(shellKey)]))[0] : null;
+      if (!sh) return res.status(400).json({ ok: false, message: 'scope=shell 需要有效的 shellKey（启用中的壳）' });
+      shellId = sh.id;
+    }
+    let convId = null;
+    if (sc === 'conv') {
+      if (!conversationId) return res.status(400).json({ ok: false, message: 'scope=conv 需要 conversationId' });
+      const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
+      if (!own) return res.status(404).json({ ok: false, message: '会话不存在' });
+      convId = conversationId;
+    }
+    const hasHeader = req.body.hasHeader !== false;
+    const { rows } = await parseKnowledgeUpload(name, data, { hasHeader });
+    if (!rows.length) return res.status(400).json({ ok: false, message: '文件解析后无可导入条目（全空或格式不符）' });
+    let inserted = 0, updated = 0;
+    for (const r of rows) {
+      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (shell_id<=>?) AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1',
+        [req.user.id, sc, shellId, convId, r.title]);
+      if (exist.length) { await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
+      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, title, body) VALUES (?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, r.title, r.body]); inserted++; }
+    }
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:import', 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated]);
+    res.json({ ok: true, scope: sc, shellKey: shellKey || null, inserted, updated, total: rows.length });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 删除：DELETE /api/knowledge/:id（仅本账号条目）
+app.delete('/api/knowledge/:id', requireAuth, async (req, res) => {
+  try {
+    const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [Number(req.params.id) || 0, req.user.id]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '知识条目不存在或无权删除' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:delete', 'id=' + req.params.id]);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
