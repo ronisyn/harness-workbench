@@ -1044,6 +1044,10 @@ export async function execTool(name, args, ctx) {
     tool = findTool(name);
   }
   if (!tool) throw new Error('未知工具: ' + name);
+  // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）
+  if (ctx.shellToolsOff && ctx.shellToolsOff.length && ctx.shellToolsOff.includes(name) && !PLATFORM_EXEMPT.includes(name)) {
+    throw new Error('工具 ' + name + ' 已被当前壳禁用（force_off）。如需使用，请切换会话/壳或修改壳配置后重试。');
+  }
   if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
   // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
   if (ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
@@ -1131,9 +1135,9 @@ export async function execTool(name, args, ctx) {
       // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
       const rArgs = JSON.stringify(args).slice(0, 2000);
       const rResult = JSON.stringify(result).slice(0, 2000);
-      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000)]);
-      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status) VALUES (?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), Date.now() - t0, result.error ? 'fail' : 'done']);
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null]);
+      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?)',
+        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
     } catch { /* 留痕失败不影响 */ }
   }
   return result;

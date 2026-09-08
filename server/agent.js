@@ -318,8 +318,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const cCost = calcCost(ctx.__provider || 'deepseek', uc);
           cumCost += cCost; cumTin += r.tokensIn || 0; cumTout += r.tokensOut || 0;
           cumHit += r.cache_hit || 0; cumMiss += r.cache_miss != null ? r.cache_miss : 0;
-          await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"collapse")',
-            [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, ctx.__provider || 'deepseek', ctx.__model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, r.cache_miss != null ? r.cache_miss : 0, cCost]);
+          await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"collapse",?)',
+            [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, ctx.__provider || 'deepseek', ctx.__model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, r.cache_miss != null ? r.cache_miss : 0, cCost, ctx.shellId ?? null]);
         }
       } catch { /* 折叠计量失败不影响折叠 */ }
     } catch { digest = ''; }
@@ -391,8 +391,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     try {
       const u = res.usage || {};
       const cost = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokens_in || 0) - (u.cache_hit || 0), out: u.tokens_out || 0 });
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
-        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs]);
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?)',
+        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs, ctx.shellId ?? null]);
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += cost;
       cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
     } catch { /* 计量失败不影响执行 */ }
@@ -429,8 +429,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const u = contRes;
           const costSeg = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokensIn || 0) - (u.cache_hit || 0), out: u.tokensOut || 0 });
           try {
-            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"round")',
-              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0]);
+            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?)',
+              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0, ctx.shellId ?? null]);
             cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
             cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
           } catch { /* 计量失败不影响续写 */ }

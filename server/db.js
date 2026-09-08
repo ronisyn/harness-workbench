@@ -336,6 +336,10 @@ export async function initSchema() {
     'ALTER TABLE conversations ADD COLUMN shell_id INT NULL',
     // B1 修正：三态 mode 列长不足（force_off 被截断）→ 扩到 12
     'ALTER TABLE shell_tools MODIFY COLUMN mode VARCHAR(12) NOT NULL',
+    // B1-④ 埋点：执行/审计/工具调用带 shell 维度（§8）
+    'ALTER TABLE usage_stats ADD COLUMN shell_id INT NULL',
+    'ALTER TABLE tool_calls ADD COLUMN shell_id INT NULL',
+    'ALTER TABLE audit_log ADD COLUMN shell_id INT NULL',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); } catch { /* 已存在或不可用则跳过 */ }

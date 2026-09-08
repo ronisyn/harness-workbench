@@ -420,10 +420,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
   const convShellId = convs[0].shell_id || null;
   let convShellCtx = null;
+  let shellToolsOn = [], shellToolsOff = [];
   if (convShellId) {
     try {
       const sr = (await db.query('SELECT skey, persona, domain_text FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
       convShellCtx = sr ? shellContext(sr) : null;
+      const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
+      for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
     } catch { convShellCtx = null; }
   }
 
@@ -634,7 +637,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset };
+      const agentCtx = { permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellToolsOn, shellToolsOff };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -1100,12 +1103,12 @@ app.get('/api/shells/:key', requireAuth, async (req, res) => {
 app.post('/api/shells', requireAuth, async (req, res) => {
   const { pack } = req.body || {};
   if (!pack) return res.status(400).json({ ok: false, message: 'body.pack 必填' });
-  try { const r = await importShell(pack); res.json({ ok: true, ...r }); }
+  try { const r = await importShell(pack); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:import', String(r.key)]); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.post('/api/shells/:key/clone', requireAuth, async (req, res) => {
   const { newKey, name } = req.body || {};
-  try { const r = await cloneShell(req.params.key, newKey, name); res.json({ ok: true, ...r }); }
+  try { const r = await cloneShell(req.params.key, newKey, name); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:clone', req.params.key + '->' + newKey]); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.patch('/api/shells/:key', requireAuth, async (req, res) => {
@@ -1113,7 +1116,7 @@ app.patch('/api/shells/:key', requireAuth, async (req, res) => {
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.delete('/api/shells/:key', requireAuth, async (req, res) => {
-  try { const r = await disableShell(req.params.key); res.json({ ok: r }); }
+  try { const r = await disableShell(req.params.key); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:disable', req.params.key]); res.json({ ok: r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
