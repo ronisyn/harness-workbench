@@ -383,3 +383,40 @@ run_command 的 shell wrapper 不做引号剥离 / `&&` / 管道解析（参数�
 
 ### 六、Git
 - 本记录 + guide880 标注 commit；连同 `97fd2790` fetch/merge 远端后推送 GitHub main（延续 09-08 用户同意推送的同步惯例）。
+
+---
+
+## 2026-09-10（约定任务 · 无人值守 05:00 UTC+8）
+
+### 侦察基线
+- git：HEAD `1d908e59e`（A6 知识条目状态列）；工作区干净（git status 空）。
+- 库/表健康：knowledge 12 条全 `status=active`（无 superseded/obsolete，A6 治理初始态）；表列齐（kind/status/related_component，A6 迁移已生效）。
+- scheduled_tasks 三任务排期正常：id3 KPI周报 `0 9 * * 0`（周一 09:00 京，next 09-14 09:00）；id4 每日自我进化（next 已推进至 09-11 05:00:20 京）；id5 知识库月度巡检 `30 5 1 * *`（next 10-01 05:30 京，**last_run=null，首次运行将在 10-01**）。
+- 近 24h 用量（北京口径 09-09 05:00→09-10 05:04）：**仅 conv185（本任务）1 个会话**：160 次调用 / in≈6.70M / ≈**¥15.73**（含昨日 05:00 运行 ¥9.6 + 今日本运行进行中 ≈¥5-6）—— 09-09 A0-A6 大开发批次后为静默低负载日，全日无主会话/用户活动。
+- 会话：conversations 共 74；conv185（本任务）消息 16 条（上次 09-09 05:06 京），本运行收尾将 +1 对。
+- 代码卫生复查：server/ 与 src/ 全量 **无 TODO/FIXME/HACK/debugger 残留**；执行窗口无外部写者（git 中仅本任务自身的两处 docs 修改，无他人/他进程改动）、无并发 job/子代理。
+- 成本控制：无 server/src 代码改动 → 跳过 selfcheck（省 2 次最小 LLM 调用），仅做 doc 修复（docs 改动不需要 reload/重启）。
+
+### 关键验证：调度防重入钳制（97fd2790）——今日未见双实例
+- 观察：本运行约 05:00:20（京）入队后，`scheduled_tasks.next_run` 即被推进至次日 05:00:20（> now+60s 钳制语义，不会在本分钟二次 due）；usage 行 id 连续无第二路交错；窗口内无并发写者。09-05/07/09 的"双 message 对"未在今日窗口出现 → **初步判定钳制生效，双实例未复现**。
+- 最终确认留待明晨：conv185 消息增量应为恰好 1 对（16→18），此后每轮恒 +2。
+
+### 发现问题与处置
+| # | 类型 | 现象/证据 | 原因推测 | 处置 |
+|---|---|---|---|---|
+| 1 | docs-实现缝隙 | 记忆架构.md 治理注/正文未含 A6 知识 status/kind 语义；代码已实现（server/knowledge.js kbVisibleWhere 默认带 `status="active"`；index.js 注入 LIMIT 12；DB knowledge.status default 'active'） | A6（1d908e59e）落地后记忆架构文档未同步新增状态维度 | ✅ **已修**（见 commit）：治理注补 A6 行 + §1/§2 标注"仅 status=active 注入/检索，superseded/obsolete 仅历史" |
+| 2 | 一致性命中 | scheduler 定时任务每次 INSERT messages **不 bump conversations.updated_at**（conv185 updated_at 恒为 09-04 创建值，尽管每日运行写消息）；web 会话 chat 路径会 bump（index.js:637） | executeScheduledTask 只写 messages，缺对应 updated_at 维护 | 📌 **记录不改**：若补 1 行 bump，task 会话将每日置顶会话列表（Chat.jsx:850 带 task 标签可见），属可见排序行为变化 → 交主会话评估是否值得，不擅动 |
+| 3 | 排期核对 | 月度知识巡检 id5 last_run=null | A6 种子 09-09 创建，首次 10-01 05:30 京 | ✅ 正常，无动作 |
+| 4 | 记忆健康 | kb id=9 进度总表（global）覆盖至 97fd2790/A 系列，无过时句残留 | — | ✅ 通过，无动作（沿用 09-09 覆盖版） |
+
+### 修复与 commit
+- `docs/记忆架构.md`：治理注新增 A6 行（kind/status 双维度 + 仅 active 注入/检索，附代码出处）；§1"knowledge 前 12 条"与 §2 kb_search 补"仅 status=active"。纯 docs，零代码、无需 reload。
+- commit：见下（docs: 记忆架构同步 A6 knowledge status/kind 语义 —— 2026-09-10 约定任务）。
+
+### 成本估算
+- 本次执行 ≈ **¥5-6**（侦察以 db + 多段长文档读取为主，约 50+ 次 LLM 调用；未跑 selfcheck）。单会话日预算占比 <1%，低负载日形态正常。
+
+### 明日（09-11）建议
+1. **复核 conv185 消息增量 = 1 对（18→20）**，最终关闭 97fd2790 双实例案（今日窗口观察已支持，差最后实证）。
+2. 交主会话评估：#2（scheduler 是否补 bump task conv updated_at——涉列表置顶行为取舍）；记忆架构版本链（v1.1 冻结于蓝图 v2.10，总方案 B 已 v2.32）是否需要治理行升级。
+3. 备忘：10-01 05:30 知识库月度巡检（id5）首次运行——将巡检 12 条 active 知识去重/过时/状态治理。
