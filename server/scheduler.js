@@ -95,7 +95,11 @@ export function startScheduler() {
       for (const t of due) {
         if (schedulerRunning >= 2) break;
         // 防重入：先把 next_run 推后，避免并发重复执行
-        const next = cronToNext(t.cron) || new Date(Date.now() + 60000);
+        // 2026-09-09 主会话修复：cronToNext 在 cron 分钟（如 05:00:xx）内被调用时返回"当前已过/当前"时刻
+        // （循环从 from+0 开始且不强制未来），导致 next_run 推进后仍 <= NOW → 下一轮 60s 检查再次入队 →
+        // 同一任务并发双实例（conv185 实证：09-05/09-07/09-09 均出现双 message 对）。钳制：推进值必须 ≥ 当前+60s。
+        let next = cronToNext(t.cron);
+        if (!next || next.getTime() <= Date.now() + 60000) next = new Date(Date.now() + 60000);
         await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
         schedulerRunning += 1;
         executeScheduledTask(t)
