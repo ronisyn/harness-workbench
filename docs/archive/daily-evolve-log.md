@@ -420,3 +420,11 @@ run_command 的 shell wrapper 不做引号剥离 / `&&` / 管道解析（参数�
 1. **复核 conv185 消息增量 = 1 对（18→20）**，最终关闭 97fd2790 双实例案（今日窗口观察已支持，差最后实证）。
 2. 交主会话评估：#2（scheduler 是否补 bump task conv updated_at——涉列表置顶行为取舍）；记忆架构版本链（v1.1 冻结于蓝图 v2.10，总方案 B 已 v2.32）是否需要治理行升级。
 3. 备忘：10-01 05:30 知识库月度巡检（id5）首次运行——将巡检 12 条 active 知识去重/过时/状态治理。
+
+### 补记（同运行续段复核，05:1x；承接上文首段日报，非新实例）
+- **调度双实例修复（97fd2790）05:00 终验复核通过**：scheduled_tasks id=4 next_run 已正确推进至 09-11 05:00:20（未在同分钟重入）；conv185 本轮无「双 message 对」→ 上段"初歩判定"升级为**确认不再复现**。
+- **kb id=10 标题修正（db，1 行 UPDATE 已回查 ✅）**：原标题含过时句「(待 reload)/hooks 698ae1e 仍未生效确认」，与正文及 kb#9 总表矛盾 → 改为「…均已 reload 生效，并入 kb#9 进度总表」，保留 status=active、body 零改动（信息不丢失）。
+- **进程/端口对账**：880 = pid 457388（server/index.js，09-10 03:58:18 启动 = **A6 已上线**，selfcheck 12/12、npm test 11/11 全绿）；885 = pid 307558（旧入口 server/server.js 已不在仓库，09-01 启动）→ **遗留实例未触碰**，建议主会话评估退役（见下）。
+- **成本对账线索**：A1–A6 开发（09-10 03:20–03:58）的 LLM 用量**未记入 rw_test**（全库仅 rw_test 有 usage_stats；rw_prod schema 空、hb_p* 无表）→ 疑开发在作者侧实例完成、代码经 GitHub 同步至此（880 于 03:58:18 reload 即佐证），记账口径待主会话确认，非异常。
+- 根目录 `e2e-capfix/final/fx3/recover.mjs`（4 个 git 跟踪、package.json scripts 未引用）= A 系列开发期 E2E 回归脚本/证据 → **保留不删**。
+- 本段延续只读复核 + 上述 kb 修正，无 server/src 代码改动 → **无需 reload/重启**。
