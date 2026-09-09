@@ -1744,11 +1744,17 @@ app.patch('/api/extensions/demands/:id/status', requireAuth, async (req, res) =>
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 // 变更资产状态（平台上架/退役等；审计 ext:status）
+// A3 发布闸门：转 published 需已声明能力（capability 或 manifest_ref），防"空壳上架"（§8.8 插件需注册 manifest）
 app.patch('/api/extensions/:type/:key/status', requireAuth, async (req, res) => {
   try {
     const type = req.params.type, key = req.params.key;
     const status = String((req.body || {}).status || '').trim();
     if (!['dev', 'test', 'published', 'retired'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 dev|test|published|retired' });
+    const [e] = await db.query('SELECT capability, manifest_ref FROM extensions WHERE asset_type=? AND akey=?', [type, key]);
+    if (!e) return res.status(404).json({ ok: false, message: '资产不存在' });
+    if (status === 'published' && !e.capability && !e.manifest_ref) {
+      return res.status(400).json({ ok: false, message: '发布闸门：上架需先声明能力（capability 或 manifest_ref），请先补全资产信息' });
+    }
     const r = await db.query('UPDATE extensions SET status=?, updated_at=NOW() WHERE asset_type=? AND akey=?', [status, type, key]);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '资产不存在' });
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:status', 'type=' + type + ' key=' + key + ' status=' + status]);
@@ -1791,16 +1797,98 @@ app.put('/api/shells/:key/extensions', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 // 需求/升级反馈提交（软信号轻确认/💡按钮/日报；审计 ext:demand）
+// A3 单一 intake（§8.8 收敛与分层①）：fields={scene 触发场景, effect 期望效果, shells 涉及壳, actionType 代码动作类型} 字段齐才立项
 app.post('/api/extensions/:key/demand', requireAuth, async (req, res) => {
   try {
     const key = String(req.params.key || '').slice(0, 64);
     const b = req.body || {};
     const kind = ['hard', 'soft', 'manual'].includes(b.kind) ? b.kind : 'manual';
-    const content = String(b.content || '').trim();
-    if (!content) return res.status(400).json({ ok: false, message: 'content 必填' });
-    const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key || null, kind, String(b.source || '会话').slice(0, 24), content.slice(0, 2000)]);
+    let content = String(b.content || '').trim();
+    if (b.fields && typeof b.fields === 'object') {
+      const f = b.fields;
+      const scene = String(f.scene || '').trim(); const effect = String(f.effect || '').trim();
+      const shells = String(f.shells || '').trim(); const actionType = String(f.actionType || '').trim();
+      if (!scene || !effect || !shells || !actionType) {
+        return res.status(400).json({ ok: false, message: '需求采集字段需齐备：触发场景/期望效果/涉及壳/代码动作类型' });
+      }
+      content = `【触发场景】${scene}\n【期望效果】${effect}\n【涉及壳】${shells}\n【代码动作类型】${actionType}`;
+    }
+    if (!content) return res.status(400).json({ ok: false, message: 'content 或 fields 必填' });
+    const source = String(b.source || '扩展中心').slice(0, 24);
+    const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key || null, kind, source, content.slice(0, 2000)]);
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' id=' + r.insertId]);
     res.json({ ok: true, id: r.insertId, kindCn: DEMAND_KIND_CN[kind] });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- A3 扩展中心批：MCP 资产化 + 指标 v1 两层 + 发布闸门（§8.8/§9.3 载体） ----------
+// MCP 资产化：把 settings mcp_servers（已配置/已连接）登记进 extensions(type=mcp)。
+// akey=server id（与工具名前缀 mcp_<id>_ 对齐）；meta 快照工具数与连接态；提示注入防线触发注（外部不可信输入）。
+app.post('/api/extensions/mcp-sync', requireAuth, async (req, res) => {
+  try {
+    const mcp = await import('./mcp.js');
+    const cfg = await getSetting('mcp_servers', []);
+    if (!Array.isArray(cfg)) return res.status(400).json({ ok: false, message: 'settings mcp_servers 非数组' });
+    const clients = new Map((mcp.listMcpClients() || []).map((c) => [c.id, c]));
+    const out = [];
+    for (const s of cfg) {
+      if (!s || !/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(String(s.id || ''))) continue;
+      const cl = clients.get(s.id);
+      const tools = (cl && cl.tools) || [];
+      const meta = {
+        mcpServerId: s.id, toolCount: tools.length, connected: !!cl,
+        untrustedInput: true, // §11.4 提示注入防线触发条件：外部 MCP=不可信输入
+        note: 'MCP 资产化（A3）：settings mcp_servers 自动登记；连接态工具快照于 meta',
+      };
+      const cap = { type: 'mcp', tools: tools.map((t) => t.name), serverId: s.id };
+      const existing = (await db.query('SELECT id, status FROM extensions WHERE asset_type="mcp" AND akey=?', [s.id]))[0];
+      // 已有资产保留其状态（防止 sync 覆盖研发/退役等人工状态）；新增默认 published（已配置可用）
+      const status = existing ? existing.status : (cl ? 'published' : 'dev');
+      await db.query('INSERT INTO extensions (asset_type, akey, name, version, status, scope, capability, manifest_ref, meta) VALUES ("mcp",?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), version=VALUES(version), status=VALUES(status), capability=VALUES(capability), manifest_ref=VALUES(manifest_ref), meta=VALUES(meta), updated_at=NOW()',
+        [s.id, String(s.name || s.id).slice(0, 128), '0.1.0', status, 'global', JSON.stringify(cap), null, JSON.stringify(meta)]);
+      out.push({ id: s.id, status, tools: tools.length, connected: !!cl });
+    }
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:mcp_sync', 'count=' + out.length + ' ' + out.map((x) => x.id + ':' + x.status).join(',')]);
+    res.json({ ok: true, synced: out.length, items: out });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 指标 v1 两层（健康度+活跃度；§8.8 监控四层①②）：MCP 资产按 mcp_<id>_ 前缀聚合 tool_calls（status/duration_ms/shell_id）；
+// 插件/应用尚无调用维度（tool_calls 缺 asset 维度，§9.3 载体③ 后置）→ 返回占位并注明。需求数/装载数始终给。
+app.get('/api/extensions/metrics', requireAuth, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const type = String(req.query.type || '').trim();
+    const q = String(req.query.q || '').trim();
+    const conds = ['1=1']; const params = [];
+    if (type) { conds.push('asset_type=?'); params.push(type); }
+    if (q) { conds.push('(name LIKE ? OR akey LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+    const assets = await db.query(`SELECT id, asset_type, akey, name, status, meta FROM extensions WHERE ${conds.join(' AND ')} ORDER BY asset_type, akey`, params);
+    const out = [];
+    for (const a of assets) {
+      const base = { type: a.asset_type, key: a.akey, name: a.name, status: a.status };
+      const loaded = (await db.query('SELECT COUNT(*) c FROM shell_extensions WHERE asset_type=? AND asset_key=?', [a.asset_type, a.akey]))[0].c;
+      const openDemands = (await db.query('SELECT COUNT(*) c FROM extension_demands WHERE asset_key=? AND status="待审"', [a.akey]))[0].c;
+      base.loadedShells = Number(loaded); base.openDemands = Number(openDemands);
+      if (a.asset_type === 'mcp' && /^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(String(a.akey))) {
+        // 健康度：30d 调用/失败/均耗时；活跃度：活跃壳会话数/调用次数（含轻量会话维度）
+        const agg = (await db.query(
+          `SELECT COUNT(*) c, SUM(status="fail") fails, COALESCE(AVG(duration_ms),0) avgMs,
+                  COUNT(DISTINCT shell_id) shells, COUNT(DISTINCT conversation_id) convs
+           FROM tool_calls WHERE tool_name LIKE ? AND created_at > NOW() - INTERVAL ? DAY`,
+          ['mcp\\_' + a.akey + '\\_%', days]))[0] || {};
+        base.dim = 'tool_calls(mcp 前缀)';
+        base.days = days;
+        base.calls = Number(agg.c || 0); base.fails = Number(agg.fails || 0);
+        base.failRate = base.calls ? Math.round((base.fails / base.calls) * 100) / 100 : 0;
+        base.avgMs = Math.round(Number(agg.avgMs || 0));
+        base.activeShells = Number(agg.shells || 0); base.activeConvs = Number(agg.convs || 0);
+      } else {
+        base.dim = null; // tool_calls 无 asset 维度 → 插件/应用调用统计随留痕维度批（§9.3 载体③）
+        base.note = '调用维度待 tool_calls 增 asset 留痕（后置）；当前给出需求/装载计数';
+      }
+      out.push(base);
+    }
+    res.json({ ok: true, days, metrics: out });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 

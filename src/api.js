@@ -71,11 +71,13 @@ export const api = {
   shellPatch: (key, patch) => request('/api/shells/' + encodeURIComponent(key), { method: 'PATCH', body: JSON.stringify(patch) }),
   shellDisable: (key) => request('/api/shells/' + encodeURIComponent(key), { method: 'DELETE' }),
   shellCanary: (key) => request('/api/shells/' + encodeURIComponent(key) + '/canary', { method: 'POST', body: JSON.stringify({}) }),
-  // 扩展中心数据（A0 载体；装配向导 step6 与扩展中心页共用）
+  // 扩展中心数据（A0/A3：插件/MCP/应用 统一资产 + 需求闭环 + 指标 v1 两层 + MCP 资产化）
   extensions: (params) => request('/api/extensions?' + new URLSearchParams(params || {}).toString()),
   extensionRegister: (body) => request('/api/extensions', { method: 'POST', body: JSON.stringify(body) }),
   extensionStatus: (type, key, status) => request('/api/extensions/' + encodeURIComponent(type) + '/' + encodeURIComponent(key) + '/status', { method: 'PATCH', body: JSON.stringify({ status }) }),
   extensionGet: (type, key) => request('/api/extensions/' + encodeURIComponent(type) + '/' + encodeURIComponent(key)),
+  extensionMetrics: (params) => request('/api/extensions/metrics?' + new URLSearchParams(params || {}).toString()),
+  extensionMcpSync: () => request('/api/extensions/mcp-sync', { method: 'POST', body: JSON.stringify({}) }),
   shellExtensions: (key) => request('/api/shells/' + encodeURIComponent(key) + '/extensions'),
   setShellExtensions: (key, extensions) => request('/api/shells/' + encodeURIComponent(key) + '/extensions', { method: 'PUT', body: JSON.stringify({ extensions }) }),
   demands: (params) => request('/api/extensions/demands?' + new URLSearchParams(params || {}).toString()),

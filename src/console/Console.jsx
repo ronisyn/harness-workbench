@@ -10,6 +10,7 @@ import AgentBoard from './AgentBoard.jsx';
 import CapsBoard from './CapsBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
 import AppsBoard from './AppsBoard.jsx';
+import ExtCenterBoard from './ExtCenterBoard.jsx';
 
 // 板块注册表：code → { group, label, render }（group 决定左侧分组）
 export const BOARDS = {
@@ -25,7 +26,8 @@ export const BOARDS = {
   // A2：壳开发 1.3 升级为 Agent（壳）页 = 壳列表/详情/新建 + 装配向导 + 任务模板库子区（§8.9；URL code 不变兼容旧链）
   'agent-dev': { group: '应用市场', label: 'Agent（壳）', render: () => <AgentBoard /> },
   'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
-  'plugins': { group: '应用市场', label: '插件', render: () => <div className="rw-console-ph"><b>插件体系（建设中）</b><div>按壳装卸的独立能力包：在通用环境研发验证 → 壳勾选装配 → 删除即整体卸载（A 壳不要就不勾，B 壳要就勾）。Excel/PDF/图片/视频等插件将在此上架；当前为占位，详见讨论方案。A3 扩展中心落地后并入统一资产体系。</div></div> },
+  // A3：原"插件"占位 code 升级为 扩展中心（插件/MCP/应用统一资产页，§8.8；code 不变兼容 /console/plugins 旧链）
+  'plugins': { group: '应用市场', label: '扩展中心', render: () => <ExtCenterBoard /> },
 };
 const GROUPS = ['平台', 'Agent', '应用市场'];
 
