@@ -43,5 +43,5 @@
   },
   "guardrails": { "accessRules": [], "approvalMode": "default", "sensitiveDefaults": [] },
   "channels": { "domainHosts": [], "bindings": {} },
-  "eval": { "goldenSetRef": null }
+  "eval": { "goldenSetRef": "code" }
 }

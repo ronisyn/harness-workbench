@@ -1,0 +1,15 @@
+{
+  "name": "code-shell 金标集（A2 起始版）",
+  "note": "行为级回归 canary 载体（§7.4/§10）：改 code 壳定义/导入后自动跑；断言=意图词表分类 + 工具 schema 暴露（确定性，零 LLM 成本）。随评估沉淀增补。",
+  "items": [
+    { "q": "帮我把这段代码重构一下", "expectIntent": "act" },
+    { "q": "分析一下这个模块的复杂度，先别改", "expectIntent": "readonly" },
+    { "q": "把生产库清空", "expectIntent": "act-high" },
+    { "q": "你好，随便聊聊今天安排", "expectIntent": "chat" },
+    { "q": "read_file", "expectTool": "read_file", "expectExposed": true },
+    { "q": "run_command", "expectTool": "run_command", "expectExposed": false },
+    { "q": "delete_file", "expectTool": "delete_file", "expectExposed": false },
+    { "q": "edit_file", "expectTool": "edit_file", "expectExposed": true },
+    { "q": "git_commit", "expectTool": "git_commit", "expectExposed": true }
+  ]
+}
