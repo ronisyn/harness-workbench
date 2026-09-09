@@ -300,12 +300,54 @@ body {
 /* --- 输入条：textarea 多行 + 队列提示 --- */
 .rw-inputbar { align-items: stretch; }
 .rw-inputbox { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.rw-inputrow { display: flex; gap: 8px; align-items: flex-end; }
-.rw-inputbar textarea.rw-input { flex: 1; resize: vertical; min-height: 58px; max-height: 200px;
+.rw-inputrow { display: flex; flex-direction: column; gap: 6px; }
+.rw-inputbar textarea.rw-input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 58px; max-height: 200px;
   line-height: 1.55; font-family: inherit; }
 .rw-inputbar textarea.rw-input::placeholder { color: var(--rw-muted); }
-.rw-inputbtns { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+/* 输入区工具条：附件上传(左) + 状态提示 + 发送/停止(右) —— 2026-09-09 附件整合进文本框区 */
+.rw-inputtools { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rw-inputtools .rw-input-hint { flex: 1; font-size: 11.5px; color: var(--rw-muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.rw-inputtools .rw-input-hint.busy { color: var(--rw-red); }
+.rw-inputbtns { display: flex; gap: 8px; flex-shrink: 0; align-items: center; margin-left: auto; }
 .rw-inputbtns .rw-btn { white-space: nowrap; }
+/* 附件按钮（整窗亦可拖拽，见 .rw-dropoverlay） */
+.rw-attach-btn { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: var(--rw-panel); color: var(--rw-ink); cursor: pointer;
+  border: 1px dashed var(--rw-border); border-radius: 8px; padding: 6px 12px;
+  font-size: 13px; line-height: 1; white-space: nowrap; user-select: none; transition: border-color .15s; }
+.rw-attach-btn:hover:not(:disabled) { border-color: var(--rw-red); color: var(--rw-red); }
+.rw-attach-btn:disabled { opacity: .5; cursor: not-allowed; }
+.rw-attach-btn.drag { border-color: var(--rw-red); color: var(--rw-red); background: rgba(201,139,46,.06); }
+/* 整窗拖拽上传遮罩 */
+.rw-dropoverlay { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
+  background: rgba(40, 30, 15, 0.28); pointer-events: none; }
+.rw-dropoverlay-inner { border: 2px dashed var(--rw-red); background: rgba(255,253,248,.96);
+  border-radius: 16px; padding: 26px 44px; font-size: 18px; font-weight: 700; color: var(--rw-red);
+  box-shadow: 0 8px 30px rgba(0,0,0,.15); }
+/* 对话内链接与文件下载卡片（/api/download/ → FileLink） */
+.rw-msg-c a { color: #1a5fb4; text-decoration: underline; word-break: break-all; }
+.rw-msg-c a:hover { color: var(--rw-red); }
+.rw-filecard {
+  display: inline-flex; align-items: center; gap: 10px;
+  background: #fff; border: 1px solid var(--rw-border); border-radius: 10px;
+  padding: 8px 12px 8px 8px; margin: 4px 0; text-decoration: none !important;
+  box-shadow: 0 1px 2px rgba(61, 47, 31, .06);
+  transition: border-color .15s, box-shadow .15s;
+  cursor: pointer; max-width: 100%;
+}
+.rw-filecard:hover { border-color: #1a5fb4; box-shadow: 0 2px 6px rgba(26, 95, 180, .15); }
+.rw-filecard.busy { opacity: .65; cursor: wait; }
+.rw-filecard.err { border-color: #c0392b; background: #fdf3f2; }
+.rw-fileico {
+  flex-shrink: 0; width: 42px; height: 42px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 10px; font-weight: 800; letter-spacing: .5px;
+}
+.rw-fileinfo { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rw-filename { font-size: 13px; color: var(--rw-ink); font-weight: 600; word-break: break-all; line-height: 1.3; }
+.rw-filesub { font-size: 11px; color: #1a5fb4; text-decoration: none; }
+.rw-filecard.err .rw-filesub { color: #c0392b; }
 .rw-queuepanel { font-size: 12px; color: var(--rw-muted);
   background: rgba(201, 139, 46, .08);
   border: 1px solid rgba(201, 139, 46, .4); border-radius: 8px;

@@ -4,12 +4,75 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api, streamChat } from './api.js';
+import { api, streamChat, getToken } from './api.js';
 import Knowledge from './Knowledge.jsx';
+import FileAttach, { uploadToServer } from './FileAttach.jsx';
+
+// 站内下载链接渲染为「文件卡片」：/api/download/... 需要 Bearer 鉴权（token 存 localStorage），
+// 若用普通 <a> 新标签页打开会 401，因此点击时走 fetch 带 Authorization → blob → 触发浏览器下载。
+// （2026-09-09 会话393 开发、09-09 恢复合入）
+const FILE_BADGE = {
+  xlsx: ['XLSX', '#1e7a3c'], xls: ['XLS', '#1e7a3c'],
+  pdf: ['PDF', '#b02a37'], docx: ['DOC', '#2b579a'], doc: ['DOC', '#2b579a'],
+  csv: ['CSV', '#2a7f62'], pptx: ['PPT', '#c55a11'], ppt: ['PPT', '#c55a11'],
+  png: ['PNG', '#7a4fb2'], jpg: ['JPG', '#7a4fb2'], jpeg: ['JPG', '#7a4fb2'], gif: ['GIF', '#7a4fb2'],
+  txt: ['TXT', '#8a6d1a'], md: ['MD', '#8a6d1a'], zip: ['ZIP', '#5b6472'], json: ['JSON', '#5b6472'],
+};
+function fileKindOf(name) {
+  const ext = (String(name).split('.').pop() || '').toLowerCase();
+  const b = FILE_BADGE[ext];
+  return b ? { tag: b[0], color: b[1] } : { tag: (ext || 'FILE').slice(0, 4).toUpperCase(), color: '#8a8f98' };
+}
+function FileLink({ href, label }) {
+  const [state, setState] = useState(0); // 0=待命 busy=下载中 err=失败
+  const rawName = String(href || '').split('/api/download/')[1] || '';
+  let name = label;
+  try { if (!name) name = decodeURIComponent(rawName); } catch { name = rawName; }
+  const kind = fileKindOf(name);
+  async function go(e) {
+    e.preventDefault(); e.stopPropagation();
+    if (state === 'busy') return;
+    setState('busy');
+    try {
+      const tok = getToken();
+      const res = await fetch(href, { headers: tok ? { Authorization: 'Bearer ' + tok } : {} });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      setState(0);
+    } catch (e) { setState('err'); }
+  }
+  return (
+    <a className={'rw-filecard' + (state === 'err' ? ' err' : '') + (state === 'busy' ? ' busy' : '')}
+      href={href} onClick={go} title={'点击下载：' + name}>
+      <span className="rw-fileico" style={{ background: kind.color }}>{kind.tag}</span>
+      <span className="rw-fileinfo">
+        <span className="rw-filename">{name}</span>
+        <span className="rw-filesub">
+          {state === 'err' ? '⚠️ 下载失败（登录态失效，请刷新页面重试）' : state === 'busy' ? '⏳ 正在下载…' : '📥 点击下载文件'}
+        </span>
+      </span>
+    </a>
+  );
+}
 
 function Md({ text }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ node, href, children, ...props }) => {
+          const h = String(href || '');
+          if (h.includes('/api/download/')) {
+            const label = React.Children.toArray(children).map((c) => (typeof c === 'string' ? c : '')).join('').trim() || null;
+            return <FileLink href={h} label={label} />;
+          }
+          return <a href={h} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+        },
+      }}>
       {text || ''}
     </ReactMarkdown>
   );
@@ -195,6 +258,51 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const msgsBoxRef = useRef(null);                       // 消息滚动容器（自动贴底跟随）
   const [stickBottom, setStickBottom] = useState(true);  // 用户是否停在底部：true=内容更新自动贴底；用户上翻=停止跟随
   const pollTickRef = useRef(0); // 轮询计数：每 3 tick（~7.5s）补拉一次挂起审批/问询（断连恢复）
+
+  // —— 附件/整窗拖拽上传（2026-09-09 会话393 开发、09-09 恢复）：支持把 Excel/PDF/Word 等直接拖到对话页任意处上传 ——
+  const [dragOverlay, setDragOverlay] = useState(false);
+  const dragDepth = useRef(0);
+  const hasFileDrag = (e) => {
+    const t = e && e.dataTransfer && e.dataTransfer.types;
+    return !!t && Array.prototype.indexOf.call(t, 'Files') >= 0;
+  };
+  // 把"已上传"提示回填到输入框（按钮上传与整窗拖放共用）
+  const appendAttach = (abs, rel, name) => {
+    const c = curRef.current;
+    const p = rel || abs || '';
+    if (!p || !c) return;
+    const t = '\n[📎 附件已上传：' + p + '（Excel 请用 extract_xlsx、PDF 用 extract_pdf、Word 用 extract_docx、文本/图片用 read_file/view_image 读取解析）]\n';
+    const nv = (inputRef.current || '') + t;
+    setInput(nv); inputRef.current = nv; draftsRef.current[c] = nv;
+  };
+  const onDropZoneDragEnter = (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragOverlay(true);
+  };
+  const onDropZoneDragOver = (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  };
+  const onDropZoneDragLeave = (e) => {
+    if (!hasFileDrag(e)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragOverlay(false);
+  };
+  const onDropZoneDrop = async (e) => {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDragOverlay(false);
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    if (!curRef.current) { setToast('请先选择会话再上传附件'); return; }
+    const r = await uploadToServer(f, setToast);
+    if (r) appendAttach(r.abs, r.rel, r.name);
+  };
 
   const loadConvs = useCallback(async () => {
     try {
@@ -672,7 +780,13 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const curPreset = convs.find((c) => c.id === cur)?.preset || 'all';
 
   return (
-    <div className="rw-shell">
+    <div className="rw-shell" onDragEnter={onDropZoneDragEnter} onDragOver={onDropZoneDragOver} onDragLeave={onDropZoneDragLeave} onDrop={onDropZoneDrop}>
+      {/* 整窗拖拽上传遮罩：拖入文件时提示松开上传 */}
+      {dragOverlay && (
+        <div className="rw-dropoverlay">
+          <div className="rw-dropoverlay-inner">📥 松开上传（Excel/PDF/Word/PPT/图片/文本，≤8MB）</div>
+        </div>
+      )}
       {/* 顶栏：logo 左上 + 对话标题 + 操作（M1：logo/首页 → 总览首页） */}
       <header className="rw-topbar">
         <div className="rw-logo" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">Roni Workbench</div>
@@ -851,14 +965,19 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                 </div>
               )}
               <div className="rw-inputrow">
-                <textarea className="rw-input" rows="2" placeholder="输入消息：Enter 发送，Shift+Enter 换行；任务执行中也可输入，会自动排队…" value={input}
+                <textarea className="rw-input" rows="3" placeholder="输入消息：Enter 发送，Shift+Enter 换行；任务执行中输入也会照常发送，自动排队…" value={input}
                   onChange={(e) => { setInput(e.target.value); inputRef.current = e.target.value; }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); send(); }
                   }} disabled={!cur} />
-                <div className="rw-inputbtns">
-                  <button className="rw-btn pri" onClick={send} disabled={!cur || !input.trim()} title="发送（Enter）；执行中点击=加入队列">{busy ? '加入队列' : '发送'}</button>
-                  {busy && <button className="rw-btn stop" onClick={stopGen} title="停止生成（停止后排队消息保持，可再点发送）">■ 停止</button>}
+                <div className="rw-inputtools">
+                  <FileAttach disabled={!cur} onToast={setToast}
+                    onAttached={(abs, rel, name) => { appendAttach(abs, rel, name); }} />
+                  <span className={'rw-input-hint' + (busy ? ' busy' : '')}>{busy ? '⏳ 任务执行中：发送的新消息会自动排队，当前任务结束后按序执行' : ''}</span>
+                  <div className="rw-inputbtns">
+                    {busy && <button className="rw-btn stop" onClick={stopGen} title="停止当前生成（排队消息保留，可再点发送继续）">■ 停止</button>}
+                    <button className="rw-btn pri" onClick={send} disabled={!cur || !input.trim()} title="发送（Enter）；任务执行中点击也会发送——自动加入队列，结束后依次执行">{busy ? '⏎ 发送（排队）' : '发送'}</button>
+                  </div>
                 </div>
               </div>
             </div>

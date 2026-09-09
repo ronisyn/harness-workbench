@@ -1131,6 +1131,18 @@ app.post('/api/upload', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
+// ---------- 下载文件（uploads 目录，登录后可下载；防目录穿越）——2026-09-09 会话393 Excel 收发链路恢复 ----------
+app.get('/api/download/:name', requireAuth, async (req, res) => {
+  try {
+    const dir = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'uploads');
+    const name = path.basename(decodeURIComponent(req.params.name || ''));
+    if (!name) return res.status(400).json({ ok: false, message: '文件名缺失' });
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) return res.status(404).json({ ok: false, message: '文件不存在' });
+    res.download(file, name);
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 模型市场（P3） ----------
 app.get('/api/market/list', requireAuth, async (req, res) => {
   try { res.json({ ok: true, sources: await marketList() }); }
