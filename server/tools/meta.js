@@ -1,4 +1,4 @@
-// server/tools/meta.js - 工具契约元数据（WS1；施工图 docs/tool-contracts-v1.md 转录）
+// server/tools/meta.js - 工具契约元数据（WS1；施工图 docs/tool-contracts-v1.md 转录；施工图已冻结(2026-09-10 治理)，when/not/ex/tier 计数一律以本文件为准）
 // tier: core|pro|expert（toolDefs(expose) 过滤用；过滤只影响暴露不影响 execTool 执行）
 // when/not/ex：拼进 function calling description，帮模型在正确时刻选对工具（X1 评审）
 // 注意：conv_summarize 已注册进 TOOLS（index.js），tier=pro；下方注释仅为工具使用提醒，注册状态以 tools/index.js 为准
@@ -71,7 +71,7 @@ export const TOOL_META = {
   set_limits: { tier: 'expert', when: '用户要求调整护栏（0=不限；先解释再改）', not: '未经请求不要自行放宽', ex: 'set_limits {minutes:0}' },
 };
 
-// 5.3c/5.4 默认工具启用集（harness 标准 25：日常开发/运维高频；其余在 设置→工具 按需勾选）
+// 5.3c/5.4 默认工具启用集（harness 默认 28：日常开发/运维高频；其余在 设置→工具 按需勾选——历史注记"标准 25"已过时，O-29 残留，2026-09-10 治理修订）
 export const DEFAULT_TOOLSET = [
   'read_file', 'write_file', 'append_file', 'edit_file', 'list_dir', 'find_file', 'grep_search',
   'web_search', 'fetch_url',

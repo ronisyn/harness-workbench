@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// scripts/kpi.mjs - RW KPI 报告与基线快照（WS0 度量基线；口径见 docs/RW撑竿跳方案.md §0.2）
+// scripts/kpi.mjs - RW KPI 报告与基线快照（WS0 度量基线；口径见 docs/archive/RW撑竿跳方案-执行史-v1.0.md §0.2——原 docs/RW撑竿跳方案.md 已归档）
 // 用法: node scripts/kpi.mjs [--days 7] [--json] [--save docs/metrics/baseline-YYYYMMDD.json]
 // 直连 MySQL（复用 server/db.js，读仓库 .env）；需在服务器或可达 DB 的环境运行。
 import fs from 'node:fs';

@@ -312,7 +312,7 @@ const SCHEMA = [
     updated_at DATETIME DEFAULT NOW(),
     PRIMARY KEY (shell_id, skey)
   )`,
-  // ---- ⑤ 模型观测数据面（v2.10 §8）：model_telemetry 执行事实表 + reviews 复测记录 ----
+  // ---- ⑤ 模型观测数据面（口径见总方案 §7.4/§9；编号 v2.10 曾与内核蓝图版本混用，2026-09-10 治理改指）：model_telemetry 执行事实表 + reviews 复测记录 ----
   `CREATE TABLE IF NOT EXISTS model_telemetry (
     id INT AUTO_INCREMENT PRIMARY KEY,
     conversation_id INT,

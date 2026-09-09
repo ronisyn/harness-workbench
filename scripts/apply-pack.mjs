@@ -49,7 +49,7 @@ console.log('== RW 调教包应用 ==\n  模板根:', ROOT, '\n  实例根:', IN
 
 // 1. 规则/模板文档 → 实例 docs/
 const docSrc = path.join(ROOT, 'docs');
-const RULE_DOCS = ['RW行为准则-服务器版.md', '信任契约-v1.md', '记忆架构.md', '权限与沙箱-服务器版.md', 'RW撑竿跳方案.md', '复盘模板.md', 'tool-contracts-v1.md'];
+const RULE_DOCS = ['RW行为准则-服务器版.md', '信任契约-v1.md', '记忆架构.md', '权限与沙箱-服务器版.md', '复盘模板.md', 'tool-contracts-v1.md']; // 注:已移除失效的 RW撑竿跳方案.md(2026-09-10 治理)
 let docsOk = 0;
 for (const d of RULE_DOCS) { if (fs.existsSync(path.join(docSrc, d))) docsOk += cp(path.join(docSrc, d), path.join(INSTANCE, 'docs', d)); }
 cp(path.join(docSrc, 'templates', '验收模板.md'), path.join(INSTANCE, 'docs', 'templates', '验收模板.md'));
