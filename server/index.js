@@ -1485,6 +1485,128 @@ app.post('/api/apps/:key/launch', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
+// ---------- A0 扩展中心数据载体 API（2026-09-11，总方案 §9.3 载体①②④⑤；插件/MCP/应用统一注册、壳装载、需求反馈） ----------
+const EXT_STATUS_CN = { dev: '研发', test: '测试', published: '已上架', retired: '退役' };
+const DEMAND_KIND_CN = { hard: '硬信号', soft: '软信号', manual: '主动' };
+function extToApi(e) {
+  return {
+    type: e.asset_type, key: e.akey, name: e.name, version: e.version,
+    status: e.status, statusCn: EXT_STATUS_CN[e.status] || e.status,
+    scope: e.scope, capability: safeJson(e.capability), manifestRef: e.manifest_ref || '',
+    meta: safeJson(e.meta), loadedShells: Number(e.loaded_shells || 0), openDemands: Number(e.open_demands || 0),
+    createdAt: e.created_at, updatedAt: e.updated_at,
+  };
+}
+// 资产列表（可 type/关键词过滤；带装载壳数与待审需求计数）
+app.get('/api/extensions', requireAuth, async (req, res) => {
+  try {
+    const type = String(req.query.type || '').trim();
+    const q = String(req.query.q || '').trim();
+    const rows = await db.query(
+      `SELECT e.*,
+         (SELECT COUNT(*) FROM shell_extensions se WHERE se.asset_type=e.asset_type AND se.asset_key=e.akey) AS loaded_shells,
+         (SELECT COUNT(*) FROM extension_demands d WHERE d.asset_key=e.akey AND d.status='待审') AS open_demands
+       FROM extensions e
+       WHERE (?='' OR e.asset_type=?) AND (?='' OR e.name LIKE ? OR e.akey LIKE ?)
+       ORDER BY e.updated_at DESC`, [type, type, q, `%${q}%`, `%${q}%`]);
+    res.json({ ok: true, extensions: rows.map(extToApi) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 注册资产（平台研发/上架入口；审计 ext:register）
+app.post('/api/extensions', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const type = String(b.type || '').trim(); const key = String(b.key || '').trim();
+    if (!['plugin', 'mcp', 'app'].includes(type)) return res.status(400).json({ ok: false, message: 'type 需为 plugin|mcp|app' });
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) return res.status(400).json({ ok: false, message: 'key 需为小写字母数字连字符' });
+    const status = ['dev', 'test', 'published', 'retired'].includes(b.status) ? b.status : 'dev';
+    const scope = b.scope === 'shell' ? 'shell' : 'global';
+    await db.query('INSERT INTO extensions (asset_type, akey, name, version, status, scope, capability, manifest_ref, meta) VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), version=VALUES(version), status=VALUES(status), scope=VALUES(scope), capability=VALUES(capability), manifest_ref=VALUES(manifest_ref), meta=VALUES(meta), updated_at=NOW()',
+      [type, key, String(b.name || key).slice(0, 128), String(b.version || '0.1.0').slice(0, 32), status, scope,
+       b.capability != null ? JSON.stringify(b.capability) : null, String(b.manifestRef || '').slice(0, 255), b.meta != null ? JSON.stringify(b.meta) : null]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:register', 'type=' + type + ' key=' + key + ' status=' + status]);
+    res.json({ ok: true, type, key, status });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 变更资产状态（平台上架/退役等；审计 ext:status）
+app.patch('/api/extensions/:type/:key/status', requireAuth, async (req, res) => {
+  try {
+    const type = req.params.type, key = req.params.key;
+    const status = String((req.body || {}).status || '').trim();
+    if (!['dev', 'test', 'published', 'retired'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 dev|test|published|retired' });
+    const r = await db.query('UPDATE extensions SET status=?, updated_at=NOW() WHERE asset_type=? AND akey=?', [status, type, key]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '资产不存在' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:status', 'type=' + type + ' key=' + key + ' status=' + status]);
+    res.json({ ok: true, type, key, status });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 单资产详情（含装载壳与需求列表）
+app.get('/api/extensions/:type/:key', requireAuth, async (req, res) => {
+  try {
+    const { type, key } = req.params;
+    const [e] = await db.query('SELECT * FROM extensions WHERE asset_type=? AND akey=?', [type, key]);
+    if (!e) return res.status(404).json({ ok: false, message: '资产不存在' });
+    const loaded = await db.query('SELECT shell_id, asset_type, asset_key, enabled_at FROM shell_extensions WHERE asset_type=? AND asset_key=? ORDER BY enabled_at DESC', [type, key]);
+    const demands = await db.query('SELECT id, asset_key, kind, source, content, status, created_at FROM extension_demands WHERE asset_key=? ORDER BY created_at DESC LIMIT 50', [key]);
+    res.json({ ok: true, extension: extToApi({ ...e, loaded_shells: loaded.length, open_demands: demands.filter((d) => d.status === '待审').length }), loadedShells: loaded, demands: demands.map((d) => ({ ...d, kindCn: DEMAND_KIND_CN[d.kind] || d.kind })) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 壳的装载列表（装配向导/壳详情）
+app.get('/api/shells/:key/extensions', requireAuth, async (req, res) => {
+  try {
+    const key = req.params.key;
+    const [sh] = await db.query('SELECT id FROM shells WHERE skey=?', [key]);
+    if (!sh) return res.status(404).json({ ok: false, message: '壳不存在' });
+    const rows = await db.query('SELECT se.asset_type, se.asset_key, se.enabled_at, e.name, e.status FROM shell_extensions se LEFT JOIN extensions e ON e.asset_type=se.asset_type AND e.akey=se.asset_key WHERE se.shell_id=? ORDER BY se.enabled_at DESC', [sh.id]);
+    res.json({ ok: true, shellKey: key, extensions: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 壳装载/卸载（整表替换 = 装配向导 step6 产物；审计 ext:load）
+app.put('/api/shells/:key/extensions', requireAuth, async (req, res) => {
+  try {
+    const key = req.params.key;
+    const [sh] = await db.query('SELECT id FROM shells WHERE skey=?', [key]);
+    if (!sh) return res.status(404).json({ ok: false, message: '壳不存在' });
+    const list = Array.isArray((req.body || {}).extensions) ? req.body.extensions : [];
+    for (const it of list) if (!it || !['plugin', 'mcp', 'app'].includes(it.type) || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(String(it.key || ''))) return res.status(400).json({ ok: false, message: 'extensions 项需含合法 type/key' });
+    await db.query('DELETE FROM shell_extensions WHERE shell_id=?', [sh.id]);
+    for (const it of list) await db.query('INSERT IGNORE INTO shell_extensions (shell_id, asset_type, asset_key) VALUES (?,?,?)', [sh.id, it.type, it.key]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:load', 'shell=' + key + ' count=' + list.length + ' ' + list.map((i) => i.type + ':' + i.key).join(',')]);
+    res.json({ ok: true, shellKey: key, count: list.length });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 需求/升级反馈提交（软信号轻确认/💡按钮/日报；审计 ext:demand）
+app.post('/api/extensions/:key/demand', requireAuth, async (req, res) => {
+  try {
+    const key = String(req.params.key || '').slice(0, 64);
+    const b = req.body || {};
+    const kind = ['hard', 'soft', 'manual'].includes(b.kind) ? b.kind : 'manual';
+    const content = String(b.content || '').trim();
+    if (!content) return res.status(400).json({ ok: false, message: 'content 必填' });
+    const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key || null, kind, String(b.source || '会话').slice(0, 24), content.slice(0, 2000)]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' id=' + r.insertId]);
+    res.json({ ok: true, id: r.insertId, kindCn: DEMAND_KIND_CN[kind] });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 需求列表与审（进化集审批台；审计 ext:demand_status）
+app.get('/api/extensions/demands', requireAuth, async (req, res) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const rows = await db.query('SELECT id, asset_key, kind, source, content, status, created_at FROM extension_demands WHERE (?=\'\' OR status=?) ORDER BY created_at DESC LIMIT 200', [status, status]);
+    res.json({ ok: true, demands: rows.map((d) => ({ ...d, kindCn: DEMAND_KIND_CN[d.kind] || d.kind })) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.patch('/api/extensions/demands/:id/status', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id); const status = String((req.body || {}).status || '').trim();
+    if (!['待审', '采纳', '驳回', '升级'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 待审|采纳|驳回|升级' });
+    const r = await db.query('UPDATE extension_demands SET status=? WHERE id=?', [status, id]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '需求不存在' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand_status', 'id=' + id + ' status=' + status]);
+    res.json({ ok: true, id, status });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 静态前端 ----------
 const webDist = path.join(ROOT, 'web', 'dist');
 app.use(express.static(webDist));

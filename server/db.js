@@ -341,6 +341,51 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     KEY idx_reviews_conv (conversation_id)
   )`,
+  // ---- 2026-09-11 A0 扩展中心数据载体（总方案 §9.3 载体①②④⑧；随扩展中心批使用）----
+  // extensions：可装载业务资产注册表（插件/MCP/应用统一；manifest 详情随批落 manifest_ref）
+  `CREATE TABLE IF NOT EXISTS extensions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    asset_type VARCHAR(12) NOT NULL,   -- plugin|mcp|app
+    akey VARCHAR(64) NOT NULL,         -- 资产 key
+    name VARCHAR(128),
+    version VARCHAR(32),
+    status VARCHAR(12) DEFAULT 'dev',  -- dev|test|published|retired（对应 研发|测试|已上架|退役）
+    scope VARCHAR(12) DEFAULT 'global',-- global|shell
+    capability JSON,
+    manifest_ref VARCHAR(255),
+    meta JSON,
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW(),
+    UNIQUE KEY uk_ext (asset_type, akey)
+  )`,
+  // shell_extensions：壳×资产装载关系（装配向导 step6 产物 / 按壳过滤 / 装载壳数）
+  `CREATE TABLE IF NOT EXISTS shell_extensions (
+    shell_id INT NOT NULL,
+    asset_type VARCHAR(12) NOT NULL,
+    asset_key VARCHAR(64) NOT NULL,
+    enabled_at DATETIME DEFAULT NOW(),
+    PRIMARY KEY (shell_id, asset_type, asset_key)
+  )`,
+  // extension_demands：需求/升级反馈（硬信号|软信号|主动 → 待审|采纳|驳回|升级；月度扩展巡检计数）
+  `CREATE TABLE IF NOT EXISTS extension_demands (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    asset_key VARCHAR(64),
+    kind VARCHAR(12) NOT NULL,   -- hard|soft|manual（硬信号|软信号|主动）
+    source VARCHAR(24),
+    content TEXT NOT NULL,
+    status VARCHAR(10) DEFAULT '待审',  -- 待审|采纳|驳回|升级
+    created_at DATETIME DEFAULT NOW(),
+    KEY idx_demands (status, created_at)
+  )`,
+  // credentials_ref：凭证引用（仅存引用，不落明文——§9 凭证存放规则；随 D10 连接器批使用）
+  `CREATE TABLE IF NOT EXISTS credentials_ref (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    shell_id INT,
+    provider VARCHAR(64) NOT NULL,
+    ref VARCHAR(255) NOT NULL,
+    created_at DATETIME DEFAULT NOW(),
+    UNIQUE KEY uk_cred (shell_id, provider)
+  )`,
 ];
 
 export async function initSchema() {
