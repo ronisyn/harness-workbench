@@ -386,6 +386,21 @@
 - **基线**：本地=origin/main=`5f3ad88`，服务器 880 运行同 HEAD；无残留孤儿。
 - **待用户确认的方向**：① 知识库"该放什么"的范围（见上一条答复的 RW 全局知识库建议）；② 是否引入 885 式**文档型条目**（含 kind 分类/skill/文档并存）作为知识库的 v2 形态；③ 885 的"按项目/实例隔离"是否适用于 880 多壳体系。
 
+## 附录 D 续：防重机制 + 知识库文档型 kind 升级（2026-09-09，用户全确认，`7831f1a`/`9fb9672` 已部署）
+
+- **背景**：Excel 恢复事件复盘后，用户确认执行"防重机制四条 + 知识库文档型升级"。隔离问题（是否按壳/全局）用户明示暂不引入新权限面——**维持三 scope(global/shell/conv)，不给 RW 加锁**。
+- **防重机制（孤儿/覆盖防护，根源=git_commit 只提交不推送 + 部署 hard-reset 不检查未推送提交）**：
+  - **git_commit 工具自动 push 收尾**（server/tools/index.js）：commit 成功后自动 `git push origin <当前分支>`；push 失败**不撤销本地 commit**，仅在返回提示"⚠️ 提交成功但未推送…部署前先解决"。消除"对话里让 RW 开发=只落服务器本地"的盲区。
+  - **scripts/guard-deploy.sh 安全部署**：部署前置检查 ①未推送本地提交（`origin/main..HEAD` 非空→中止提示先处理）②工作树干净 ③bundle 目标可 **fast-forward 才 reset**（分叉→中止人工合并，禁无脑 hard-reset）→ 最后 push。
+  - **scripts/orphan-scan.sh**：未推送提交 / `git fsck --unreachable` / reflog 三路扫描，防"被 reset 剥离但仍有价值"的提交永久丢失。
+- **知识库文档型 kind 升级（只加表达维度、不加隔离面、不改检索语义）**：
+  - DB：knowledge 加 `kind VARCHAR(12) DEFAULT 'fact'`（幂等迁移 + 启动关键列自检）；存量行默认 fact，旧行为不变。
+  - kind 五类：fact 运行事实（默认）/ progress 进化进度 / guide 平台规范 / skill 技能 / lesson 错题本（对齐 885 的文档/技能/错题分类思想）。
+  - 服务端：`/api/knowledge/import` 可带 kind、list 可 `?kind=` 过滤、管理审计带 kind；`kb_add` 工具可带 kind（同 title 判重按 kind 分条）；**F19 注入与 kb_search 检索不按 kind 过滤**（会话可见语义=global+壳+本会话 conv 三 scope 原样）。
+  - 前端 1.7/📚 面板：上传工具条加"分类"选择；列表加 **kind Tab 分组**（全部+五类，带计数，像 885）；条目图标/标签按 kind 着色；空态引导文案。
+- **验收**：单测 50/50、selfcheck 12/12、e2e-final **21/21**（新增 13b1 import kind=skill / 13b2 缺省 fact / 13b3 list?kind 过滤 三连）、fx3 6/6、e2e-recover 5/5；/chat、/console/kb、/console/settings 路由 200。
+- **基线**：本地=origin/main=`9fb9672`，服务器 880 运行同 HEAD；无残留孤儿。
+
 
 
 
