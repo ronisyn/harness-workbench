@@ -374,6 +374,18 @@
 - **验收**：单测 50/50、selfcheck 12/12、build 通过（JS 448.9→444.9KB，净删冗余）；e2e-final **18/18**（孤儿 0）、fx3 6/6 复测全过；/chat、/console/settings、/console/models-plaza 路由 200 且 bundle 含新板块文案。
 - **基线**：本地=origin/main=`f831a41`，服务器 880 运行同 HEAD（bundle 部署 + `git push origin main`）。
 
+## 附录 D 续：Excel 收发能力恢复 + 输入区/后台/知识库 UI 优化（2026-09-09，`cc95ffdb`/`5f3ad88` 已部署）
+
+- **事件与根因**：用户发现昨日会话393 验收的 Excel 收发能力（上传/下载/解析）在今日更新后消失。调查：该能力由会话393 在**服务器本地**提交 `44ea11da`（/api/download 端点 + FileAttach 上传）+ `658e8b68`（Chat FileLink 下载卡片）实现，**只存在于服务器仓库、从未合入共享 origin/main**；今日部署流程"本地 commit → bundle → 服务器 git reset --hard + push origin/main"将其移出历史（对象仍在服务器对象库，git reflog 可证 `44ea11da HEAD@{8}`/`658e8b68 HEAD@{7}`）。
+- **恢复（`cc95ffdb`，零冲突）**：从服务器对象库取回两提交 → 相对服务器当前基线 `e029556a` 干净 cherry-pick（期间另一会话仅改 server/scheduler.js，与恢复文件无交集）→ 服务器 rebuild → push origin/main → 本地 reset 对齐。恢复内容：① server `/api/download/:name` 鉴权下载（requireAuth + basename 防穿越 + res.download）；② `src/FileAttach.jsx` 输入区附件上传（点击/拖拽 → /api/upload → 路径回填输入框，导出 uploadToServer 供整窗复用）；③ Chat 消息内 `/api/download/` 链接 → FileLink 下载卡片（按扩展名着色图标 XLSX 绿/PDF 红/DOC 蓝等，点击 fetch 带 Bearer → blob 下载，裸 `<a>` 会 401）；④ 整窗拖拽上传遮罩。**Excel 解析/生成侧从未丢失**（extract_xlsx 工具、/srv/rw-workspace 下 gen_sku_formatted.js/gen_interrupt_review.js、exceljs 依赖、uploads 原件均在）。
+- **验收**：e2e-recover **5/5 PASS**（upload→download round-trip / 401 / 目录穿越 / 中文文件名 xlsx）；单测 50/50、selfcheck 12/12。
+- **输入区 UI（随恢复合入，用户反馈）**：执行中"发送"不再变"加入队列"文案——一律显示"发送（排队）"由 send() busy 自动入队；附件按钮从"对话左下独立占位"改入**输入区工具条**（文本框内：附件/上传状态提示/停止/发送同一行），整窗拖拽保留。
+- **后台 1.8 设置样式（`5f3ad88`）**：用户反馈"单元格又矮又长"——SettingsPanel 由竖排窄行（标签在上输入在下）改为**两列卡片网格**（rw-set-grid/rw-set-card：标签与输入同行、hint 常显撑高、span2 卡放温度/系统提示词）；MCP/定时任务区沿用卡片分组。
+- **知识库 1.7 取长补短（`5f3ad88`，对照 885 工作台 harness-hello 知识库）**：885 形态=项目文档库（md 文档按主题分类：需求/设计/架构/错题本/skill 清单/验收总结，暖色卡片网格+类型 Tab+范围标签）；880 为 DB 条目库（上传 xlsx/csv/txt/md/json 解析入库）。本轮借鉴视觉与组织：上传区改工具条（归属/壳/文件/表头/导入一行）；条目改图标卡片（扩展名着色字母 XLSX 绿等 + 范围色标 + 正文预览两行截断 + hover 抬升）；空态给引导文案。**不改变存储模型与检索链路**（F19/kb_search 语义不动）。
+- **回归**：全量绿——e2e-final 18/18（孤儿 0）、e2e-recover 5/5、fx3 6/6、selfcheck 12/12、单测 50/50；/chat 与后台各板块路由 200。
+- **基线**：本地=origin/main=`5f3ad88`，服务器 880 运行同 HEAD；无残留孤儿。
+- **待用户确认的方向**：① 知识库"该放什么"的范围（见上一条答复的 RW 全局知识库建议）；② 是否引入 885 式**文档型条目**（含 kind 分类/skill/文档并存）作为知识库的 v2 形态；③ 885 的"按项目/实例隔离"是否适用于 880 多壳体系。
+
 
 
 
