@@ -1528,6 +1528,24 @@ app.post('/api/extensions', requireAuth, async (req, res) => {
     res.json({ ok: true, type, key, status });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
+// 需求列表与审（进化集审批台；审计 ext:demand_status）——须先于 /:type/:key/status 匹配（路由顺序）
+app.get('/api/extensions/demands', requireAuth, async (req, res) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const rows = await db.query('SELECT id, asset_key, kind, source, content, status, created_at FROM extension_demands WHERE (?=\'\' OR status=?) ORDER BY created_at DESC LIMIT 200', [status, status]);
+    res.json({ ok: true, demands: rows.map((d) => ({ ...d, kindCn: DEMAND_KIND_CN[d.kind] || d.kind })) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.patch('/api/extensions/demands/:id/status', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id); const status = String((req.body || {}).status || '').trim();
+    if (!['待审', '采纳', '驳回', '升级'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 待审|采纳|驳回|升级' });
+    const r = await db.query('UPDATE extension_demands SET status=? WHERE id=?', [status, id]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '需求不存在' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand_status', 'id=' + id + ' status=' + status]);
+    res.json({ ok: true, id, status });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
 // 变更资产状态（平台上架/退役等；审计 ext:status）
 app.patch('/api/extensions/:type/:key/status', requireAuth, async (req, res) => {
   try {
@@ -1586,24 +1604,6 @@ app.post('/api/extensions/:key/demand', requireAuth, async (req, res) => {
     const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key || null, kind, String(b.source || '会话').slice(0, 24), content.slice(0, 2000)]);
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' id=' + r.insertId]);
     res.json({ ok: true, id: r.insertId, kindCn: DEMAND_KIND_CN[kind] });
-  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
-});
-// 需求列表与审（进化集审批台；审计 ext:demand_status）
-app.get('/api/extensions/demands', requireAuth, async (req, res) => {
-  try {
-    const status = String(req.query.status || '').trim();
-    const rows = await db.query('SELECT id, asset_key, kind, source, content, status, created_at FROM extension_demands WHERE (?=\'\' OR status=?) ORDER BY created_at DESC LIMIT 200', [status, status]);
-    res.json({ ok: true, demands: rows.map((d) => ({ ...d, kindCn: DEMAND_KIND_CN[d.kind] || d.kind })) });
-  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
-});
-app.patch('/api/extensions/demands/:id/status', requireAuth, async (req, res) => {
-  try {
-    const id = Number(req.params.id); const status = String((req.body || {}).status || '').trim();
-    if (!['待审', '采纳', '驳回', '升级'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 待审|采纳|驳回|升级' });
-    const r = await db.query('UPDATE extension_demands SET status=? WHERE id=?', [status, id]);
-    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '需求不存在' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand_status', 'id=' + id + ' status=' + status]);
-    res.json({ ok: true, id, status });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
