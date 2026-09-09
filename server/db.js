@@ -423,6 +423,9 @@ export async function initSchema() {
     // 2026-09-09 知识库文档型升级：kind 分类（fact=运行事实[默认]/progress=进化进度/guide=平台规范/skill=技能/lesson=错题本）
     // 仅增加表达维度，不改旧行语义（存量默认 fact）；scope 三档(global/shell/conv)不变，不新增隔离面
     "ALTER TABLE knowledge ADD COLUMN kind VARCHAR(12) DEFAULT 'fact'",
+    // A6 知识治理（§7.3 条目结构化字段）：状态 active|superseded|obsolete + 关联组件/版本（superseded/obsolete 注入降权或仅历史）
+    "ALTER TABLE knowledge ADD COLUMN status VARCHAR(12) DEFAULT 'active'",
+    "ALTER TABLE knowledge ADD COLUMN related_component VARCHAR(120)",
     // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
     'DROP TABLE IF EXISTS capabilities',
   ];

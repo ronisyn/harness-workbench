@@ -14,6 +14,7 @@ import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
+import { kbVisibleWhere } from '../knowledge.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
@@ -630,29 +631,31 @@ export const TOOLS = [
           return { saved: false, conflict: true, id: exist[0].id, scope, kind, title,
             reason: '同名条目已存在且新旧内容差异显著（相似度 ' + jac.toFixed(2) + ' < 0.35），已拒绝覆盖以防误冲高价值旧记忆。请确认：若确为同主题更新请在调用中加 overwrite:true 覆盖；否则请改用不同 title 新增。现有内容片段：' + oldB.slice(0, 300) + (oldB.length > 300 ? '…' : '') };
         }
-        await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
+        await db.query('UPDATE knowledge SET body=?, status="active", created_at=NOW() WHERE id=?', [body, exist[0].id]); // A6：覆盖视为最新当前事实
         return { saved: true, id: exist[0].id, updated: true, scope, kind, title };
       }
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body) VALUES (?,?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, kind, title, body]);
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, kind, title, body, 'active']);
       return { saved: true, id: r.insertId, updated: false, scope, kind, title };
     } },
-  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
+  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
     params: { q: { type: 'string', required: true, desc: '关键词' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) return { items: [] };
-      // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义
+      // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义（统一出口 kbVisibleWhere，§9.3④ A6 生产化）
       const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
+      const v = kbVisibleWhere({ accountId: ctx.accountId, shellId, conversationId: ctx.conversationId || null });
       const like = '%' + String(a.q).split(/\s+/).filter(Boolean).join('%') + '%';
-      const rows = await db.query('SELECT id, scope, title, body, created_at FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?)) AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8',
-        [ctx.accountId, shellId, ctx.conversationId || -1, like, like]);
+      const rows = await db.query(`SELECT id, scope, title, body, created_at FROM knowledge WHERE ${v.where} AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8`,
+        [...v.params, like, like]);
       return { items: rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title, body: String(r.body || '').slice(0, 1200), createdAt: r.created_at })) };
     } },
-  { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id）', permission: 'write',
+  { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）', permission: 'write',
     params: { id: { type: 'number', required: true } },
     run: async (a, ctx) => {
-      // ④ 可见范围删除保护：仅能删自己账号且当前会话可见范围的条目（防误删他壳/他会话私有记忆）
+      // ④ 可见范围删除保护：仅能删自己账号且当前会话可见范围的条目（防误删他壳/他会话私有记忆；统一出口 kbVisibleWhere A6 生产化）
       const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
-      const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?))', [a.id, ctx.accountId, shellId, ctx.conversationId || -1]);
+      const v = kbVisibleWhere({ accountId: ctx.accountId, shellId, conversationId: ctx.conversationId || null, includeConv: true });
+      const r = await db.query(`DELETE FROM knowledge WHERE id=? AND ${v.where}`, [a.id, ...v.params]);
       return { deleted: r.affectedRows > 0 };
     } },
 

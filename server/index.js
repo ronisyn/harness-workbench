@@ -19,6 +19,7 @@ import { runGoldenChecks, loadGoldenItems } from './canary.js';
 import { SHELL_TEMPLATES } from './shelltemplates.js';
 import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skillNameOk } from './skillsmgr.js';
 import { parseKnowledgeUpload } from './knowledge.js';
+import { kbVisibleWhere } from './knowledge.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
@@ -670,10 +671,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   } catch { /* 技能目录不可用时静默跳过 */ }
   // F19 知识注入（④：global 全部 + shell 仅本会话所属壳私有 + conv 本会话；§4 壳私有+全局共享）：
   // 会话可见知识（前 5 条带 300 字正文摘要；其余仅标题），主题相关可用 kb_search 取全
+  // A6：统一出口 kbVisibleWhere（§9.3④），会话注入仅 active（superseded/obsolete=仅历史不注入）
   try {
-    // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义
     const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
-    const kb = await db.query('SELECT id, scope, title, body FROM knowledge WHERE account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?)) ORDER BY id DESC LIMIT 12', [req.user.id, kbShellId, conversationId]);
+    const v = kbVisibleWhere({ accountId: req.user.id, shellId: kbShellId, conversationId });
+    const kb = await db.query(`SELECT id, scope, title, body FROM knowledge WHERE ${v.where} ORDER BY id DESC LIMIT 12`, v.params);
     if (kb.length) {
       const lines = kb.map((k, i) => {
         const tag = k.scope === 'global' ? '全局' : k.scope === 'shell' ? '壳私有' : '会话';
@@ -1515,7 +1517,7 @@ app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
 });
 
 // ---------- ④ 知识库管理 API（§6.3/§8：管理视图按账号展示；会话可见语义由 F19/kb_* 各自生效） ----------
-// 列表：GET /api/knowledge?scope=global|shell|conv[&kind=fact|progress|guide|skill|lesson][&shell_id=&q=]；scope=空=全部（管理视图）
+// 列表：GET /api/knowledge?scope=global|shell|conv[&kind=fact|progress|guide|skill|lesson][&status=active|superseded|obsolete][&shell_id=&q=]；scope=空=全部（管理视图）
 app.get('/api/knowledge', requireAuth, async (req, res) => {
   try {
     const conds = ['k.account_id=?'];
@@ -1526,12 +1528,34 @@ app.get('/api/knowledge', requireAuth, async (req, res) => {
     // 2026-09-09 文档型升级：kind 过滤（管理 Tab 用；缺省=全部，不改变默认查询语义）
     const kind = String(req.query.kind || '');
     if (kind && /^(fact|progress|guide|skill|lesson)$/.test(kind)) { conds.push('k.kind=?'); params.push(kind); }
+    // A6 条目状态过滤（治理支撑 §7.3）：active|superseded|obsolete
+    const status = String(req.query.status || '');
+    if (['active', 'superseded', 'obsolete'].includes(status)) { conds.push('k.status=?'); params.push(status); }
     if (req.query.q) { const like = '%' + String(req.query.q).trim() + '%'; conds.push('(k.title LIKE ? OR k.body LIKE ?)'); params.push(like, like); }
     const rows = await db.query(
-      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
+      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
        FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
        WHERE ${conds.join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
     res.json({ ok: true, knowledge: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// A6 条目状态/关联组件修订（巡检采纳/人工治理；审计 knowledge:status）
+app.patch('/api/knowledge/:id', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id) || 0;
+    const set = [], params = [];
+    const { status, relatedComponent } = req.body || {};
+    if (status !== undefined) {
+      if (!['active', 'superseded', 'obsolete'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 active|superseded|obsolete' });
+      set.push('status=?'); params.push(status);
+    }
+    if (relatedComponent !== undefined) { set.push('related_component=?'); params.push(String(relatedComponent).slice(0, 120) || null); }
+    if (!set.length) return res.json({ ok: true });
+    params.push(id, req.user.id);
+    const r = await db.query(`UPDATE knowledge SET ${set.join(',')} WHERE id=? AND account_id=?`, params);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '条目不存在或无权修改' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:status', 'id=' + id + (status ? ' status=' + status : '')]);
+    res.json({ ok: true, id });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 // 上传导入：POST /api/knowledge/import { name, data(base64), scope: global|shell|conv, shellKey?, conversationId?, kind? }
@@ -1563,8 +1587,8 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
     for (const r of rows) {
       const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (shell_id<=>?) AND (conversation_id<=>?) AND kind=? AND title=? ORDER BY id DESC LIMIT 1',
         [req.user.id, sc, shellId, convId, kind, r.title]);
-      if (exist.length) { await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
-      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body) VALUES (?,?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, kind, r.title, r.body]); inserted++; }
+      if (exist.length) { await db.query('UPDATE knowledge SET body=?, status="active", created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
+      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, kind, r.title, r.body, 'active']); inserted++; }
     }
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:import', 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' kind=' + kind + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated]);
     res.json({ ok: true, scope: sc, shellKey: shellKey || null, kind, inserted, updated, total: rows.length });
@@ -2015,6 +2039,29 @@ async function main() {
   scheduleMarketRefresh();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
+  // A6 知识库月度巡检任务种子（§7.3 治理机制：由 RW 每月巡检冗余/重复/冲突/缺陷/过时 → 报告+修订建议 → 进化集审批后清理）
+  // 幂等：按 admin 账号 + 固定 name 已存在则跳过；cron 每月 1 日 05:30（周一制内 cron 日字段独立）
+  try {
+    const adm = await db.query("SELECT id FROM accounts WHERE username=? AND role='admin' LIMIT 1", [config.admin.user]);
+    if (adm.length) {
+      const dup = await db.query('SELECT id FROM scheduled_tasks WHERE account_id=? AND name=?', [adm[0].id, '知识库月度巡检']);
+      if (!dup.length) {
+        const { cronToNext } = await import('./scheduler.js');
+        const next = cronToNext('30 5 1 * *') || new Date(Date.now() + 3600 * 1000);
+        const KB_PATROL_PROMPT = [
+          '你是平台知识库巡检员。目标：本月知识库治理巡检（不做代码改动）。',
+          '步骤：1) 用 db_query 读取 knowledge 全部条目（title/scope/kind/status/created_at），必要时读 body 前 500 字；',
+          '2) 检查五类问题并列出证据：冗余（同主题多条目可合并）、重复（同 title/同义内容）、冲突（新旧结论矛盾，注意 status 标注）、缺陷（缺上下文/表述不清）、过时（关联组件已升级/规则已变；判断时以 git log 与当前代码为准，勿凭记忆）；',
+          '3) 对每类问题给修订建议：删除条目 id / 合并目标 / 将过时条目标 status=superseded 或 obsolete（并建议 active 替代条目）/ 更新内容（不自行改库，给出建议文案）；',
+          '4) 输出为结构化巡检报告：问题清单（类型 | 条目 id/title | 建议动作 | 理由），并总结健康度。',
+          '注意：巡检只读+建议，不执行任何 DB 写操作；最终修订需经进化集审批台批准后由平台执行。',
+        ].join('\n');
+        await db.query('INSERT INTO scheduled_tasks (account_id, name, cron, prompt, provider, model, permission, next_run, enabled) VALUES (?,?,?,?,?,?,?,?,1)',
+          [adm[0].id, '知识库月度巡检', '30 5 1 * *', KB_PATROL_PROMPT, 'deepseek', 'deepseek-v4-flash', 'read', next]);
+        console.log('[kb-patrol] 已创建月度知识库巡检任务（每月 1 日 05:30）');
+      }
+    }
+  } catch (e) { console.error('[kb-patrol] 任务种子失败(可稍后手动在任务页创建):', e.message); }
   // 任务契约驱动器（外部驱动：无人值守责任循环）
   try { startDriver(); } catch (e) { console.error('[driver] 启动失败:', e.message); }
   // P11 MCP client（2026-09 批5）：按 settings mcp_servers 连接外部 MCP server（异步不阻塞启动）

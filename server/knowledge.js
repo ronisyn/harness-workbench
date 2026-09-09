@@ -3,10 +3,11 @@
 // 会话可见范围 = 全局 + 本会话所属壳私有 + 本会话私有；默认"壳私有 + 全局共享"（§4）。
 // 上传链：xlsx 按行结构化优先（首列=title、整行=body，可带表头）；txt/md 按空行分段；csv 经 xlsx 行解析。
 
-// 会话可见知识 SELECT 条件（规划统一出口防漏 WHERE——总方案 §9.3④ 登记：现 F19 注入/kb_search/kb_del 各自内联同构 SQL，本函数尚未被生产引用，接线随知识库批）
+// 会话可见知识 SELECT 条件（规划统一出口防漏 WHERE——总方案 §9.3④ 登记；A6 起被 F19 注入/kb_search/kb_del 生产引用）
 // opts.shellId = 会话所属壳 id（可为 null/undefined=无壳会话）；opts.conversationId = 本会话
+// A6 条目治理（§7.3）：运行时注入/检索仅 active（superseded/obsolete=仅历史，管理视图可见可改回）；scopeOnly 管理面可带 status 过滤
 export function kbVisibleWhere(opts = {}) {
-  const { accountId, shellId, conversationId, includeConv = true, scopeOnly } = opts;
+  const { accountId, shellId, conversationId, includeConv = true, scopeOnly, statusOnly } = opts;
   const conds = ['account_id=?'];
   const params = [accountId];
   // scopeOnly：管理面按范围过滤（list）；缺省=会话可见语义（global + 壳 + 本会话）
@@ -21,6 +22,10 @@ export function kbVisibleWhere(opts = {}) {
   params.push(shellId || null);
   if (includeConv) { conds[conds.length - 1] += ' OR (scope="conv" AND conversation_id=?)'; params.push(conversationId || -1); }
   conds[conds.length - 1] += ')';
+  // A6：会话注入/检索=仅当前事实 active；superseded/obsolete 仅作历史（不参与自动注入与检索，防旧条目当"当前事实"）
+  if (!opts.includeHistorical) {
+    conds.push('status="active"');
+  }
   return { where: conds.join(' AND '), params };
 }
 

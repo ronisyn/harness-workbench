@@ -1,6 +1,6 @@
 // src/Knowledge.jsx - ④ 知识库管理面板（R4 去重：上传链+列表为唯一内容体，抽屉/embedded 只是不同外层容器）
 // 上传链：选文件(xlsx/csv/txt/md/json) → base64 → /api/knowledge/import → 服务端解析按行入库；
-// 附带当前账号知识列表（scope/shell 过滤 + 删除）。
+// 附带当前账号知识列表（scope/shell 过滤 + 删除）。A6：条目状态 active/superseded/obsolete（治理支撑 §7.3）。
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from './api.js';
 
@@ -22,6 +22,9 @@ const KIND_STYLE = {
   skill: ['skill', '#7a4fb2'], lesson: ['lesson', '#b02a37'],
 };
 const kindOf = (v) => KIND_STYLE[String(v || 'fact')] || KIND_STYLE.fact;
+// A6 状态标签
+const STATUS_LB = { active: '当前事实', superseded: '已被替代', obsolete: '已过时' };
+const statusTag = (s) => <span className={'rw-kb-tag ' + (s === 'active' ? 'global' : s === 'superseded' ? 'shell' : 'conv')} title="条目状态（A6）：superseded/obsolete 不参与会话注入与检索，仅管理视图可查可改回">{STATUS_LB[s] || s || '当前事实'}</span>;
 
 function useKnowledgeState() {
   const [shells, setShells] = useState([]);
@@ -38,6 +41,7 @@ function useKnowledgeState() {
   const [loaded, setLoaded] = useState(false); // P3-15：加载完成前不把空态当结果
   const [fScope, setFScope] = useState('');
   const [fKind, setFKind] = useState('');           // 列表 kind Tab（''=全部）
+  const [fStatus, setFStatus] = useState('');       // A6 状态过滤（''=全部）
   const [q, setQ] = useState('');
   const fileRef = useRef(null);
 
@@ -51,15 +55,16 @@ function useKnowledgeState() {
   }, [shellKey]);
   const loadList = useCallback(async () => {
     try {
-      // kind 由前端分组过滤（数据≤500 行，避免切 Tab 重新请求闪空/计数错位）；scope/q 走服务端
+      // kind 由前端分组过滤（数据≤500 行，避免切 Tab 重新请求闪空/计数错位）；scope/q/status 走服务端
       const p = {};
       if (fScope) p.scope = fScope;
+      if (fStatus) p.status = fStatus;
       if (q.trim()) p.q = q.trim();
       const d = await api.knowledgeList(p);
       setRows(d.knowledge || []);
     } catch (e) { setErr(e.message); }
     finally { setLoaded(true); }
-  }, [fScope, q]);
+  }, [fScope, fStatus, q]);
   useEffect(() => { loadShells(); }, [loadShells]);
   useEffect(() => { loadList(); }, [loadList]);
 
@@ -92,9 +97,14 @@ function useKnowledgeState() {
     try { await api.knowledgeDelete(id); loadList(); }
     catch (e) { setErr(e.message); }
   };
+  // A6 状态治理（active/superseded/obsolete；superseded/obsolete 不再注入检索=仅历史）
+  const setStatus = async (r, status) => {
+    try { await api.knowledgePatch(r.id, { status }); loadList(); }
+    catch (e) { setErr(e.message); }
+  };
   return {
     shells, scope, setScope, shellKey, setShellKey, upKind, setUpKind, fileName, fileData, hasHeader, setHasHeader,
-    busy, msg, err, rows, loaded, fScope, setFScope, fKind, setFKind, q, setQ, fileRef, pickFile, doImport, delRow,
+    busy, msg, err, rows, loaded, fScope, setFScope, fKind, setFKind, fStatus, setFStatus, q, setQ, fileRef, pickFile, doImport, delRow, setStatus,
   };
 }
 
@@ -156,6 +166,12 @@ function KbBody() {
           <option value="shell">壳私有</option>
           <option value="conv">会话私有</option>
         </select>
+        <select className="rw-select" value={s.fStatus} onChange={(e) => s.setFStatus(e.target.value)} title="条目状态过滤（A6）">
+          <option value="">全部状态</option>
+          <option value="active">当前事实</option>
+          <option value="superseded">已被替代</option>
+          <option value="obsolete">已过时</option>
+        </select>
         <input className="rw-input" placeholder="关键词过滤（回车查询）…" value={s.q}
           onChange={(e) => s.setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') s.loadList(); }} />
         <button className="rw-btn" onClick={s.loadList}>查询</button>
@@ -174,10 +190,19 @@ function KbBody() {
                 <div className="rw-kb-item-head">
                   <span className="rw-kb-kindtag" style={{ background: kk[1] + '1f', color: kk[1] }}>{kk[0]}</span>
                   <span className={'rw-kb-tag ' + (r.scope === 'global' ? 'global' : r.scope === 'shell' ? 'shell' : 'conv')}>{scopeLb}</span>
+                  {statusTag(r.status)}
                   <b title={r.title}>{r.title}</b>
                   <button className="rw-conv-del" title="删除" onClick={() => s.delRow(r.id)}>✕</button>
                 </div>
                 {r.body_preview && <div className="rw-kb-body">{r.body_preview}</div>}
+                {r.status !== 'active' && (
+                  <div className="rw-console-toolbar" style={{ marginTop: 4 }}>
+                    <span className="rw-dash-muted" style={{ fontSize: 11 }}>{r.status === 'superseded' ? '已被新条目替代（不再注入检索）' : '已过时（仅作历史）'}</span>
+                    <button className="rw-btn" onClick={() => s.setStatus(r, 'active')}>标回当前事实</button>
+                    {r.status !== 'superseded' && <button className="rw-btn" onClick={() => s.setStatus(r, 'superseded')}>标为已被替代</button>}
+                    {r.status === 'active' && <button className="rw-btn" onClick={() => s.setStatus(r, 'obsolete')}>标为过时</button>}
+                  </div>
+                )}
               </div>
             </div>
           );

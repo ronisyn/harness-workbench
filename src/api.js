@@ -93,6 +93,7 @@ export const api = {
   knowledgeList: (params) => request('/api/knowledge?' + new URLSearchParams(params || {}).toString()),
   knowledgeImport: (body) => request('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
   knowledgeDelete: (id) => request('/api/knowledge/' + id, { method: 'DELETE' }),
+  knowledgePatch: (id, patch) => request('/api/knowledge/' + id, { method: 'PATCH', body: JSON.stringify(patch) }),
   // M2/A 系列统一后台（console 各板块 API）
   modelToggle: (id, enabled) => request('/api/models/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   providerTest: (baseUrl, apiKey) => request('/api/providers/test', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey }) }),
