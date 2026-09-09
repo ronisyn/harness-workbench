@@ -51,7 +51,7 @@ export default function AgentWizard({ initial, onClose, onDone }) {
   useEffect(() => {
     if (initial) { setPack(initial); }
     else { setPack(JSON.parse(JSON.stringify(packBase))); }
-    api.templates && fetch('/api/shell-templates').then((r) => r.json()).then((d) => setTpls(d.templates || [])).catch(() => {});
+    api.shellTemplates().then((d) => setTpls(d.templates || [])).catch(() => {});
     api.getToolset().then((d) => setTools(d.tools || [])).catch(() => {});
     api.skillsList().then((d) => setSkills(d.skills || [])).catch(() => {});
     api.extensions().then((d) => setExts(d.extensions || [])).catch(() => {});

@@ -63,6 +63,7 @@ export const api = {
   stopChat: (conversationId) => request('/api/chat/stop', { method: 'POST', body: JSON.stringify({ conversationId }) }),
   // B1 壳 + ④ 知识库
   shells: () => request('/api/shells'),
+  shellTemplates: () => request('/api/shell-templates'),
   shellGet: (key) => request('/api/shells/' + encodeURIComponent(key)),
   shellExport: (key) => request('/api/shells/' + encodeURIComponent(key) + '/export'),
   shellImport: (pack) => request('/api/shells', { method: 'POST', body: JSON.stringify({ pack }) }),
