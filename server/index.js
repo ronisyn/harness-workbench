@@ -16,6 +16,7 @@ import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
 import { runGoldenChecks, loadGoldenItems } from './canary.js';
+import { SHELL_TEMPLATES } from './shelltemplates.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
@@ -1338,6 +1339,10 @@ app.post('/api/contracts/:id/answer', requireAuth, async (req, res) => {
 });
 
 // ---------- B1 壳管理 API ----------
+// §8.9 装配向导 step0 壳模板（内置预填列表）
+app.get('/api/shell-templates', requireAuth, async (req, res) => {
+  res.json({ ok: true, templates: SHELL_TEMPLATES });
+});
 app.get('/api/shells', requireAuth, async (req, res) => {
   try { res.json({ ok: true, shells: await listShells() }); }
   catch (e) { res.status(500).json({ ok: false, message: e.message }); }
@@ -1375,8 +1380,7 @@ app.delete('/api/shells/:key', requireAuth, async (req, res) => {
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
-// ---------- A2 金标 canary（§7.4 自审登记②/§10 门禁）：行为级"变更即跑"回环载体 ----------
-// 运行壳金标断言（eval.goldenSetRef 指向 <ROOT>/eval/<ref>.json/.jsonl；无金标=skip，不报错）
+// ---------- A2 金标 canary（§7.4 自审登记②/§10 门禁）：行为级"变更即跑"回环载体 ----------// 运行壳金标断言（eval.goldenSetRef 指向 <ROOT>/eval/<ref>.json/.jsonl；无金标=skip，不报错）
 // shell 快照：行（presetBase/intent_rules）+ shell_tools 三态（forceOn/Off）
 async function runShellCanaryAndAudit(shellKey, accountId, { auto = false } = {}) {
   try {

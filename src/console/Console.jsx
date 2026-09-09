@@ -6,7 +6,7 @@ import ModelObsBoard from './ModelObs.jsx';
 import KbBoard from './KbBoard.jsx';
 import SettingsBoard from './SettingsBoard.jsx';
 import ModelPlazaBoard from './ModelPlaza.jsx';
-import ShellDevBoard from './ShellDev.jsx';
+import AgentBoard from './AgentBoard.jsx';
 import CapsBoard from './CapsBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
 import AppsBoard from './AppsBoard.jsx';
@@ -22,9 +22,10 @@ export const BOARDS = {
   'agent-caps': { group: 'Agent', label: 'Agent 能力', render: () => <CapsBoard /> },
   'agent-evo': { group: 'Agent', label: 'Agent 进化', render: () => <EvoBoard /> },
   // —— 应用市场 ——
-  'agent-dev': { group: '应用市场', label: '壳开发', render: () => <ShellDevBoard /> },
+  // A2：壳开发 1.3 升级为 Agent（壳）页 = 壳列表/详情/新建 + 装配向导 + 任务模板库子区（§8.9；URL code 不变兼容旧链）
+  'agent-dev': { group: '应用市场', label: 'Agent（壳）', render: () => <AgentBoard /> },
   'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
-  'plugins': { group: '应用市场', label: '插件', render: () => <div className="rw-console-ph"><b>插件体系（建设中）</b><div>按壳装卸的独立能力包：在通用环境研发验证 → 壳勾选装配 → 删除即整体卸载（A 壳不要就不勾，B 壳要就勾）。Excel/PDF/图片/视频等插件将在此上架；当前为占位，详见讨论方案。</div></div> },
+  'plugins': { group: '应用市场', label: '插件', render: () => <div className="rw-console-ph"><b>插件体系（建设中）</b><div>按壳装卸的独立能力包：在通用环境研发验证 → 壳勾选装配 → 删除即整体卸载（A 壳不要就不勾，B 壳要就勾）。Excel/PDF/图片/视频等插件将在此上架；当前为占位，详见讨论方案。A3 扩展中心落地后并入统一资产体系。</div></div> },
 };
 const GROUPS = ['平台', 'Agent', '应用市场'];
 

@@ -53,13 +53,12 @@ async function shellRules(shellId) {
   } catch { return null; }
 }
 
-// 按壳 schema 某工具是否暴露（与 /api/chat 同口径：会话 preset 缺省 all ∩ 壳 presetBase；forceOn 越级 / forceOff 移除；豁免恒在）
+// 按壳 schema 某工具是否暴露（与 /api/chat 同口径：会话 preset 缺省 all ∩ 壳 presetBase；forceOn 越级 / forceOff 移除；豁免仅绕过启用集、仍受档位约束）
 export function shellToolExposed(shell, toolName) {
   const base = shell && shell.presetBase || 'standard';
   const on = shell && Array.isArray(shell.forceOn) ? new Set(shell.forceOn) : new Set();
   const off = shell && Array.isArray(shell.forceOff) ? new Set(shell.forceOff) : new Set();
-  if (PLATFORM_EXEMPT_SET.has(toolName)) return true;
-  if (off.has(toolName)) return false;
+  if (off.has(toolName) && !PLATFORM_EXEMPT_SET.has(toolName)) return false;
   const defs = toolDefs('all', null, { presetBase: base, forceOn: on, forceOff: off, mcpAllow: null });
   return defs.some((d) => d.function && d.function.name === toolName);
 }

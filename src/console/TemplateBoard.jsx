@@ -1,5 +1,5 @@
-// src/console/TemplateBoard.jsx - 1.6 Agent 广场（应用/模板库；§6.5 ⑥：模板=应用的半成品）
-// 功能：模板浏览（应用形态说明卡）+ 详情（档案/技能/验收/guide）+ 应用至壳 + 开任务指令。
+// src/console/TemplateBoard.jsx - ⑥ 任务模板库（§7.5：模板=档案+技能+验收+说明；Agent 页子区，定案 A）
+// 功能：模板浏览 + 详情 + 应用至壳 + 开任务指令 + A2 导出/导入/克隆（模板=文件权威随 git，写盘自动 git 提交推送）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 
@@ -12,6 +12,8 @@ export default function TemplateBoard() {
   const [prompt, setPrompt] = useState('');
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+  const [tplEditor, setTplEditor] = useState(false); // 导入表单（新建/覆盖同 key）
+  const [tplJson, setTplJson] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -44,14 +46,54 @@ export default function TemplateBoard() {
     catch (e) { setErr(e.message); }
   };
 
+  // A2 模板库管理：导出（下载 tpl.json）
+  const doExport = async (key) => {
+    try {
+      const text = await api.templateExport(key);
+      const blob = new Blob([text], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = key + '.tpl.json';
+      a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+      setMsg('已导出 ' + key + '.tpl.json');
+    } catch (e) { setErr('导出失败：' + e.message); }
+  };
+  // 克隆（改 key）
+  const doClone = async (key) => {
+    const nk = prompt('新模板 key（小写字母数字-）', key + '-copy');
+    if (!nk) return;
+    try { const r = await api.templateClone(key, nk, undefined); setMsg('已克隆 ' + key + ' → ' + r.key + (r.gitSynced ? '（git 已推送）' : '（git 无变更）')); load(); }
+    catch (e) { setErr('克隆失败：' + e.message); }
+  };
+  // 导入（粘贴/改写 JSON；同 key=覆盖更新；写盘后 git 自动提交推送）
+  const doImport = async () => {
+    try {
+      const tpl = JSON.parse(tplJson);
+      const r = await api.templateImport(tpl);
+      setMsg('已导入模板 ' + r.key + '（' + (r.mode === 'updated' ? '覆盖更新' : '新建') + '）' + (r.gitSynced ? '；git 已同步 origin' : ''));
+      setTplEditor(false); setTplJson(''); setCur(null); load();
+    } catch (e) { setErr('导入失败：' + e.message); }
+  };
+
   return (
     <div className="rw-cap-group">
-      <div className="rw-cap-gtitle">任务模板库（⑥ · 模板=应用的半成品；随仓库 git 管理 §6.5）</div>
+      <div className="rw-cap-gtitle">任务模板库（⑥ · 模板=应用的半成品；Agent 页子区 §7.5 定案 A）</div>
       <div className="rw-dash-muted" style={{ marginBottom: 10 }}>
         D9 命名：壳=容器 / 应用=业务单元 / 档案+技能+验收=应用组成件。v1 承载=模板包（taskProfile+技能+验收+说明）；可执行应用形态随后续。
       </div>
       {err && <div className="rw-kb-err">{err}</div>}
       {msg && <div className="rw-kb-msg">{msg}</div>}
+      <div className="rw-console-toolbar" style={{ marginBottom: 8 }}>
+        <button className="rw-btn" onClick={() => { setTplEditor((v) => !v); setErr(''); setMsg(''); }}>{tplEditor ? '收起导入' : '＋ 导入/新建模板'}</button>
+        {cur && <button className="rw-btn" onClick={() => doClone(cur.key)}>克隆该模板</button>}
+        <span className="rw-dash-muted">（导入/克隆写 templates/&lt;key&gt;/tpl.json 并自动 git 提交推送，保持仓库同步）</span>
+      </div>
+      {tplEditor && (
+        <div className="rw-provider" style={{ marginBottom: 10 }}>
+          <div className="rw-cap-gtitle">导入模板（tpl.json 结构；同 key=覆盖更新）</div>
+          <textarea className="rw-input" rows="10" style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }} value={tplJson} onChange={(e) => setTplJson(e.target.value)} placeholder='{"templateVersion":1,"key":"my-tpl","name":"…","description":"…","targetShell":"…","taskProfile":{…},"skills":[…],"acceptanceTemplate":{…},"guide":"…"}' />
+          <button className="rw-btn pri" onClick={doImport} disabled={!tplJson.trim()}>导入</button>
+        </div>
+      )}
       <div className="rw-dash-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))' }}>
         {templates.length === 0 && <div className="rw-console-ph"><div>暂无模板（仓库 templates/ 目录为空）</div></div>}
         {templates.map((t) => (
@@ -63,6 +105,10 @@ export default function TemplateBoard() {
               {(t.skills || []).map((s) => <span key={s} className="rw-provider-model">技能: {s}</span>)}
               <span className="rw-provider-model">验收点: {t.checks || 0}</span>
               {t.targetShell && <span className="rw-provider-model">建议壳: {t.targetShell}</span>}
+            </div>
+            <div className="rw-console-toolbar" style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
+              <button className="rw-btn" onClick={() => doExport(t.key)}>导出</button>
+              <button className="rw-btn" onClick={() => doClone(t.key)}>克隆</button>
             </div>
           </div>
         ))}
@@ -105,7 +151,7 @@ export default function TemplateBoard() {
           </div>
         </div>
       )}
-      <div className="rw-console-note">模板包随仓库 git 版本管理（templates/&lt;key&gt;/tpl.json）：新增/修订=仓库提交后部署生效；模板=档案+技能+验收+说明，回流与分发见 §10。可执行应用形态（独立运行/挂壳/共享）=D9 后置。</div>
+      <div className="rw-console-note">模板包随仓库 git 版本管理（templates/&lt;key&gt;/tpl.json）：导入/克隆由平台自动 git 提交推送 origin（导出=纯下载）；git 文件版本管理即备份通道。可执行应用形态（独立运行/挂壳/共享）=后置。</div>
     </div>
   );
 }

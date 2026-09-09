@@ -1,8 +1,7 @@
-// src/console/AppsBoard.jsx - 1.6 Agent 广场（应用，D9）：浏览应用 → 启动（建挂壳会话+预填开场草稿，跳对话页）
-// 模板库（⑥ 半成品）作为应用来源折叠区同页可入。
+// src/console/AppsBoard.jsx - 应用（D9）：浏览应用 → 启动（建挂壳会话+预填开场草稿，跳对话页）
+// 模板库（⑥ 半成品）子区已按 §7.5 定案 A 迁至 Agent（壳）页 —— 本页专注应用启动。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
-import TemplateBoard from './TemplateBoard.jsx';
 
 export default function AppsBoard({ onGoChat }) {
   const [apps, setApps] = useState([]);
@@ -44,8 +43,8 @@ export default function AppsBoard({ onGoChat }) {
 
   return (
     <div className="rw-cap-group">
-      <div className="rw-cap-gtitle">Agent 广场 · 应用（D9：壳=容器 / 应用=业务单元；可一键启动）</div>
-      <div className="rw-dash-muted" style={{ marginBottom: 10 }}>启动=在目标壳下新建会话并预填应用开场（复用现有对话链路，不建第二套会话体系）；无人值守执行（契约 driver 跑到验收）为后续形态。</div>
+      <div className="rw-cap-gtitle">应用（D9：壳=容器 / 应用=业务单元；可一键启动）</div>
+      <div className="rw-dash-muted" style={{ marginBottom: 10 }}>启动=在目标壳下新建会话并预填应用开场（复用现有对话链路，不建第二套会话体系）；无人值守执行（契约 driver 跑到验收）为后续形态。任务模板库（应用半成品）见「Agent（壳）」页子区（§7.5 定案 A）。</div>
       {err && <div className="rw-kb-err">{err}</div>}
       {msg && <div className="rw-kb-msg">{msg}</div>}
       <div className="rw-dash-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))' }}>
@@ -88,11 +87,7 @@ export default function AppsBoard({ onGoChat }) {
           <div className="rw-dash-muted" style={{ marginTop: 6 }}>启动后跳「💬 对话页」：开场草稿已预填输入框，可补充目标后按 Enter 发送即在本会话按应用语境工作。</div>
         </div>
       )}
-      <div className="rw-console-note">应用随仓库 git 管理（apps/&lt;key&gt;/app.json）；与模板库关系：模板=应用半成品（下方「模板库」区可查看/装配档案）；回流见 §10。</div>
-      <details className="rw-provider" style={{ marginTop: 10 }}>
-        <summary className="rw-dash-title" style={{ cursor: 'pointer', display: 'inline-block' }}>模板库（应用半成品 · 档案/技能/验收）▾</summary>
-        <div style={{ marginTop: 10 }}><TemplateBoard /></div>
-      </details>
+      <div className="rw-console-note">应用随仓库 git 管理（apps/&lt;key&gt;/app.json）；应用=壳内点开的成品业务单元，扩展中心（A3）将统一资产化管理。任务模板=应用半成品 →「Agent（壳）」页子区可查看/装配档案。</div>
     </div>
   );
 }
