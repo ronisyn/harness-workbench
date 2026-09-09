@@ -380,7 +380,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
     const defs = ctx.__light
       ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
-      : toolDefs(ctx.preset, ctx.__enabledTools);
+      : toolDefs(ctx.preset, ctx.__enabledTools, ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）
     // P20 每轮流式（2026-09）：stream:true + tools，思考增量经 onThink 实时透出（P21），正文增量经 onContent 实时透出（真流）；
     // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）；流失败 → 同模型一次性兜底一次（保底），再失败如实抛出（②由 index catch 落痕）
     let res = null;

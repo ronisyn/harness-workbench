@@ -15,8 +15,9 @@ import { shellContext, rowToPack } from './shells.js';
 import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
+import { runGoldenChecks, loadGoldenItems } from './canary.js';
 import { parseKnowledgeUpload } from './knowledge.js';
-import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk } from './templates.js';
+import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
 import { startWechatChannel } from './channels/wechat.js';
@@ -143,10 +144,38 @@ app.put('/api/toolset', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
+// 技能库只读列表（Agent 装配向导 step5 勾选 / 技能库页用；文件权威=skills/<key>/SKILL.md，与 skill_load 同根目录）
+function parseSkillFrontMeta(raw) {
+  const meta = {};
+  const m = String(raw).match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (m) {
+    for (const line of m[1].split('\n')) {
+      const i = line.indexOf(':');
+      if (i > 0) meta[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  return meta;
+}
+app.get('/api/skills', requireAuth, async (req, res) => {
+  try {
+    const out = [];
+    if (fs.existsSync(SKILLS_ROOT)) {
+      for (const d of fs.readdirSync(SKILLS_ROOT, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        const p = path.join(SKILLS_ROOT, d.name, 'SKILL.md');
+        if (!fs.existsSync(p)) continue;
+        const meta = parseSkillFrontMeta(fs.readFileSync(p, 'utf8'));
+        out.push({ name: d.name, description: meta.description || '(无简介)', version: meta.version || '1.0.0' });
+      }
+    }
+    res.json({ ok: true, skills: out.sort((a, b) => String(a.name).localeCompare(String(b.name))) });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
   const rows = await db.query(
-    'SELECT id, channel, permission, preset, title, provider, model, project, shell_id, created_at, updated_at FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC', [req.user.id]);
+    'SELECT c.id, c.channel, c.permission, c.preset, c.title, c.provider, c.model, c.project, c.shell_id, s.skey AS shell_key, s.name AS shell_name, c.created_at, c.updated_at FROM conversations c LEFT JOIN shells s ON s.id = c.shell_id WHERE c.account_id=? OR (c.channel != "web" AND c.account_id IS NULL) ORDER BY c.updated_at DESC', [req.user.id]);
   res.json({ ok: true, conversations: rows });
 });
 
@@ -172,7 +201,7 @@ app.post('/api/conversations', requireAuth, async (req, res) => {
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
-  const { title, permission, preset, provider, model, project } = req.body || {};
+  const { title, permission, preset, provider, model, project, shell } = req.body || {};
   const set = [], params = [];
   if (title !== undefined) { set.push('title=?'); params.push(title); }
   if (permission !== undefined) {
@@ -185,10 +214,25 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
   if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
   if (model !== undefined) { set.push('model=?'); params.push(model || null); }
+  // A2 会话挂壳：shell=''/'default'/null → 摘下（NULL=默认壳语义）；否则需为启用中的非 default 壳
+  if (shell !== undefined) {
+    const s = shell === null || shell === undefined || String(shell) === '' || String(shell) === 'default' ? '' : String(shell).trim();
+    let shellId = null;
+    if (s) {
+      const sr = (await db.query('SELECT id FROM shells WHERE skey=? AND status="enabled" AND skey!="default"', [s]))[0];
+      if (!sr) return res.status(400).json({ ok: false, message: '壳不存在或不可挂载（需为启用中的非 default 壳）' });
+      shellId = sr.id;
+    }
+    set.push('shell_id=?'); params.push(shellId);
+  }
   if (!set.length) return res.json({ ok: true });
   params.push(req.params.id, req.user.id);
   const r = await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
   if (!r.affectedRows) return res.status(404).json({ ok: false, message: '会话不存在或无权修改' }); // E：与 DELETE 同口径
+  if (shell !== undefined) {
+    const detail = shell === undefined || shell === '' || shell === 'default' || shell === null ? 'detach' : 'attach=' + String(shell).trim();
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'conv:shell', 'conv=' + req.params.id + ' ' + detail]);
+  }
   res.json({ ok: true });
 });
 
@@ -458,13 +502,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   let shellModelPolicy = null; // 壳默认模型（三级路由第三级；§6.2 壳默认）
   let shellBudgetYuan = null;  // 壳级成本预算上限（§8 叠加生效：壳上限可收紧，不高于全局）
   let shellToolsOn = [], shellToolsOff = [];
+  let shellPresetBase = null;  // A2：壳 tools.presetBase（schema 裁剪：壳会话暴露档=会话 preset ∩ 壳 presetBase）
+  let shellMcpAllow = null;    // A2：按壳 MCP 白名单（serverId 集；null=未显式装载→维持全局 MCP 现状，MCP 资产化随 A3）
   if (convShellId) {
     try {
-      const sr = (await db.query('SELECT skey, persona, domain_text, intent_rules, task_profiles, model_policy FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
+      const sr = (await db.query('SELECT skey, persona, domain_text, intent_rules, task_profiles, model_policy, tools_preset FROM shells WHERE id=? AND status="enabled"', [convShellId]))[0];
       convShellCtx = sr ? shellContext(sr) : null;
       if (sr) {
         if (sr.intent_rules != null) shellIntentRules = sr.intent_rules;
         if (sr.task_profiles != null) shellTaskProfiles = sr.task_profiles;
+        shellPresetBase = ['minimal', 'standard', 'all'].includes(sr.tools_preset) ? sr.tools_preset : null;
         if (sr.model_policy != null) {
           try { const mp = typeof sr.model_policy === 'string' ? JSON.parse(sr.model_policy) : sr.model_policy; shellModelPolicy = mp && typeof mp === 'object' ? mp : null; } catch { shellModelPolicy = null; }
           if (shellModelPolicy) shellBudgetYuan = Number(shellModelPolicy.budgetYuan) > 0 ? Number(shellModelPolicy.budgetYuan) : null;
@@ -472,6 +519,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
       const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
       for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
+      // A2：按壳 MCP 装载（shell_extensions type=mcp → 与已连接 mcp 客户端 id 交集的 serverId 白名单；无行=null 维持全局）
+      if (convShellCtx && convShellCtx.key !== 'default') {
+        try {
+          const { listMcpClients } = await import('./mcp.js');
+          const connIds = new Set((listMcpClients() || []).map((c) => c.id));
+          const rows = await db.query('SELECT asset_key FROM shell_extensions WHERE shell_id=? AND asset_type="mcp"', [convShellId]);
+          const allow = rows.map((r) => r.asset_key).filter((k) => connIds.has(k));
+          if (allow.length) shellMcpAllow = allow; // 壳显式装载了 MCP → 裁剪到装载集
+        } catch { shellMcpAllow = null; }
+      }
     } catch { convShellCtx = null; }
   }
   // B3：任务档案点名（仅"显式点名"，不自动猜；C4 显式模型=绝对锁，本层不覆盖）
@@ -762,10 +819,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         enabledTools = new Set(arr.filter((x) => typeof x === 'string'));
         if (!enabledTools.size) enabledTools = new Set(DEFAULT_TOOLSET);
       } catch { enabledTools = new Set(DEFAULT_TOOLSET); }
+      // A2 按壳 schema 裁剪：force_on 越级并入启用集（钩子按 __enabledTools 拦截，schema 与执行一致）；
+      // force_off 从启用集剔除（execTool 前置拦截仍在，双保险）；平台豁免工具不受影响
+      const shellSchema = (convShellCtx && convShellCtx.key !== 'default') ? { presetBase: shellPresetBase, forceOn: new Set(shellToolsOn), forceOff: new Set(shellToolsOff), mcpAllow: shellMcpAllow } : null;
+      if (enabledTools && shellSchema) {
+        for (const n of shellSchema.forceOn) enabledTools.add(n);
+        for (const n of shellSchema.forceOff) if (!PLATFORM_EXEMPT.includes(n)) enabledTools.delete(n);
+      }
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff };
+      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff, __shellSchema: shellSchema };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
       let teleBase = null;
@@ -1294,12 +1358,12 @@ app.get('/api/shells/:key/export', requireAuth, async (req, res) => {
 app.post('/api/shells', requireAuth, async (req, res) => {
   const { pack } = req.body || {};
   if (!pack) return res.status(400).json({ ok: false, message: 'body.pack 必填' });
-  try { const r = await importShell(pack); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:import', String(r.key)]); res.json({ ok: true, ...r }); }
+  try { const r = await importShell(pack); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:import', String(r.key)]); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.post('/api/shells/:key/clone', requireAuth, async (req, res) => {
   const { newKey, name } = req.body || {};
-  try { const r = await cloneShell(req.params.key, newKey, name); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:clone', req.params.key + '->' + newKey]); res.json({ ok: true, ...r }); }
+  try { const r = await cloneShell(req.params.key, newKey, name); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:clone', req.params.key + '->' + newKey]); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.patch('/api/shells/:key', requireAuth, async (req, res) => {
@@ -1310,6 +1374,44 @@ app.delete('/api/shells/:key', requireAuth, async (req, res) => {
   try { const r = await disableShell(req.params.key); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:disable', req.params.key]); res.json({ ok: r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
+
+// ---------- A2 金标 canary（§7.4 自审登记②/§10 门禁）：行为级"变更即跑"回环载体 ----------
+// 运行壳金标断言（eval.goldenSetRef 指向 <ROOT>/eval/<ref>.json/.jsonl；无金标=skip，不报错）
+// shell 快照：行（presetBase/intent_rules）+ shell_tools 三态（forceOn/Off）
+async function runShellCanaryAndAudit(shellKey, accountId, { auto = false } = {}) {
+  try {
+    const row = await getShellByKey(shellKey);
+    if (!row) return { skipped: true, reason: '壳不存在' };
+    if (!row.eval_ref) return { skipped: true, reason: '未配置 eval.goldenSetRef' };
+    if (!loadGoldenItems(row.eval_ref)) return { skipped: true, ref: row.eval_ref, reason: '金标文件缺失或为空' };
+    const tools = await shellTools(shellKey);
+    const on = [], off = [];
+    for (const t of (tools || [])) { if (t.mode === 'force_on') on.push(t.tool_name); else if (t.mode === 'force_off') off.push(t.tool_name); }
+    const shell = { id: row.id, presetBase: row.tools_preset || 'standard', forceOn: on, forceOff: off };
+    const r = await runGoldenChecks(row.eval_ref, shell);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [accountId, 'canary:run', 'shell=' + shellKey + ' ref=' + row.eval_ref + (r.skipped ? ' skipped(' + (r.reason || '') + ')' : ' passed=' + r.passed + '/' + r.total + (auto ? ' auto' : ''))]);
+    return r;
+  } catch (e) {
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [accountId, 'canary:run', 'shell=' + shellKey + ' error=' + String(e.message).slice(0, 200)]).catch(() => {});
+    return { skipped: true, reason: '运行异常: ' + String(e.message).slice(0, 200) };
+  }
+}
+// 手动跑（装配向导 step8 冒烟/Agent 页卡可点；审计 canary:run）
+app.post('/api/shells/:key/canary', requireAuth, async (req, res) => {
+  try {
+    const r = await runShellCanaryAndAudit(req.params.key, req.user.id);
+    res.json({ ok: true, ...r });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 壳导入/克隆后：若配置了金标集 → 行为级"变更即跑"（装配冒烟自动接金标；异步不阻塞返回）
+async function maybeAutoCanary(key, accountId) {
+  try {
+    const row = await getShellByKey(key);
+    if (row && row.eval_ref && loadGoldenItems(row.eval_ref)) {
+      runShellCanaryAndAudit(key, accountId, { auto: true }).catch(() => {});
+    }
+  } catch { /* 自动 canary 失败不影响主流程 */ }
+}
 
 // ---------- ⑤ 模型观测数据面 API（复测 reviews 读写 + telemetry 视图查询；§8） ----------
 // 复测记录写入：result ∈ pass|bug；bug 必填 bug_reason（§6.4 打回必填原因）
@@ -1473,6 +1575,71 @@ app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
     if (r.error) return res.status(404).json({ ok: false, message: r.error });
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:apply', 'template=' + req.params.key + ' shell=' + shellKey + ' profile=' + frag.key]);
     res.json({ ok: true, shellKey, profile: frag.key, profiles: r.profiles, skills: r.skills });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- A2：任务模板 export/import/clone（§7.5 目标能力：模板=文件权威随 git，导出=下载 tpl.json；导入/克隆=写盘+自动 git 提交推送同步 origin） ----------
+// 模板库 git 同步：模板目录是仓库文件权威；运行时导入/克隆直接写 ROOT/templates 后立即 add+commit+push origin main，
+// 保持"本地=服务器=origin"三端一致（guard-deploy 要求服务器工作树干净、无未推送提交——导入后不推送会在下次部署被拦）。
+async function syncTemplateGit(relPath, msg) {
+  const { execFileSync } = await import('node:child_process');
+  const opts = { cwd: ROOT, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] };
+  execFileSync('git', ['add', relPath], opts);
+  let committed = true;
+  try {
+    execFileSync('git', ['commit', '-m', msg], opts);
+  } catch (e) {
+    const out = String(e && e.stdout || '');
+    if (/nothing to commit|no changes added/.test(out)) committed = false;
+    else throw new Error('git commit 失败: ' + out.slice(0, 200));
+  }
+  if (committed) execFileSync('git', ['push', 'origin', 'main'], opts);
+  return committed;
+}
+
+// 导出（下载完整 tpl.json；只读）
+app.get('/api/templates/:key/export', requireAuth, async (req, res) => {
+  try {
+    const t = getTemplate(req.params.key);
+    if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
+    const content = JSON.stringify(t, null, 2);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:export', req.params.key]);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(t.key)}.tpl.json"`);
+    res.type('application/json');
+    res.send(content);
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 导入（新建/覆盖同 key；写盘后 git 提交推送，保持仓库同步）
+app.post('/api/templates/import', requireAuth, async (req, res) => {
+  try {
+    const t = (req.body || {}).template;
+    if (!t || typeof t !== 'object') return res.status(400).json({ ok: false, message: 'body.template 必填' });
+    const v = validateTemplate(t);
+    if (!v.ok) return res.status(400).json({ ok: false, message: '模板校验失败: ' + v.errors.join('; ') });
+    const existed = fs.existsSync(templateFilePath(t.key));
+    const r = writeTemplateFile(t);
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.errors.join('; ') });
+    const committed = await syncTemplateGit(path.join('templates', t.key), (existed ? 'template:update ' : 'template:import ') + t.key);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, existed ? 'template:update' : 'template:import', t.key + (committed ? ' (git 已推送)' : ' (无变更)')]);
+    res.json({ ok: true, key: t.key, mode: existed ? 'updated' : 'created', gitSynced: committed });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 克隆（源目录整体复制 + 改写 key；写盘后 git 提交推送）
+app.post('/api/templates/:key/clone', requireAuth, async (req, res) => {
+  try {
+    const fromKey = req.params.key;
+    const newKey = String((req.body || {}).newKey || '').trim();
+    const name = String((req.body || {}).name || '').trim();
+    if (!isTplKeyOk(newKey)) return res.status(400).json({ ok: false, message: 'newKey 需为小写字母数字连字符' });
+    if (newKey === fromKey) return res.status(400).json({ ok: false, message: 'newKey 不能与源相同' });
+    const r = cloneTemplate(fromKey, newKey, { name });
+    if (!r.ok) {
+      const code = r.exists ? 409 : 400;
+      return res.status(code).json({ ok: false, message: r.errors ? r.errors.join('; ') : '目标模板已存在' });
+    }
+    const committed = await syncTemplateGit(path.join('templates', newKey), 'template:clone ' + fromKey + '->' + newKey);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:clone', fromKey + '->' + newKey + (committed ? ' (git 已推送)' : '')]);
+    res.json({ ok: true, key: newKey, gitSynced: committed });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 

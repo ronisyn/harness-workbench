@@ -69,6 +69,18 @@ export const api = {
   shellClone: (key, newKey, name) => request('/api/shells/' + encodeURIComponent(key) + '/clone', { method: 'POST', body: JSON.stringify({ newKey, name }) }),
   shellPatch: (key, patch) => request('/api/shells/' + encodeURIComponent(key), { method: 'PATCH', body: JSON.stringify(patch) }),
   shellDisable: (key) => request('/api/shells/' + encodeURIComponent(key), { method: 'DELETE' }),
+  shellCanary: (key) => request('/api/shells/' + encodeURIComponent(key) + '/canary', { method: 'POST', body: JSON.stringify({}) }),
+  // 扩展中心数据（A0 载体；装配向导 step6 与扩展中心页共用）
+  extensions: (params) => request('/api/extensions?' + new URLSearchParams(params || {}).toString()),
+  extensionRegister: (body) => request('/api/extensions', { method: 'POST', body: JSON.stringify(body) }),
+  extensionStatus: (type, key, status) => request('/api/extensions/' + encodeURIComponent(type) + '/' + encodeURIComponent(key) + '/status', { method: 'PATCH', body: JSON.stringify({ status }) }),
+  extensionGet: (type, key) => request('/api/extensions/' + encodeURIComponent(type) + '/' + encodeURIComponent(key)),
+  shellExtensions: (key) => request('/api/shells/' + encodeURIComponent(key) + '/extensions'),
+  setShellExtensions: (key, extensions) => request('/api/shells/' + encodeURIComponent(key) + '/extensions', { method: 'PUT', body: JSON.stringify({ extensions }) }),
+  demands: (params) => request('/api/extensions/demands?' + new URLSearchParams(params || {}).toString()),
+  demandStatus: (id, status) => request('/api/extensions/demands/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) }),
+  demandCreate: (key, body) => request('/api/extensions/' + encodeURIComponent(key) + '/demand', { method: 'POST', body: JSON.stringify(body) }),
+  skillsList: () => request('/api/skills'),
   knowledgeList: (params) => request('/api/knowledge?' + new URLSearchParams(params || {}).toString()),
   knowledgeImport: (body) => request('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
   knowledgeDelete: (id) => request('/api/knowledge/' + id, { method: 'DELETE' }),
@@ -82,6 +94,9 @@ export const api = {
   // ⑥ 任务模板库
   templates: () => request('/api/templates'),
   templateGet: (key) => request('/api/templates/' + encodeURIComponent(key)),
+  templateExport: async (key) => { const res = await fetch('/api/templates/' + encodeURIComponent(key) + '/export', { headers: { Authorization: 'Bearer ' + getToken() } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.message || '导出失败'); } return res.text(); },
+  templateImport: (template) => request('/api/templates/import', { method: 'POST', body: JSON.stringify({ template }) }),
+  templateClone: (key, newKey, name) => request('/api/templates/' + encodeURIComponent(key) + '/clone', { method: 'POST', body: JSON.stringify({ newKey, name }) }),
   templatePrompt: (key, goal) => request('/api/templates/' + encodeURIComponent(key) + '/prompt', { method: 'POST', body: JSON.stringify({ goal }) }),
   templateApply: (key, shellKey) => request('/api/templates/' + encodeURIComponent(key) + '/apply', { method: 'POST', body: JSON.stringify({ shellKey }) }),
   // D9 应用形态

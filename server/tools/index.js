@@ -988,12 +988,25 @@ export function syncMcpExtras(clients) {
   return MCP_EXTRA.length;
 }
 
-export function toolDefs(expose = 'all', enabled = null) {
-  const allow = expose === 'minimal' ? ['core'] : expose === 'standard' ? ['core', 'pro'] : ['core', 'pro', 'expert'];
+export function toolDefs(expose = 'all', enabled = null, shell = null) {
+  // A2 按壳 schema 裁剪（§9 工具面按壳过滤）：shell={ presetBase, forceOn:Set, forceOff:Set, mcpAllow }——
+  // 暴露档=会话 preset ∩ 壳 presetBase（更严者生效）；forceOn 越级放开（含启用集外）；forceOff 移除（平台豁免工具除外）。
+  // 兼容：shell=null（无壳/默认壳）→ 维持原"会话 preset × 全局启用集"行为。
+  const tierRank = { minimal: 0, standard: 1, all: 2 };
+  const baseTier = (s) => (s === 'minimal' || s === 'standard' || s === 'all') ? s : null;
+  const convRank = tierRank[expose] ?? 2;
+  const shRank = shell ? (tierRank[baseTier(shell.presetBase)] ?? 2) : 2;
+  const rank = Math.min(convRank, shRank); // 更严者
+  const allowTier = rank === 0 ? ['core'] : rank === 1 ? ['core', 'pro'] : ['core', 'pro', 'expert'];
+  const sOn = shell && shell.forceOn instanceof Set ? shell.forceOn : new Set();
+  const sOff = shell && shell.forceOff instanceof Set ? shell.forceOff : new Set();
+  const mcpAllow = shell && Array.isArray(shell.mcpAllow) ? new Set(shell.mcpAllow) : null; // null=未显式装载→全局 MCP 维持现状
+  const allowTierHas = (n) => allowTier.includes(TOOL_META[n]?.tier || 'pro');
   const PKEYS = ['enum', 'items', 'min', 'max']; // 参数 schema 白名单透传（防任意键注入）
-  return TOOLS.filter((t) => {
-    if (!allow.includes(TOOL_META[t.name]?.tier || 'pro')) return false;
-    if (enabled && !enabled.has(t.name) && !PLATFORM_EXEMPT.includes(t.name)) return false;
+  const local = TOOLS.filter((t) => {
+    if (!allowTierHas(t.name) && !sOn.has(t.name)) return false;          // 档位 ∩ 壳档（forceOn 越级）
+    if (sOff.has(t.name) && !PLATFORM_EXEMPT.includes(t.name)) return false; // forceOff 移除（豁免除外）
+    if (enabled && !enabled.has(t.name) && !PLATFORM_EXEMPT.includes(t.name) && !sOn.has(t.name)) return false; // 启用集（forceOn 放开）
     return true;
   }).map((t) => {
     const meta = TOOL_META[t.name] || {};
@@ -1017,7 +1030,15 @@ export function toolDefs(expose = 'all', enabled = null) {
         },
       },
     };
-  }).concat(MCP_EXTRA); // P11：拼接已连接 MCP server 的工具（expose 不限层级——MCP 工具由管理员配置信任）;
+  });
+  let mcpDefs = MCP_EXTRA;
+  if (mcpAllow && MCP_EXTRA.length) {
+    mcpDefs = MCP_EXTRA.filter((d) => {
+      const m = /^mcp_([a-zA-Z0-9]+)_/.exec(d.function && d.function.name || '');
+      return m ? mcpAllow.has(m[1]) : false;
+    });
+  }
+  return local.concat(mcpDefs); // P11：拼接已连接 MCP server 的工具（expose 不限层级——MCP 工具由管理员配置信任）;
 }
 
 // 执行工具并留痕
@@ -1048,6 +1069,12 @@ export async function execTool(name, args, ctx) {
   // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
   let tool = null;
   const mcpMatch = /^mcp_([a-zA-Z0-9]+)_(.+)$/.exec(name);
+  // A2 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝（防模型绕过 schema 直呼）
+  if (mcpMatch && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow)) {
+    if (!ctx.__shellSchema.mcpAllow.includes(mcpMatch[1])) {
+      throw new Error('MCP server ' + mcpMatch[1] + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试。');
+    }
+  }
   if (mcpMatch) {
     const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
     tool = {

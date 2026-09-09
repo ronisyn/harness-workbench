@@ -1,5 +1,6 @@
 // server/templates.js - ⑥ 任务模板库 v1（§6.5/D9 半成品：应用=模板，模板=档案+技能+验收+说明）
 // 文件权威：templates/<key>/tpl.json 随仓库 git 管理；本模块纯读写文件+纯函数装配，不碰 DB。
+// A2（2026-09-11）：补 export/import/clone 文件操作（§7.5"目标能力"，随 Agent 页批实现）——写盘后由路由层 git 提交推送。
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from './config.js';
@@ -87,4 +88,56 @@ export function toProfileFragment(tpl) {
     modelHint: tp.modelHint || {},
     ...(tp.readonlyOnly ? { readonlyOnly: true } : {}),
   };
+}
+
+// ---------- A2：模板 export/import/clone 文件操作（§7.5 目标能力；写盘后由路由层负责 git 提交推送同步） ----------
+
+export function templateFilePath(key) {
+  return path.join(TEMPLATES_ROOT, key, 'tpl.json');
+}
+
+// 写模板文件（import 用）：结构校验 + key 校验；exists 时需 overwrite=true 否则返回 { exists: true }
+export function writeTemplateFile(tpl) {
+  const v = validateTemplate(tpl);
+  if (!v.ok) return { ok: false, errors: v.errors };
+  const dir = path.join(TEMPLATES_ROOT, tpl.key);
+  if (!fs.existsSync(path.join(dir, 'tpl.json'))) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(path.join(dir, 'tpl.json'), JSON.stringify(tpl, null, 2) + '\n', 'utf8');
+  return { ok: true, key: tpl.key };
+}
+
+// 删除模板目录（克隆失败回滚/管理用；幂等）
+export function removeTemplateDir(key) {
+  if (!isTplKeyOk(key)) return;
+  const dir = path.join(TEMPLATES_ROOT, key);
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// 克隆：整目录复制（含未来 sidecar 文件），并改写 key（taskProfile.key 若沿用源 key 则一并改新 key）
+// 返回 { ok, key }；目标已存在 → { ok:false, exists:true }
+export function cloneTemplate(fromKey, newKey, opts = {}) {
+  if (!isTplKeyOk(fromKey) || !isTplKeyOk(newKey)) return { ok: false, errors: ['key 非法（小写字母数字-）'] };
+  const srcDir = path.join(TEMPLATES_ROOT, fromKey);
+  if (!fs.existsSync(path.join(srcDir, 'tpl.json'))) return { ok: false, errors: ['源模板不存在: ' + fromKey] };
+  const dstDir = path.join(TEMPLATES_ROOT, newKey);
+  if (fs.existsSync(path.join(dstDir, 'tpl.json'))) return { ok: false, exists: true };
+  fs.mkdirSync(dstDir, { recursive: true });
+  // 目录整体复制
+  fs.cpSync(srcDir, dstDir, { recursive: true, force: true });
+  // 改写 tpl.json 的 key（taskProfile.key 与源 key 相同时改为新 key，语义=克隆出的档案独立可装配）
+  try {
+    const p = path.join(dstDir, 'tpl.json');
+    const t = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const srcKey = fromKey;
+    t.key = newKey;
+    if (opts.name) t.name = String(opts.name).slice(0, 60);
+    if (t.taskProfile && t.taskProfile.key === srcKey) t.taskProfile.key = newKey;
+    fs.writeFileSync(p, JSON.stringify(t, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    fs.rmSync(dstDir, { recursive: true, force: true });
+    return { ok: false, errors: ['克隆改写失败: ' + e.message] };
+  }
+  return { ok: true, key: newKey };
 }

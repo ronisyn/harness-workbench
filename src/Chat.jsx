@@ -252,6 +252,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const queueRef = useRef([]);                  // 队列同步 ref（回调判空/取队首不依赖闭包过期）
   const [renamingId, setRenamingId] = useState(null); // 正在重命名的会话 id（null=无）
   const [renameVal, setRenameVal] = useState('');
+  // A2 会话挂壳：可用壳列表（启用中的非 default 壳）+ 当前会话挂载的壳 key（服务端 conv:shell 审计）
+  const [shells, setShells] = useState([]);
   const [pends, setPends] = useState(null);     // 待处理审批/问询（断连/刷新后恢复）：{key, approvals, asks}
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
@@ -319,6 +321,8 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   useEffect(() => () => { if (abortRef.current) { try { abortRef.current.abort(); } catch { /* ignore */ } } }, []);
   useEffect(() => {
     loadConvs();
+    // A2 会话挂壳下拉数据：启用中的非 default 壳
+    api.shells().then((d) => setShells((d.shells || []).filter((s) => s.status === 'enabled' && s.skey !== 'default'))).catch(() => {});
     // 已接入厂商 + 各厂商模型列表（模型下拉用）
     api.providers().then((d) => {
       const active = d.providers.filter((p) => p.connected);
@@ -755,6 +759,19 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     setToast('工具预设已切换为 ' + PRESET_LABEL[preset] + '（' + PRESET_TIP[preset] + '）');
   };
 
+  // A2 会话挂壳：切换当前会话挂载的壳（''=摘下回默认中性语义）；服务端审计 conv:shell
+  const changeConvShell = async (skey) => {
+    if (!cur) return;
+    const curShell = convs.find((c) => c.id === cur)?.shell_key || '';
+    if (skey === curShell) return;
+    try {
+      await api.patchConversation(cur, { shell: skey || null });
+      const s = shells.find((x) => x.skey === skey);
+      setConvs((cs) => cs.map((c) => (c.id === cur ? { ...c, shell_key: skey || null, shell_id: skey ? c.shell_id : null, shell_name: skey ? (s ? s.name : '') : null } : c)));
+      setToast(skey ? '已挂壳：' + (s ? s.name : skey) + '（新消息按该壳身份/工具面执行）' : '已摘下壳（回默认中性语义）');
+    } catch (e) { setToast(e.message || '切换壳失败'); }
+  };
+
   useEffect(() => {
     if (toast) { const t = setTimeout(() => setToast(''), 2500); return () => clearTimeout(t); }
   }, [toast]);
@@ -778,6 +795,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
 
   const curPerm = convs.find((c) => c.id === cur)?.permission || 'full';
   const curPreset = convs.find((c) => c.id === cur)?.preset || 'all';
+  const curShellKey = convs.find((c) => c.id === cur)?.shell_key || '';
 
   return (
     <div className="rw-shell" onDragEnter={onDropZoneDragEnter} onDragOver={onDropZoneDragOver} onDragLeave={onDropZoneDragLeave} onDrop={onDropZoneDrop}>
@@ -806,6 +824,12 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
               {Object.entries(PRESET_LABEL).map(([k, v]) => <option key={k} value={k}>工具：{v}</option>)}
             </select>
           )}
+          {cur && (
+            <select className="rw-select" value={curShellKey} onChange={(e) => changeConvShell(e.target.value)} title="会话挂壳：按壳身份/工具面/知识范围执行；空=默认中性（§8.9/§5.5 会话内选壳）">
+              <option value="">壳：无（中性）</option>
+              {shells.map((s) => <option key={s.skey} value={s.skey}>壳：{s.name}</option>)}
+            </select>
+          )}
         </div>
       </header>
 
@@ -824,6 +848,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                       onBlur={() => { if (renamingId === c.id) saveRename(c.id); }} />
                   : <span className="rw-conv-t" title="双击重命名" onDoubleClick={() => startRename(c)}>{c.title}</span>}
                 <span className="rw-conv-tag">{c.channel !== 'web' ? c.channel : ''}</span>
+                {c.shell_key && <span className="rw-conv-tag" title={'挂载壳：' + (c.shell_name || c.shell_key)}>🫧{c.shell_key}</span>}
                 {c.preset && c.preset !== 'all' && <span className="rw-conv-tag" title={'工具预设：' + PRESET_TIP[c.preset]}>P:{PRESET_LABEL[c.preset] || c.preset}</span>}
                 <button className="rw-conv-rename" title="重命名" onClick={(e) => { e.stopPropagation(); startRename(c); }}>✎</button>
                 <button className="rw-conv-del" onClick={(e) => delConv(c.id, e)} title="删除">✕</button>
