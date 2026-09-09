@@ -9,10 +9,25 @@ const SCOPES = [
   { v: 'shell', lb: '壳私有（仅所选壳的会话可见）' },
 ];
 
+// 2026-09-09 文档型升级：kind 分类（fact 运行事实/进度/规范/skill/错题本，默认 fact 不改旧行为；scope 三档不变）
+const KINDS = [
+  { v: 'fact', lb: '运行事实' },
+  { v: 'progress', lb: '进化进度' },
+  { v: 'guide', lb: '平台规范' },
+  { v: 'skill', lb: '技能' },
+  { v: 'lesson', lb: '错题本' },
+];
+const KIND_STYLE = {
+  fact: ['fact', '#8a6d1a'], progress: ['progress', '#2b579a'], guide: ['guide', '#2a7f62'],
+  skill: ['skill', '#7a4fb2'], lesson: ['lesson', '#b02a37'],
+};
+const kindOf = (v) => KIND_STYLE[String(v || 'fact')] || KIND_STYLE.fact;
+
 function useKnowledgeState() {
   const [shells, setShells] = useState([]);
   const [scope, setScope] = useState('global');
   const [shellKey, setShellKey] = useState('');
+  const [upKind, setUpKind] = useState('fact');      // 上传归属分类（默认运行事实）
   const [fileName, setFileName] = useState('');
   const [fileData, setFileData] = useState('');
   const [hasHeader, setHasHeader] = useState(true);
@@ -22,6 +37,7 @@ function useKnowledgeState() {
   const [rows, setRows] = useState([]);
   const [loaded, setLoaded] = useState(false); // P3-15：加载完成前不把空态当结果
   const [fScope, setFScope] = useState('');
+  const [fKind, setFKind] = useState('');           // 列表 kind Tab（''=全部）
   const [q, setQ] = useState('');
   const fileRef = useRef(null);
 
@@ -37,12 +53,13 @@ function useKnowledgeState() {
     try {
       const p = {};
       if (fScope) p.scope = fScope;
+      if (fKind) p.kind = fKind;
       if (q.trim()) p.q = q.trim();
       const d = await api.knowledgeList(p);
       setRows(d.knowledge || []);
     } catch (e) { setErr(e.message); }
     finally { setLoaded(true); }
-  }, [fScope, q]);
+  }, [fScope, fKind, q]);
   useEffect(() => { loadShells(); }, [loadShells]);
   useEffect(() => { loadList(); }, [loadList]);
 
@@ -62,7 +79,7 @@ function useKnowledgeState() {
     if (scope === 'shell' && !shellKey) { setErr('壳私有需要选择目标壳'); return; }
     setBusy(true);
     try {
-      const d = await api.knowledgeImport({ name: fileName, data: fileData, scope, shellKey: scope === 'shell' ? shellKey : undefined, hasHeader });
+      const d = await api.knowledgeImport({ name: fileName, data: fileData, scope, shellKey: scope === 'shell' ? shellKey : undefined, hasHeader, kind: upKind });
       setMsg(`已导入：新增 ${d.inserted} 条 / 更新 ${d.updated} 条（共解析 ${d.total} 条）`);
       setFileName(''); setFileData('');
       if (fileRef.current) fileRef.current.value = ''; // P3-15：文件框清空（ref 方式，两种形态共用）
@@ -76,15 +93,16 @@ function useKnowledgeState() {
     catch (e) { setErr(e.message); }
   };
   return {
-    shells, scope, setScope, shellKey, setShellKey, fileName, fileData, hasHeader, setHasHeader,
-    busy, msg, err, rows, loaded, fScope, setFScope, q, setQ, fileRef, pickFile, doImport, delRow,
+    shells, scope, setScope, shellKey, setShellKey, upKind, setUpKind, fileName, fileData, hasHeader, setHasHeader,
+    busy, msg, err, rows, loaded, fScope, setFScope, fKind, setFKind, q, setQ, fileRef, pickFile, doImport, delRow,
   };
 }
 
 // 唯一内容体（上传链 + 列表管理）——抽屉与 embedded 共用
-// 2026-09-09 UI 取长补短（参照 885 工作台知识库：卡片化/范围色标/预览截断/空态更友好）
+// 2026-09-09 UI 取长补短（参照 885 工作台知识库：卡片化/范围色标/预览截断/空态更友好）+ 文档型 kind 分组
 function kbKindOf(r) {
-  // 从标题推断来源形态（上传文件/文档名），用于卡片左侧图标字母
+  // 优先 kind 分类色标；无 kind 时回退标题扩展名字母
+  if (r.kind && KIND_STYLE[String(r.kind)]) return { tag: KIND_STYLE[String(r.kind)][0].slice(0, 2).toUpperCase(), color: KIND_STYLE[String(r.kind)][1] };
   const t = String(r.title || '');
   const ext = (t.split('.').pop() || '').toLowerCase();
   const m = { xlsx: 'X', xls: 'X', csv: 'C', txt: 'T', md: 'M', json: 'J', pdf: 'P', docx: 'D', pptx: 'P' };
@@ -93,12 +111,16 @@ function kbKindOf(r) {
 }
 function KbBody() {
   const s = useKnowledgeState();
+  const counts = s.rows.reduce((o, r) => { const k = String(r.kind || 'fact'); o[k] = (o[k] || 0) + 1; o._all = (o._all || 0) + 1; return o; }, {});
   return (
     <div className="rw-kb-content">
-      {/* 上传链（工具条式：归属 + 目标壳 + 文件 + 表头 + 导入） */}
+      {/* 上传链（工具条式：归属 + 分类 + 目标壳 + 文件 + 表头 + 导入） */}
       <div className="rw-kb-upload">
         <select className="rw-select" value={s.scope} onChange={(e) => s.setScope(e.target.value)} title="知识归属">
           {SCOPES.map((x) => <option key={x.v} value={x.v}>{x.lb}</option>)}
+        </select>
+        <select className="rw-select" value={s.upKind} onChange={(e) => s.setUpKind(e.target.value)} title="知识分类（文档型升级）">
+          {KINDS.map((x) => <option key={x.v} value={x.v}>{x.lb}</option>)}
         </select>
         {s.scope === 'shell' && (
           <select className="rw-select" value={s.shellKey} onChange={(e) => s.setShellKey(e.target.value)} title="目标壳">
@@ -116,9 +138,16 @@ function KbBody() {
       {s.msg && <div className="rw-kb-msg">{s.msg}</div>}
       {s.err && <div className="rw-kb-err">{s.err}</div>}
 
-      {/* 列表管理 */}
-      <div className="rw-kb-filters" style={{ marginTop: 14 }}>
-        <span className="rw-kb-tag global">知识条目 {s.rows.length} 条</span>
+      {/* 列表管理：kind Tab（像 885 文档/技能分组）+ 范围/关键词 */}
+      <div className="rw-kb-kindtabs" style={{ marginTop: 14 }}>
+        <span className={'rw-kb-kind' + (s.fKind === '' ? ' on' : '')} onClick={() => s.setFKind('')}>全部 <em className="rw-kb-kindc">{(s.rows.length)}</em></span>
+        {KINDS.map((x) => (
+          <span key={x.v} className={'rw-kb-kind' + (s.fKind === x.v ? ' on' : '')} onClick={() => s.setFKind(s.fKind === x.v ? '' : x.v)}>
+            {x.lb} <em className="rw-kb-kindc">{counts[x.v] || 0}</em>
+          </span>
+        ))}
+      </div>
+      <div className="rw-kb-filters" style={{ marginTop: 8 }}>
         <select className="rw-select" value={s.fScope} onChange={(e) => s.setFScope(e.target.value)}>
           <option value="">全部范围</option>
           <option value="global">全局</option>
@@ -131,15 +160,17 @@ function KbBody() {
       </div>
       <div className="rw-kb-list">
         {!s.loaded && <div className="rw-kb-empty">加载中…</div>}
-        {s.loaded && s.rows.length === 0 && <div className="rw-kb-empty">（暂无知识条目——上传文件后 RW 可在会话中检索；技能/文档等结构化内容见后台其它板块）</div>}
+        {s.loaded && s.rows.length === 0 && <div className="rw-kb-empty">（该分类暂无条目——上传文件并选对分类；条目供 RW 会话内检索，不改变任何运行行为）</div>}
         {s.rows.map((r) => {
           const k = kbKindOf(r);
+          const kk = kindOf(r.kind);
           const scopeLb = r.scope === 'global' ? '全局' : r.scope === 'shell' ? '壳·' + (r.shell_key || r.shell_id) : '会话';
           return (
             <div key={r.id} className="rw-kb-item">
               <span className="rw-kb-item-ico" style={{ background: k.color }}>{k.tag}</span>
               <div className="rw-kb-item-main">
                 <div className="rw-kb-item-head">
+                  <span className="rw-kb-kindtag" style={{ background: kk[1] + '1f', color: kk[1] }}>{kk[0]}</span>
                   <span className={'rw-kb-tag ' + (r.scope === 'global' ? 'global' : r.scope === 'shell' ? 'shell' : 'conv')}>{scopeLb}</span>
                   <b title={r.title}>{r.title}</b>
                   <button className="rw-conv-del" title="删除" onClick={() => s.delRow(r.id)}>✕</button>
@@ -168,7 +199,7 @@ export default function Knowledge({ onClose, embedded }) {
     <div className="rw-mask rw-kb-mask" onClick={onClose}>
       <div className="rw-drawer rw-kb-panel" onClick={(e) => e.stopPropagation()}>
         <div className="rw-drawer-head">
-          <span>📚 知识库（④ v1）</span>
+          <span>📚 知识库（运行事实/进化进度/规范/技能/错题本 · 会话内可检索）</span>
           <button className="rw-btn" onClick={onClose} title="关闭">← 返回对话</button>
         </div>
         <div className="rw-drawer-body">{body}</div>

@@ -381,6 +381,9 @@ export async function initSchema() {
     // F2 往返保真：DB 无列承载的 pack 扩展字段（tone/terms/mcps/defaultsAutoLoad/approvalMode/bindings/importRefs/credentials 等）
     // 存 pack_extra（import 写入 / export/clone 合并还原），避免 clone/export→import→export 丢字段
     'ALTER TABLE shells ADD COLUMN pack_extra JSON',
+    // 2026-09-09 知识库文档型升级：kind 分类（fact=运行事实[默认]/progress=进化进度/guide=平台规范/skill=技能/lesson=错题本）
+    // 仅增加表达维度，不改旧行语义（存量默认 fact）；scope 三档(global/shell/conv)不变，不新增隔离面
+    "ALTER TABLE knowledge ADD COLUMN kind VARCHAR(12) DEFAULT 'fact'",
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); }
@@ -427,7 +430,7 @@ export async function initSchema() {
     const missing = [];
     const checks = [
       ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'],
-      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'],
+      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'], ['knowledge', 'kind'],
     ];
     for (const [tbl, col] of checks) {
       const r = await pool.query('SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', [tbl, col]);

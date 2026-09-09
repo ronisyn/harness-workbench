@@ -92,6 +92,14 @@ async function main() {
   const qA = kbVisibleWhere({ accountId: lg.b.user.id, conversationId: cA.id });
   const rA = await db.query('SELECT scope FROM knowledge WHERE ' + qA.where + ' AND title LIKE ?', [...qA.params, P + '%']);
   chk('13 无壳仅 global', rA.length > 0 && !rA.some((x) => x.scope === 'shell'));
+  /* 13b) 文档型 kind：import 带 kind=skill 分条 + list?kind 过滤 + 默认 fact（2026-09-09 升级） */
+  const sk2 = await j('/api/knowledge/import', { method: 'POST', headers: A, body: JSON.stringify({ name: P + 'skill.md', data: b64(P + '技能条目'), scope: 'global', kind: 'skill' }) });
+  chk('13b1 kb import kind=skill', sk2.status === 200 && sk2.b.kind === 'skill' && sk2.b.inserted === 1, JSON.stringify(sk2.b));
+  const df = await j('/api/knowledge/import', { method: 'POST', headers: A, body: JSON.stringify({ name: P + 'd.txt', data: b64(P + '默认事实'), scope: 'global' }) });
+  const dRow = await db.query("SELECT kind FROM knowledge WHERE title LIKE ?", [P + 'd%']);
+  chk('13b2 缺省 kind=fact(旧行为不变)', df.status === 200 && dRow.length && dRow[0].kind === 'fact', JSON.stringify(dRow[0] || {}));
+  const kf = await j('/api/knowledge?kind=skill&q=' + encodeURIComponent(P + '技能'), { headers: A });
+  chk('13b3 list?kind=skill 过滤命中', kf.status === 200 && kf.b.knowledge.length === 1 && kf.b.knowledge[0].kind === 'skill', 'n=' + (kf.b.knowledge || []).length);
   // telemetry
   await sse(cA.id, '你好', tok, true);
   await new Promise((r) => setTimeout(r, 1500));

@@ -340,8 +340,19 @@ export const TOOLS = [
   // ---------- B23-B26 Git ----------
   { name: 'git_status', description: '查看 git 状态', permission: 'read', params: { dir: { type: 'string', required: true } },
     run: async (a) => { const r = await runCmd('git', ['-C', a.dir, 'status', '--short']); return { status: r.out, ok: r.ok }; } },
-  { name: 'git_commit', description: 'git 提交', permission: 'write', params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
-    run: async (a) => { await runCmd('git', ['-C', a.dir, 'add', '-A']); const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message]); return { ok: r.ok, out: r.out }; } },
+  { name: 'git_commit', description: 'git 提交（自动推送 origin/main——防"只提交未推送被部署覆盖"孤儿，2026-09-09 机制修复）', permission: 'write', params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
+    run: async (a) => {
+      await runCmd('git', ['-C', a.dir, 'add', '-A']);
+      const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message]);
+      if (!r.ok) return { ok: false, out: r.out + r.err };
+      // push 收尾：提交成功后自动推送到远端（孤儿防护）。push 失败不撤销本地 commit，仅提示。
+      const br = await runCmd('git', ['-C', a.dir, 'branch', '--show-current']);
+      const branch = String(br.out || 'main').trim();
+      let push = null;
+      try { push = await runCmd('git', ['-C', a.dir, 'push', 'origin', branch], {}, 60000); } catch { push = { ok: false, err: 'push 调用异常' }; }
+      const pushed = push && push.ok;
+      return { ok: true, out: r.out + (pushed ? `\n[已推送 origin/${branch}]` : `\n[⚠️ 提交成功但未推送 origin/${branch}（${String(push?.err || push?.out || '未知原因').slice(0, 300)}）——部署前请先解决未推送提交]`) };
+    } },
   { name: 'git_branch', description: 'git 分支操作（list|create|checkout）', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string', enum: ['list', 'create', 'checkout'] }, branch: { type: 'string' } },
     run: async (a) => {
       if (a.action === 'create') { const r = await runCmd('git', ['-C', a.dir, 'branch', a.branch]); return { ok: r.ok }; }
@@ -587,11 +598,14 @@ export const TOOLS = [
     } },
 
   // ---------- 知识库（④：global 全会话可见 / shell 仅所属壳会话可见(§4) / conv 仅本会话；正文大段用 kb_search 取） ----------
+  // 2026-09-09 文档型升级：kb_add 可选 kind（默认 fact=运行事实；progress 进化进度/guide 平台规范/skill 技能/lesson 错题本）——
+  // 仅分类表达，检索/可见语义不变（kb_search/F19 不按 kind 过滤）
   { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
-    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'shell', 'conv'], desc: 'global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
+    params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'shell', 'conv'], desc: 'global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)' }, kind: { type: 'string', enum: ['fact', 'progress', 'guide', 'skill', 'lesson'], desc: '分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = ['global', 'shell', 'conv'].includes(a.scope) ? a.scope : 'conv';
+      const kind = ['fact', 'progress', 'guide', 'skill', 'lesson'].includes(a.kind) ? a.kind : 'fact';
       const title = String(a.title || '').trim().slice(0, 200);
       const body = String(a.body || '').slice(0, 8000);
       if (!title) throw new Error('title 必填');
@@ -602,7 +616,7 @@ export const TOOLS = [
       // E2 防激进覆盖：同名且新旧内容差异显著（字符集合 Jaccard 相似度 <0.35 且新旧均非空）时，
       // 默认拒绝覆盖并回显旧内容片段，让调用方确认（overwrite:true 显式覆盖）或换 title——避免无意冲掉高价值旧记忆
       const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
-      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND (shell_id<=>?) AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, shellId, title]);
+      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND (shell_id<=>?) AND kind=? AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, shellId, kind, title]);
       if (exist.length) {
         const oldB = String(exist[0].body || '');
         const jac = (() => {
@@ -613,14 +627,14 @@ export const TOOLS = [
           return inter / Math.max(1, sa.size + sb.size - inter);
         })();
         if (!a.overwrite && jac < 0.35) {
-          return { saved: false, conflict: true, id: exist[0].id, scope, title,
+          return { saved: false, conflict: true, id: exist[0].id, scope, kind, title,
             reason: '同名条目已存在且新旧内容差异显著（相似度 ' + jac.toFixed(2) + ' < 0.35），已拒绝覆盖以防误冲高价值旧记忆。请确认：若确为同主题更新请在调用中加 overwrite:true 覆盖；否则请改用不同 title 新增。现有内容片段：' + oldB.slice(0, 300) + (oldB.length > 300 ? '…' : '') };
         }
         await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [body, exist[0].id]);
-        return { saved: true, id: exist[0].id, updated: true, scope, title };
+        return { saved: true, id: exist[0].id, updated: true, scope, kind, title };
       }
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, title, body) VALUES (?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, title, body]);
-      return { saved: true, id: r.insertId, updated: false, scope, title };
+      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body) VALUES (?,?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, kind, title, body]);
+      return { saved: true, id: r.insertId, updated: false, scope, kind, title };
     } },
   { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
     params: { q: { type: 'string', required: true, desc: '关键词' } },

@@ -1344,7 +1344,7 @@ app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
 });
 
 // ---------- ④ 知识库管理 API（§6.3/§8：管理视图按账号展示；会话可见语义由 F19/kb_* 各自生效） ----------
-// 列表：GET /api/knowledge?scope=global|shell|conv[&shell_id=&q=]；scope=空=全部（管理视图）
+// 列表：GET /api/knowledge?scope=global|shell|conv[&kind=fact|progress|guide|skill|lesson][&shell_id=&q=]；scope=空=全部（管理视图）
 app.get('/api/knowledge', requireAuth, async (req, res) => {
   try {
     const conds = ['k.account_id=?'];
@@ -1352,21 +1352,26 @@ app.get('/api/knowledge', requireAuth, async (req, res) => {
     const scope = String(req.query.scope || '');
     if (['global', 'shell', 'conv'].includes(scope)) { conds.push('k.scope=?'); params.push(scope); }
     if (scope === 'shell' && Number(req.query.shell_id)) { conds.push('k.shell_id=?'); params.push(Number(req.query.shell_id)); }
+    // 2026-09-09 文档型升级：kind 过滤（管理 Tab 用；缺省=全部，不改变默认查询语义）
+    const kind = String(req.query.kind || '');
+    if (kind && /^(fact|progress|guide|skill|lesson)$/.test(kind)) { conds.push('k.kind=?'); params.push(kind); }
     if (req.query.q) { const like = '%' + String(req.query.q).trim() + '%'; conds.push('(k.title LIKE ? OR k.body LIKE ?)'); params.push(like, like); }
     const rows = await db.query(
-      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
+      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
        FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
        WHERE ${conds.join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
     res.json({ ok: true, knowledge: rows });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
-// 上传导入：POST /api/knowledge/import { name, data(base64), scope: global|shell|conv, shellKey?, conversationId? }
-// 解析后批量入库：同 (账号,scope,shell_id/会话) 下 title 已存在 → 更新 body（幂等覆盖），否则新增
+// 上传导入：POST /api/knowledge/import { name, data(base64), scope: global|shell|conv, shellKey?, conversationId?, kind? }
+// 解析后批量入库：同 (账号,scope,shell_id/会话,kind) 下 title 已存在 → 更新 body（幂等覆盖），否则新增
 app.post('/api/knowledge/import', requireAuth, async (req, res) => {
   try {
     const { name, data, scope, shellKey, conversationId } = req.body || {};
     if (!name || !data) return res.status(400).json({ ok: false, message: 'name 与 data(base64) 必填' });
     const sc = ['global', 'shell', 'conv'].includes(scope) ? scope : 'global';
+    // 2026-09-09 kind：fact 运行事实[默认]/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本（文档型升级，默认不改旧行为）
+    const kind = /^(fact|progress|guide|skill|lesson)$/.test(String(req.body.kind || '')) ? String(req.body.kind) : 'fact';
     let shellId = null;
     if (sc === 'shell') {
       const sh = shellKey ? (await db.query('SELECT id FROM shells WHERE skey=? AND status="enabled"', [String(shellKey)]))[0] : null;
@@ -1385,13 +1390,13 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(400).json({ ok: false, message: '文件解析后无可导入条目（全空或格式不符）' });
     let inserted = 0, updated = 0;
     for (const r of rows) {
-      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (shell_id<=>?) AND (conversation_id<=>?) AND title=? ORDER BY id DESC LIMIT 1',
-        [req.user.id, sc, shellId, convId, r.title]);
+      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (shell_id<=>?) AND (conversation_id<=>?) AND kind=? AND title=? ORDER BY id DESC LIMIT 1',
+        [req.user.id, sc, shellId, convId, kind, r.title]);
       if (exist.length) { await db.query('UPDATE knowledge SET body=?, created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
-      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, title, body) VALUES (?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, r.title, r.body]); inserted++; }
+      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body) VALUES (?,?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, kind, r.title, r.body]); inserted++; }
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:import', 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated]);
-    res.json({ ok: true, scope: sc, shellKey: shellKey || null, inserted, updated, total: rows.length });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:import', 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' kind=' + kind + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated]);
+    res.json({ ok: true, scope: sc, shellKey: shellKey || null, kind, inserted, updated, total: rows.length });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 // 删除：DELETE /api/knowledge/:id（仅本账号条目）
