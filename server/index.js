@@ -449,7 +449,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // P7/F6c：settings default_models（{厂商: 模型}）覆盖厂商硬编码默认
   let defOverrides = null;
   try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
-  // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按 v2.6 §1 扩展语境，不改内核自述）
+  // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按总方案 §5.5 扩展语境——旧编号 v2.6 §1，2026-09-10 治理改指；不改内核自述）
   // 一次读取壳全字段：persona/domain/intent_rules/task_profiles/model_policy/tools —— 路由三级(档案/壳默认)与预算共用，避免多查询
   const convShellId = convs[0].shell_id || null;
   let convShellCtx = null;

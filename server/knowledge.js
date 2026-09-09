@@ -3,7 +3,7 @@
 // 会话可见范围 = 全局 + 本会话所属壳私有 + 本会话私有；默认"壳私有 + 全局共享"（§4）。
 // 上传链：xlsx 按行结构化优先（首列=title、整行=body，可带表头）；txt/md 按空行分段；csv 经 xlsx 行解析。
 
-// 会话可见知识 SELECT 条件（供 F19 注入 / kb_search / 管理 list 复用；service 统一出口防漏 WHERE——§4）
+// 会话可见知识 SELECT 条件（规划统一出口防漏 WHERE——总方案 §9.3④ 登记：现 F19 注入/kb_search/kb_del 各自内联同构 SQL，本函数尚未被生产引用，接线随知识库批）
 // opts.shellId = 会话所属壳 id（可为 null/undefined=无壳会话）；opts.conversationId = 本会话
 export function kbVisibleWhere(opts = {}) {
   const { accountId, shellId, conversationId, includeConv = true, scopeOnly } = opts;

@@ -1,5 +1,5 @@
 // server/profile.js - B3 任务档案解析（纯函数，可单测）
-// 依据：v2.8 §6.2——档案触发 v1=用户点名/UI 选择（不自动猜）；三级路由：显式(绝对锁)>档案建议>壳默认。
+// 依据：总方案 §7.2（旧编号 v2.8 §6.2，2026-09-10 治理改指）——档案触发 v1=用户点名/UI 选择（不自动猜）；三级路由：显式(绝对锁)>档案建议>壳默认。
 export const DEFAULT_TASK_PROFILES = [
   { key: 'small-fix', name: '小修', match: ['小修', '小改', 'quick fix'], modelHint: { defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-flash', qualityCostBias: 3 } },
   { key: 'refactor-plan', name: '重构方案', match: ['重构方案', 'refactor plan'], modelHint: { defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-pro', qualityCostBias: 7 }, readonlyOnly: true },

@@ -1,5 +1,5 @@
 // server/shellstore.js - B1 壳库：import/clone/list/get（基于 db + shells 纯函数）
-// 依据：v2.6 §3/§8；文件 pack.json 为权威、DB 为运行态镜像（双写原则 §3.2）。
+// 依据：总方案 §5.1/§9（旧编号 v2.6 §3/§8，2026-09-10 治理改指）；文件 pack.json 为权威、DB 为运行态镜像（双写原则 §5.2）。
 import { db } from './db.js';
 import { validatePack, packToRow, rowToPack, isKeyOk, SHELL_DEFAULT_KEY } from './shells.js';
 

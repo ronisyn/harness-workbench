@@ -36,7 +36,7 @@ server/（agent 循环/工具 62/驱动器/调度/渠道/网关）· src+web/（
 | 信任契约 | docs/信任契约-v1.md | 实例 docs/ |
 | 记忆架构 | docs/记忆架构.md | 实例 docs/ |
 | 权限与沙箱 | docs/权限与沙箱-服务器版.md | 实例 docs/ |
-| 平台设计蓝图（唯一总纲） | docs/平台开发全集清单-v1.md | 实例 docs/ |
+| 平台设计蓝图（唯一总纲） | docs/平台开发全集清单-v1.md | 实例 docs/（**以脚本为准：apply-pack RULE_DOCS 不复制本件，见头部治理注**） |
 | 复盘/验收模板 | docs/复盘模板.md、docs/templates/验收模板.md | 实例 docs/ |
 | 工具契约施工图 | docs/tool-contracts-v1.md（62 条 when/not/ex） | 实例 docs/（施工参照） |
 | 技能（SKILL.md×5） | packs/rw-core/skills/{explore-discipline,self-audit,task-approach,subagent-prompt,acceptance-builder}/SKILL.md | 实例 $RW_SKILLS/（运行时技能目录） |

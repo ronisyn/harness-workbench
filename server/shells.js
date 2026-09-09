@@ -1,6 +1,6 @@
 // server/shells.js - 壳定义（Shell-pack）B1 基座：schema 校验 + pack→壳行映射（纯函数，可单测）
-// 依据：proposals/RW-Agent平台化改造总方案-v2.6 §3（v1 字段集；扩展只增不改，向后兼容）
-// 说明：本模块不含任何密钥/敏感值处理；凭证规则见 §8（credentials v1.2 仅存引用）。
+// 依据：proposals/RW-Agent平台化改造总方案（v2.30）§5.1（v1 字段集；扩展只增不改，向后兼容）
+// 说明：本模块不含任何密钥/敏感值处理；凭证规则见 §9（credentials v1.2 仅存引用）。
 
 export const SHELL_DEFAULT_KEY = 'default';
 

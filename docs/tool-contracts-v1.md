@@ -1,6 +1,6 @@
 # 附录D · 工具契约施工图 v1（WS1 实施图纸 · 撑竿跳方案 1.0）
 
-> 📌 冻结施工图（2026-09-10 治理标注）：本文为 WS1（撑竿跳方案 1.0）一次性实施图纸，**使命已完成**——when/not/ex+tier 已全量转录为代码现实（`server/tools/meta.js` + toolDefs description，meta.js 头注即此出处）。计数为该时期快照（61+conv_summarize=62），现网=63 注册 / 默认 28（meta DEFAULT_TOOLSET）/ 分级 core22+pro31+expert9；conv_summarize 已注册（原 L89"待 WS5 实施时注册"过时）。依据文档已归档（docs/archive/RW撑竿跳方案-执行史-v1.0.md）。tier/生命周期口径沿用至总方案 B §8.5；本文不再维护，计数一律以代码为准。
+> 📌 冻结施工图（2026-09-10 治理标注）：本文为 WS1（撑竿跳方案 1.0）一次性实施图纸，**使命已完成**——when/not/ex+tier 已全量转录为代码现实（`server/tools/meta.js` + toolDefs description，meta.js 头注即此出处）。计数为该时期快照（61+conv_summarize=62），现网=63 注册 / 默认 28（meta DEFAULT_TOOLSET）/ 分级以 meta.js 实数为准（现 core24/pro32/expert7=63）；conv_summarize 已注册（原 L89"待 WS5 实施时注册"过时）。依据文档已归档（docs/archive/RW撑竿跳方案-执行史-v1.0.md）。tier/生命周期口径沿用至总方案 B §8.5；本文不再维护，计数一律以代码为准。
 
 > 依据：docs/archive/RW撑竿跳方案-执行史-v1.0.md §1 WS1 + §1.5 X1（已归档；决策已并入蓝图 C 域）· Anthropic《Seeing like an agent》：工具是 agent 的眼与手。
 > 范围：61 个现存工具（实测 server/tools/index.js TOOLS）+ conv_summarize（WS5 新增）= **62**。
