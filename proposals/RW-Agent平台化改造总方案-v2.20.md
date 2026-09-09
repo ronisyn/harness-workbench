@@ -401,6 +401,17 @@
 - **验收**：单测 50/50、selfcheck 12/12、e2e-final **21/21**（新增 13b1 import kind=skill / 13b2 缺省 fact / 13b3 list?kind 过滤 三连）、fx3 6/6、e2e-recover 5/5；/chat、/console/kb、/console/settings 路由 200。
 - **基线**：本地=origin/main=`9fb9672`，服务器 880 运行同 HEAD；无残留孤儿。
 
+## 附录 D 续：Agent 能力页真实性修正 + 后台导航重分组（2026-09-09 用户定，`8a877ee` 已部署）
+
+- **背景**：用户指出 1.4 Agent 能力页 A/B/C 三组"能力开关"是**虚假展示**——查证属实：`/api/capabilities`(账号表)只存 DB，服务端渲染/工具/平台三处均无任何代码消费（A 组渲染开关不影响前端 ReactMarkdown；B 组不影响工具；C 组不影响平台）；真实可配面一直是**工具启用集(/api/toolset)**（模型 schema 裁剪 + hooks enabled_tools_guard 双门禁）。
+- **修正（干净删除，不留垃圾）**：
+  - 移除 `/api/capabilities` GET/PUT、A/B/C 三组常量与 `CapSwitches.jsx`；capabilities 账号表 `DROP TABLE` 迁移清理（models.capabilities 模型能力 JSON 是另一回事，保留）。
+  - **工具启用集人读化**：`/api/toolset` 遍历实际注册 TOOLS（63 项）附 中文名(TOOL_CN)/分级 tier/用途 when/勿用 not/示例 ex/权限；ToolsetEditor 重写——中文行 + 悬停说明 + 恒开(平台豁免不可关)/默认建议(可取消)/已启用/未启用标签 + 按 core/pro/expert 分组 + 全选/清空 + 已启用计数；**修正旧语义 bug：defaultOn(默认启用) 曾当"豁免禁改"，实际仅 PLATFORM_EXEMPT 恒开、默认工具可取消**。
+  - 残留清理：agent 环境提示"关键表"改列 knowledge；index.js 头注释；Dashboard/ModelPlaza 可见文案由旧编号改新分组名。
+- **后台导航重分组（用户定：平台 / Agent / 应用市场）**：平台=模型广场/模型观测/知识库/设置；Agent=能力/进化；应用市场=壳开发/应用 + 插件占位（建设中说明：壳外研发→壳勾选装配→删除整体卸载范式）。板块 code 不变（URL/回退兼容），仅 group/label。
+- **验收**：单测 50/50、selfcheck 12/12、e2e-capfix **5/5**（capabilities 404 / 表已 DROP / toolset 63 项中文 / 豁免恒开 / 8 导航路由）、e2e-final 20/20、fx3、recover 全过。
+- **基线**：本地=origin/main=`c1c449e`，服务器 880 运行同 HEAD；无残留孤儿。
+
 
 
 
