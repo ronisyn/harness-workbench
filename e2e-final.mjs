@@ -96,8 +96,8 @@ async function main() {
   const sk2 = await j('/api/knowledge/import', { method: 'POST', headers: A, body: JSON.stringify({ name: P + 'skill.md', data: b64(P + '技能条目'), scope: 'global', kind: 'skill' }) });
   chk('13b1 kb import kind=skill', sk2.status === 200 && sk2.b.kind === 'skill' && sk2.b.inserted === 1, JSON.stringify(sk2.b));
   const df = await j('/api/knowledge/import', { method: 'POST', headers: A, body: JSON.stringify({ name: P + 'd.txt', data: b64(P + '默认事实'), scope: 'global' }) });
-  const dRow = await db.query("SELECT kind FROM knowledge WHERE title LIKE ?", [P + 'd%']);
-  chk('13b2 缺省 kind=fact(旧行为不变)', df.status === 200 && dRow.length && dRow[0].kind === 'fact', JSON.stringify(dRow[0] || {}));
+  const dRow = await db.query("SELECT kind FROM knowledge WHERE body LIKE ? ORDER BY id DESC LIMIT 1", [P + '默认事实%']);
+  chk('13b2 缺省 kind=fact(旧行为不变)', df.status === 200 && dRow.length && dRow[0].kind === 'fact', JSON.stringify(dRow[0] || {}) + ' st=' + df.status);
   const kf = await j('/api/knowledge?kind=skill&q=' + encodeURIComponent(P + '技能'), { headers: A });
   chk('13b3 list?kind=skill 过滤命中', kf.status === 200 && kf.b.knowledge.length === 1 && kf.b.knowledge[0].kind === 'skill', 'n=' + (kf.b.knowledge || []).length);
   // telemetry
