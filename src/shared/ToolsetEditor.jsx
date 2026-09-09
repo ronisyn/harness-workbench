@@ -1,15 +1,19 @@
-// src/shared/ToolsetEditor.jsx - R1 单一事实源：工具启用集（真实可勾选；平台豁免恒开不可关）
-// 2026-09-09 修正：① 默认启用工具可取消（defaultOn≠豁免，仅 PLATFORM_EXEMPT 恒开）；
-// ② 人读化：中文名 + 分级 + 用途(when) + 悬停示例 + 不可勾原因，替代误导性"能力开关"。
-import React, { useState, useEffect, useCallback } from 'react';
+// src/shared/ToolsetEditor.jsx - A4 §8.5 工具集 UI v2：Tab 分组(基础/专业/权限高危+计数) + 搜索 + Tab 内全选/清空
+// + 开关即时保存(防抖) + 失败行内标红回滚；平台豁免恒开锁不可关；无限高内滚（列表随页面伸展）。
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api.js';
 
-const TIER_ORDER = ['core', 'pro', 'expert'];
 const TIER_LB = {
-  core: '基础工具（日常高频，默认启用，可取消）',
-  pro: '专业工具（按需勾选）',
-  expert: '高危/全权工具（默认关闭，谨慎开启）',
+  base: '基础（core，read/write）',
+  pro: '专业（pro）',
+  guard: '权限高危 / 全权（expert 或 permission=full）',
 };
+
+function bucketOf(t) {
+  if (t.tier === 'expert' || t.permission === 'full') return 'guard';
+  if (t.tier === 'pro') return 'pro';
+  return 'base';
+}
 
 function ToolRow({ t, onToggle }) {
   const exempt = t.platformExempt;          // 平台恒开：不可取消
@@ -25,21 +29,26 @@ function ToolRow({ t, onToggle }) {
         onChange={(e) => onToggle(t.name, e.target.checked)} />
       <span className="rw-tool-cn">{t.cn || t.name}</span>
       <code className="rw-tool-name">{t.name}</code>
+      <em className={'rw-tool-tag ' + (t.tier === 'expert' ? 'full' : '')}>{TIER_TAG[t.tier]}</em>
       {exempt && <em className="rw-tool-tag exempt" title="平台安全必需，恒开不可关">恒开</em>}
       {defaultOn && !t.enabled && <em className="rw-tool-tag">默认建议</em>}
       {!exempt && t.enabled && <em className="rw-tool-tag on">已启用</em>}
       {!t.enabled && !exempt && !defaultOn && <em className="rw-tool-tag off">未启用</em>}
       <span className="rw-tool-when">{t.when ? String(t.when).slice(0, 70) : ''}</span>
-      {t.permission === 'full' && <em className="rw-tool-tag full">全权</em>}
     </label>
   );
 }
+const TIER_TAG = { core: '基础', pro: '专业', expert: '高危' };
 
 export default function ToolsetEditor({ onToast }) {
   const [tools, setTools] = useState([]);
   const [err, setErr] = useState('');
-  const [msg, setMsg] = useState(''); // P3-2：console 无 onToast 也可见成功反馈
-  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [tab, setTab] = useState('base');
+  const [q, setQ] = useState('');
+  const [saveFailed, setSaveFailed] = useState(false); // 最近一次保存失败（回滚标志）
+  const debRef = useRef(null);
+  const busyRef = useRef(false);
 
   const load = useCallback(async () => {
     setErr('');
@@ -48,57 +57,70 @@ export default function ToolsetEditor({ onToast }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const tell = (m) => { if (onToast) onToast(m); else { setMsg(m); setTimeout(() => setMsg(''), 2200); } };
-  const save = async (target) => {
-    setBusy(true); setErr('');
+  const tell = (m) => { if (onToast) onToast(m); else { setMsg(m); setTimeout(() => setMsg(''), 2000); } };
+
+  // 防抖保存：成功则清失败标志；失败 → 行内标红提示并回滚到服务端真实态
+  const doSave = async (target) => {
+    if (busyRef.current) return; // 已有提交在途：防抖后若又有新变更会再调度，避免并发写乱
+    busyRef.current = true;
     try {
-      // 服务端 PUT 会过滤平台豁免项；本地立即同步最终态（豁免恒真）
       await api.setToolset(target);
       setTools((ts) => ts.map((x) => ({ ...x, enabled: x.platformExempt || target.includes(x.name) })));
-      tell('工具启用集已保存（下轮生效）');
-    } catch (e) { const m = '保存失败：' + (e.message || e); if (onToast) onToast(m); else setErr(m); }
-    finally { setBusy(false); }
+      setSaveFailed(false);
+    } catch (e) {
+      setSaveFailed(true);
+      tell('保存失败，已回滚：' + (e.message || e));
+      load(); // 回滚到服务端真实态
+    } finally { busyRef.current = false; }
   };
+  const scheduleSave = (target) => {
+    if (debRef.current) clearTimeout(debRef.current);
+    debRef.current = setTimeout(() => { debRef.current = null; doSave(target); }, 300);
+  };
+
   // 当前生效名列表（豁免不计入可写面）
-  const curEnabled = tools.filter((x) => x.enabled && !x.platformExempt).map((x) => x.name);
+  const curEnabled = () => tools.filter((x) => x.enabled && !x.platformExempt).map((x) => x.name);
 
   const toggle = (name, on) => {
-    const next = on ? [...curEnabled.filter((n) => n !== name), name] : curEnabled.filter((n) => n !== name);
-    save(next);
+    const cur = curEnabled();
+    const next = on ? [...cur.filter((n) => n !== name), name] : cur.filter((n) => n !== name);
+    setTools((ts) => ts.map((x) => ({ ...x, enabled: x.platformExempt || next.includes(x.name) })));
+    scheduleSave(next);
   };
-  const selectable = tools.filter((t) => !t.platformExempt);
-  const allOn = selectable.length > 0 && selectable.every((t) => t.enabled);
-  const allOff = !curEnabled.length;
+
+  const visible = tools.filter((t) => bucketOf(t) === tab && (!q || t.name.toLowerCase().includes(q.toLowerCase()) || (t.cn || '').includes(q)));
+  const selectableInTab = tools.filter((t) => bucketOf(t) === tab && !t.platformExempt);
+  const allOnInTab = selectableInTab.length > 0 && selectableInTab.every((t) => t.enabled);
+  const anyOnInTab = selectableInTab.some((t) => t.enabled);
 
   return (
     <div>
-      <div className="rw-cap-gtitle">工具启用集 —— 真实可配面（勾选=模型可调用；取消=对话中不可用）</div>
+      <div className="rw-cap-gtitle">工具启用集 v2（勾选=模型可调用；取消=对话中不可用；权限高危/全权默认关）</div>
       <div style={{ fontSize: 12, color: 'var(--rw-muted)', marginBottom: 8, lineHeight: 1.6 }}>
-        只有这里的勾选真实驱动模型工具面（历史 A/B/C「能力开关」从未接线到运行时，已移除）。
-        「恒开」=平台安全必需（重载/护栏/快照/钩子）不可关；默认启用的基础工具可取消。
-        悬停任意工具可看 用途/勿用于/示例。工具集在「对话页 ⚙ 时代」即已真实生效（模型看不到、也调不动未勾选工具）。
+        只有这里的勾选真实驱动模型工具面。「恒开」=平台安全必需（重载/护栏/快照/钩子）；「默认建议」可关。
+        开关即时生效（防抖合并保存，≤300ms 内连续点击只落一次），失败自动回滚并标红。工具不可装卸（装卸=插件/扩展中心）；
+        Tab 切换拉全量前端分组，无限高内滚。使用率看板在下方（§8.5，数据=近 7/30 天 tool_calls）。
       </div>
       {err && <div className="rw-kb-err">{err}</div>}
       {msg && <div className="rw-kb-msg">{msg}</div>}
-      {busy && <div className="rw-dash-muted">保存中…</div>}
-      {!tools.length && !err && <div className="rw-empty">加载中…</div>}
+      {saveFailed && <div className="rw-kb-err" style={{ marginTop: 6 }}>⚠️ 最近一次保存失败——界面已回滚到服务端状态，请重试。</div>}
       <div className="rw-console-toolbar">
-        <button className="rw-btn" disabled={busy || allOn} onClick={() => save(selectable.map((t) => t.name))}>全选</button>
-        <button className="rw-btn" disabled={busy || allOff} onClick={() => save([])}>全部取消</button>
-        <span className="rw-dash-muted">已启用 {curEnabled.length} / {selectable.length} 项</span>
+        {['base', 'pro', 'guard'].map((k) => (
+          <button key={k} className={'rw-btn' + (tab === k ? ' pri' : '')} onClick={() => setTab(k)}>
+            {k === 'base' ? '基础' : k === 'pro' ? '专业' : '权限高危'}（{tools.filter((t) => bucketOf(t) === k).length}）
+          </button>
+        ))}
+        <input className="rw-input" style={{ maxWidth: 180 }} placeholder="搜索工具/中文" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button className="rw-btn" disabled={!selectableInTab.length || allOnInTab} onClick={() => scheduleSave([...new Set([...curEnabled(), ...selectableInTab.map((t) => t.name)])])}>本 Tab 全选</button>
+        <button className="rw-btn" disabled={!anyOnInTab} onClick={() => scheduleSave(curEnabled().filter((n) => !selectableInTab.some((t) => t.name === n)))}>本 Tab 清空</button>
+        <span className="rw-dash-muted">已启用 {tools.filter((t) => t.enabled && !t.platformExempt).length} / {tools.filter((t) => !t.platformExempt).length} 项</span>
       </div>
-      {TIER_ORDER.map((tier) => {
-        const items = tools.filter((t) => t.tier === tier);
-        if (!items.length) return null;
-        return (
-          <div key={tier} className="rw-cap-group" style={{ marginTop: 10 }}>
-            <div className="rw-cap-gtitle">{TIER_LB[tier]}</div>
-            <div className="rw-toolgrid">
-              {items.map((t) => <ToolRow key={t.name} t={t} onToggle={toggle} />)}
-            </div>
-          </div>
-        );
-      })}
+      <div className="rw-cap-gtitle" style={{ marginTop: 8 }}>{TIER_LB[tab]}</div>
+      {!tools.length && !err && <div className="rw-empty">加载中…</div>}
+      <div className="rw-toolgrid">
+        {tools.length > 0 && visible.length === 0 && <div className="rw-dash-muted">（无匹配工具）</div>}
+        {visible.map((t) => <ToolRow key={t.name} t={t} onToggle={toggle} />)}
+      </div>
     </div>
   );
 }

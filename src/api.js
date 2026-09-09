@@ -36,6 +36,7 @@ export const api = {
   activity: (id, after) => request('/api/conversations/' + id + '/activity?after=' + (Number(after) || 0)),
   getToolset: () => request('/api/toolset'),
   setToolset: (enabled) => request('/api/toolset', { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  getToolUsage: () => request('/api/toolusage'),
   getRules: () => request('/api/access-rules'),
   saveRules: (rules) => request('/api/access-rules', { method: 'PUT', body: JSON.stringify({ rules }) }),
   proposals: () => request('/api/proposals'),
@@ -87,7 +88,7 @@ export const api = {
   knowledgeList: (params) => request('/api/knowledge?' + new URLSearchParams(params || {}).toString()),
   knowledgeImport: (body) => request('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
   knowledgeDelete: (id) => request('/api/knowledge/' + id, { method: 'DELETE' }),
-  // M2 统一后台（§7.2 八板块）
+  // M2/A 系列统一后台（console 各板块 API）
   modelToggle: (id, enabled) => request('/api/models/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   providerTest: (baseUrl, apiKey) => request('/api/providers/test', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey }) }),
   telemetryDaily: (params) => request('/api/telemetry/daily?' + new URLSearchParams(params || {}).toString()),

@@ -810,7 +810,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
         <div className="rw-logo" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">Roni Workbench</div>
         <div className="rw-conv-title">{curTitle || 'Roni Workbench'}</div>
         <div className="rw-top-actions">
-          {onGoConsole && <button className="rw-btn" onClick={() => onGoConsole()} title="统一后台（M2：八板块）">🎛 后台</button>}
+          {onGoConsole && <button className="rw-btn" onClick={() => onGoConsole()} title="统一后台">🎛 后台</button>}
           <button className="rw-btn" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">🏠 首页</button>
           <button className="rw-btn" onClick={() => setKbOpen(true)} title="知识库：上传/管理（④）">📚 知识</button>
           {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}

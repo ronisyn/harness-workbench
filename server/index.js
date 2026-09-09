@@ -107,7 +107,7 @@ app.put('/api/models/:id', requireAuth, async (req, res) => {
 
 // ---------- 能力开关（2026-09-09 移除：A/B/C 三组从未接线到运行时，属误导展示；真实可配=下方工具启用集 + 壳 tools 三态 + 权限/规则；capabilities 表已随迁移清理） ----------
 
-// 5.3c 工具启用集（默认 DEFAULT_TOOLSET 25；平台豁免工具恒可用；设置→工具 勾选维护）
+// 5.3c 工具启用集（默认 DEFAULT_TOOLSET 28；平台豁免工具恒可用；设置→工具 勾选维护）
 // 2026-09-09：真实工具列表人读化——遍历实际注册 TOOLS，附中文名/用途(meta when/not)/权限分级，取代误导性"能力开关"
 app.get('/api/toolset', requireAuth, async (req, res) => {
   try {
@@ -142,6 +142,18 @@ app.put('/api/toolset', requireAuth, async (req, res) => {
     const clean = [...new Set(enabled)].filter((n) => valid.has(n) && !PLATFORM_EXEMPT.includes(n));
     await setSetting('toolset_enabled', clean);
     res.json({ ok: true, enabled: clean.length });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// A4 工具使用率看板（§8.5：tool_calls 实时统计 7/30 天调用数+失败数+均耗时，不加埋点；热度标签前端按占比呈现）
+app.get('/api/toolusage', requireAuth, async (req, res) => {
+  try {
+    const days = [7, 30];
+    const base = 'SELECT tool_name, COUNT(*) c, SUM(status="fail") fails, COALESCE(AVG(duration_ms),0) avgMs FROM tool_calls WHERE created_at > NOW() - INTERVAL ? DAY GROUP BY tool_name';
+    const [d7, d30] = await Promise.all(days.map((d) => db.query(base, [d])));
+    const cnOf = {};
+    for (const t of TOOLS) { const m = TOOL_META[t.name] || {}; cnOf[t.name] = TOOL_CN[t.name] || t.name; }
+    const map = (rows) => rows.map((r) => ({ tool: r.tool_name, cn: cnOf[r.tool_name] || r.tool_name, calls: Number(r.c), fails: Number(r.fails || 0), failRate: Number(r.c) ? Number(r.fails || 0) / Number(r.c) : 0, avgMs: Math.round(Number(r.avgMs || 0)) }));
+    res.json({ ok: true, d7: map(d7), d30: map(d30) });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
