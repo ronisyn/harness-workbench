@@ -1,5 +1,6 @@
 // src/shared/SettingsPanel.jsx - R2 单一事实源：高级参数（温度/系统提示词/运行护栏/预算/上下文，schema 驱动）
 // 统一后台 1.8 设置使用（原对话页⚙设置抽屉已退役）；数据自管（GET/PUT /api/settings）。
+// 2026-09-09 UI：后台 1.8 样式优化——竖排窄行改两列卡片网格（标签+输入同行，hint 撑高防"矮长条"）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 
@@ -8,6 +9,23 @@ const GROUPS = [
   { g: 'budget', lb: '预算' },
   { g: 'context', lb: '上下文折叠' },
 ];
+
+function NumCard({ s, v, onChange, onCommit }) {
+  return (
+    <div className="rw-set-card">
+      <div className="rw-set-card-head">
+        <span className="rw-set-card-label">{s.label}</span>
+        <input className="rw-set-num" type="number" min={s.min || 0} value={v ?? s.def ?? 0}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={(e) => {
+            const raw = Number(e.target.value);
+            onCommit(Number.isFinite(raw) ? Math.max(s.min || 0, raw) : (s.def ?? 0));
+          }} />
+      </div>
+      <div className="rw-set-card-hint">{s.hint || ''}</div>
+    </div>
+  );
+}
 
 export default function SettingsPanel({ compact = false }) {
   const [schema, setSchema] = useState([]);
@@ -44,35 +62,43 @@ export default function SettingsPanel({ compact = false }) {
       <div className="rw-cap-gtitle">高级参数</div>
       {err && <div className="rw-kb-err">{err}</div>}
       {msg && <div className="rw-kb-msg">{msg}</div>}
-      <div className="rw-cap-item col">
-        <span style={{ marginBottom: 4 }}>温度（{extra.temperature.toFixed(2)}；拖动/键盘均可，松开即保存）</span>
-        <input type="range" min="0" max="1.5" step="0.05" value={extra.temperature} style={{ width: '100%', height: 18, accentColor: 'var(--rw-red)' }}
-          onChange={(e) => setTempDebounced(Number(e.target.value))} />
-      </div>
-      <div className="rw-cap-item col">
-        <span style={{ marginBottom: 4 }}>系统提示词（用户自定义指令；留空=不注入）</span>
-        <textarea className="rw-input" rows="3" value={extra.systemPrompt}
-          onChange={(e) => setExtra((o) => ({ ...o, systemPrompt: e.target.value }))}
-          onBlur={() => setOne('systemPrompt', extra.systemPrompt)} />
-      </div>
-      {GROUPS.map(({ g, lb }) => (
-        <div key={g} className="rw-cap-group">
-          <div className="rw-cap-gtitle">{lb}</div>
-          {schema.filter((s) => s.group === g).map((s) => (
-            <div key={s.key} className="rw-cap-item col">
-              <span style={{ marginBottom: 4 }}>{s.label}（{s.hint || ''}）</span>
-              <input className="rw-input" type="number" min={s.min || 0} value={sval[s.key] ?? s.def ?? 0}
-                onChange={(e) => setSval((o) => ({ ...o, [s.key]: e.target.value }))}
-                onBlur={(e) => {
-                  const raw = Number(e.target.value);
-                  const v = Number.isFinite(raw) ? Math.max(s.min || 0, raw) : (s.def ?? 0);
-                  setSval((o) => ({ ...o, [s.key]: v }));
-                  setOne(s.key, v);
-                }} />
-            </div>
-          ))}
+
+      {/* 温度 + 系统提示词：上下两卡片，非数字窄行 */}
+      <div className="rw-set-grid">
+        <div className="rw-set-card span2">
+          <div className="rw-set-card-head">
+            <span className="rw-set-card-label">温度（{Number(extra.temperature).toFixed(2)}；拖动/键盘均可，自动保存）</span>
+          </div>
+          <input type="range" min="0" max="1.5" step="0.05" value={extra.temperature}
+            style={{ width: '100%', height: 18, accentColor: 'var(--rw-red)', marginTop: 4 }}
+            onChange={(e) => setTempDebounced(Number(e.target.value))} />
         </div>
-      ))}
+        <div className="rw-set-card span2">
+          <div className="rw-set-card-head">
+            <span className="rw-set-card-label">系统提示词（用户自定义指令；留空=不注入）</span>
+          </div>
+          <textarea className="rw-input" rows="3" style={{ marginTop: 6, width: '100%', boxSizing: 'border-box' }} value={extra.systemPrompt}
+            onChange={(e) => setExtra((o) => ({ ...o, systemPrompt: e.target.value }))}
+            onBlur={() => setOne('systemPrompt', extra.systemPrompt)} />
+        </div>
+      </div>
+
+      {GROUPS.map(({ g, lb }) => {
+        const items = schema.filter((s) => s.group === g);
+        if (!items.length) return null;
+        return (
+          <div key={g} className="rw-cap-group" style={{ marginTop: 16 }}>
+            <div className="rw-cap-gtitle">{lb}</div>
+            <div className="rw-set-grid">
+              {items.map((s) => (
+                <NumCard key={s.key} s={s} v={sval[s.key]}
+                  onChange={(val) => setSval((o) => ({ ...o, [s.key]: val }))}
+                  onCommit={(v) => { setSval((o) => ({ ...o, [s.key]: v })); setOne(s.key, v); }} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
       {!compact && <div className="rw-console-note">护栏键保存即 bump policy_rev（模型最快 ~5s 感知）；其余普通参数即时生效不 bump。</div>}
     </div>
   );

@@ -82,70 +82,73 @@ function useKnowledgeState() {
 }
 
 // 唯一内容体（上传链 + 列表管理）——抽屉与 embedded 共用
+// 2026-09-09 UI 取长补短（参照 885 工作台知识库：卡片化/范围色标/预览截断/空态更友好）
+function kbKindOf(r) {
+  // 从标题推断来源形态（上传文件/文档名），用于卡片左侧图标字母
+  const t = String(r.title || '');
+  const ext = (t.split('.').pop() || '').toLowerCase();
+  const m = { xlsx: 'X', xls: 'X', csv: 'C', txt: 'T', md: 'M', json: 'J', pdf: 'P', docx: 'D', pptx: 'P' };
+  if (m[ext]) return { tag: m[ext], color: { X: '#1e7a3c', C: '#2a7f62', T: '#8a6d1a', M: '#8a6d1a', J: '#5b6472', P: '#b02a37', D: '#2b579a' }[m[ext]] };
+  return { tag: 'K', color: '#8a8f98' };
+}
 function KbBody() {
   const s = useKnowledgeState();
   return (
     <div className="rw-kb-content">
-      {/* 上传链 */}
-      <div className="rw-cap-group">
-        <div className="rw-cap-gtitle">上传 → 解析入库（xlsx/csv 行结构化 / txt/md 分段 / json 数组）</div>
-        <label className="rw-cap-item col">
-          <span style={{ marginBottom: 4 }}>归属</span>
-          <select className="rw-select" value={s.scope} onChange={(e) => s.setScope(e.target.value)}>
-            {SCOPES.map((x) => <option key={x.v} value={x.v}>{x.lb}</option>)}
-          </select>
-        </label>
+      {/* 上传链（工具条式：归属 + 目标壳 + 文件 + 表头 + 导入） */}
+      <div className="rw-kb-upload">
+        <select className="rw-select" value={s.scope} onChange={(e) => s.setScope(e.target.value)} title="知识归属">
+          {SCOPES.map((x) => <option key={x.v} value={x.v}>{x.lb}</option>)}
+        </select>
         {s.scope === 'shell' && (
-          <label className="rw-cap-item col">
-            <span style={{ marginBottom: 4 }}>目标壳（壳私有仅该壳会话可见）</span>
-            <select className="rw-select" value={s.shellKey} onChange={(e) => s.setShellKey(e.target.value)}>
-              {s.shells.length === 0 && <option value="">（无可用壳）</option>}
-              {s.shells.map((x) => <option key={x.skey} value={x.skey}>{x.name}（{x.skey}）</option>)}
-            </select>
-          </label>
-        )}
-        <label className="rw-cap-item col">
-          <span style={{ marginBottom: 4 }}>文件</span>
-          <input ref={s.fileRef} className="rw-input" type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={s.pickFile} />
-        </label>
-        <label className="rw-cap-item" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input type="checkbox" checked={s.hasHeader} onChange={(e) => s.setHasHeader(e.target.checked)} />
-          <span>表格首行为表头（作为列名）</span>
-        </label>
-        <button className="rw-btn pri" onClick={s.doImport} disabled={s.busy}>{s.busy ? '导入中…' : '⬆ 上传并导入'}</button>
-        {s.msg && <div className="rw-kb-msg">{s.msg}</div>}
-        {s.err && <div className="rw-kb-err">{s.err}</div>}
-      </div>
-      {/* 列表管理 */}
-      <div className="rw-cap-group">
-        <div className="rw-cap-gtitle">知识条目</div>
-        <div className="rw-kb-filters">
-          <select className="rw-select" value={s.fScope} onChange={(e) => s.setFScope(e.target.value)}>
-            <option value="">全部范围</option>
-            <option value="global">全局</option>
-            <option value="shell">壳私有</option>
-            <option value="conv">会话私有</option>
+          <select className="rw-select" value={s.shellKey} onChange={(e) => s.setShellKey(e.target.value)} title="目标壳">
+            {s.shells.length === 0 && <option value="">（无可用壳）</option>}
+            {s.shells.map((x) => <option key={x.skey} value={x.skey}>{x.name}</option>)}
           </select>
-          <input className="rw-input" placeholder="关键词过滤…" value={s.q}
-            onChange={(e) => s.setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') s.loadList(); }} />
-          <button className="rw-btn" onClick={s.loadList}>查询</button>
-        </div>
-        <div className="rw-kb-list">
-          {!s.loaded && <div className="rw-kb-empty">加载中…</div>}
-          {s.loaded && s.rows.length === 0 && <div className="rw-kb-empty">（无条目）</div>}
-          {s.rows.map((r) => (
+        )}
+        <label className="rw-kb-file">
+          <input ref={s.fileRef} type="file" accept=".xlsx,.xls,.csv,.txt,.md,.json" onChange={s.pickFile} />
+          {s.fileName || '选择文件（xlsx/csv 行结构化 / txt/md 分段 / json）'}
+        </label>
+        <label className="rw-kb-hdr"><input type="checkbox" checked={s.hasHeader} onChange={(e) => s.setHasHeader(e.target.checked)} />表头</label>
+        <button className="rw-btn pri" onClick={s.doImport} disabled={s.busy || !s.fileName}>{s.busy ? '导入中…' : '⬆ 导入'}</button>
+      </div>
+      {s.msg && <div className="rw-kb-msg">{s.msg}</div>}
+      {s.err && <div className="rw-kb-err">{s.err}</div>}
+
+      {/* 列表管理 */}
+      <div className="rw-kb-filters" style={{ marginTop: 14 }}>
+        <span className="rw-kb-tag global">知识条目 {s.rows.length} 条</span>
+        <select className="rw-select" value={s.fScope} onChange={(e) => s.setFScope(e.target.value)}>
+          <option value="">全部范围</option>
+          <option value="global">全局</option>
+          <option value="shell">壳私有</option>
+          <option value="conv">会话私有</option>
+        </select>
+        <input className="rw-input" placeholder="关键词过滤（回车查询）…" value={s.q}
+          onChange={(e) => s.setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') s.loadList(); }} />
+        <button className="rw-btn" onClick={s.loadList}>查询</button>
+      </div>
+      <div className="rw-kb-list">
+        {!s.loaded && <div className="rw-kb-empty">加载中…</div>}
+        {s.loaded && s.rows.length === 0 && <div className="rw-kb-empty">（暂无知识条目——上传文件后 RW 可在会话中检索；技能/文档等结构化内容见后台其它板块）</div>}
+        {s.rows.map((r) => {
+          const k = kbKindOf(r);
+          const scopeLb = r.scope === 'global' ? '全局' : r.scope === 'shell' ? '壳·' + (r.shell_key || r.shell_id) : '会话';
+          return (
             <div key={r.id} className="rw-kb-item">
-              <div className="rw-kb-item-head">
-                <span className={'rw-kb-tag ' + r.scope}>
-                  {r.scope === 'global' ? '全局' : r.scope === 'shell' ? '壳:' + (r.shell_key || r.shell_id) : '会话'}
-                </span>
-                <b>{r.title}</b>
-                <button className="rw-conv-del" title="删除" onClick={() => s.delRow(r.id)}>✕</button>
+              <span className="rw-kb-item-ico" style={{ background: k.color }}>{k.tag}</span>
+              <div className="rw-kb-item-main">
+                <div className="rw-kb-item-head">
+                  <span className={'rw-kb-tag ' + (r.scope === 'global' ? 'global' : r.scope === 'shell' ? 'shell' : 'conv')}>{scopeLb}</span>
+                  <b title={r.title}>{r.title}</b>
+                  <button className="rw-conv-del" title="删除" onClick={() => s.delRow(r.id)}>✕</button>
+                </div>
+                {r.body_preview && <div className="rw-kb-body">{r.body_preview}</div>}
               </div>
-              {r.body_preview && <div className="rw-kb-body">{r.body_preview}</div>}
             </div>
-          ))}
-        </div>
+          );
+        })}
       </div>
     </div>
   );
