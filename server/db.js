@@ -454,12 +454,13 @@ export async function initSchema() {
       []
     );
   } catch { /* 表不可用则跳过 */ }
-  // ⑤ 观测视图（幂等）：按 壳×厂商×模型×日 的执行事实聚合
+  // ⑤ 观测视图（幂等）：按 壳×厂商×模型×日 的执行事实聚合（2026-09-11 A1：补 cache_hit/miss 聚合列——命中率按日数据出口，总方案 §7.4 登记①）
   const VIEWS = [
     `CREATE OR REPLACE VIEW v_model_telemetry_daily AS
        SELECT shell_id, provider, model, DATE(created_at) AS d, COUNT(*) AS execs,
               COALESCE(SUM(tokens_in),0) AS tokens_in, COALESCE(SUM(tokens_out),0) AS tokens_out,
-              COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(duration_ms),0) AS duration_ms
+              COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(duration_ms),0) AS duration_ms,
+              COALESCE(SUM(cache_hit),0) AS cache_hit, COALESCE(SUM(cache_miss),0) AS cache_miss
        FROM model_telemetry GROUP BY shell_id, provider, model, DATE(created_at)`,
   ];
   for (const sql of VIEWS) {

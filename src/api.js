@@ -44,6 +44,7 @@ export const api = {
   mcpStatus: () => request('/api/mcp'),
   mcpReload: () => request('/api/mcp/reload', { method: 'POST' }),
   usageStats: (conversationId) => request('/api/usage/stats' + (conversationId ? '?conversationId=' + conversationId : '')),
+  cacheHitSummary: () => request('/api/cache-hit/summary'),
   marketList: () => request('/api/market/list'),
   marketRefresh: () => request('/api/market/refresh', { method: 'POST' }),
   marketConnect: (source, modelIds) => request('/api/market/connect', { method: 'POST', body: JSON.stringify({ source, modelIds }) }),

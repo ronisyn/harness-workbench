@@ -919,6 +919,32 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
   });
 });
 
+// ---------- 缓存命中率目标摘要（§8.10 cache_hit_rate_target；首页状态带数据源,2026-09-11 A1） ----------
+app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
+  try {
+    const raw = await db.query('SELECT svalue FROM settings WHERE skey=?', ['cache_hit_rate_target']);
+    let target = 0;
+    if (raw && raw[0] && raw[0].svalue != null) { const v = Number(raw[0].svalue); target = Number.isFinite(v) && v > 0 ? v : 0; }
+    const rows = await db.query(
+      `SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss
+       FROM usage_stats WHERE account_id=? AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+       GROUP BY DATE(created_at) ORDER BY d`, [req.user.id]);
+    const now = new Date(); const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    const sum = (arr) => arr.reduce((s, r) => s + Number(r.hit) + Number(r.miss), 0);
+    const rate = (arr) => { const h = arr.reduce((s, r) => s + Number(r.hit), 0); const m = arr.reduce((s, r) => s + Number(r.miss), 0); return (h + m) > 0 ? (100 * h / (h + m)) : null; };
+    const todayRow = rows.find((r) => String(r.d).slice(0, 10) === todayStr) || null;
+    const f = (x) => (x == null ? null : Number(x.toFixed(1)));
+    const todayRate = todayRow && (Number(todayRow.hit) + Number(todayRow.miss)) > 0 ? 100 * Number(todayRow.hit) / (Number(todayRow.hit) + Number(todayRow.miss)) : null;
+    const avg7 = rate(rows.slice(-7));
+    res.json({
+      ok: true, target,
+      todayHit: todayRow ? Number(todayRow.hit) : 0, todayMiss: todayRow ? Number(todayRow.miss) : 0,
+      todayRate: f(todayRate), avg7: f(avg7), daily: rows.slice(-30).map((r) => ({ d: String(r.d), hit: Number(r.hit), miss: Number(r.miss) })),
+      alert: target > 0 && avg7 != null && avg7 < target,
+    });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
 // ---------- 结构化问询裁决（ask_user 卡片） ----------
 app.get('/api/asks', requireAuth, async (req, res) => {
   const { listPendingAsks } = await import('./asks.js');

@@ -8,6 +8,7 @@ const GROUPS = [
   { g: 'runtime', lb: '运行护栏（0=不限；即时生效）' },
   { g: 'budget', lb: '预算' },
   { g: 'context', lb: '上下文折叠' },
+  { g: 'observe', lb: '观测（不 bump 政策版本）' },
 ];
 
 function NumCard({ s, v, onChange, onCommit }) {

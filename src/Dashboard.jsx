@@ -14,6 +14,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
   const [recent, setRecent] = useState([]);     // 最近会话（跳对话页用）
   // —— 看板 ——
   const [stats, setStats] = useState(null);
+  const [hitSum, setHitSum] = useState(null);   // 缓存命中率目标摘要（A1 状态带）
   const [statsLoaded, setStatsLoaded] = useState(false);
   const [statsErr, setStatsErr] = useState(false);
   const [shells, setShells] = useState([]);
@@ -33,6 +34,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
     try { const s = await api.usageStats(); setStats(s.stats); setStatsErr(false); }
     catch { setStatsErr(true); }
     finally { setStatsLoaded(true); }
+    try { const h = await api.cacheHitSummary(); setHitSum(h); } catch { /* ignore */ }
     try { const sh = await api.shells(); setShells((sh.shells || []).filter((x) => x.status === 'enabled')); } catch { /* ignore */ }
     try { const kb = await api.knowledgeList({}); setKbCount((kb.knowledge || []).length); } catch { /* ignore */ }
     try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ }
@@ -119,6 +121,13 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
         </div>
       </header>
       <div className="rw-dash">
+        {hitSum && hitSum.target > 0 && (
+          <div style={{ marginBottom: 10, padding: '6px 12px', borderRadius: 8, background: hitSum.alert ? '#fff1f0' : '#f0f7ff', border: '1px solid ' + (hitSum.alert ? '#ffa39e' : '#91caff'), color: hitSum.alert ? '#cf1322' : '#0958d9' }}>
+            {hitSum.alert
+              ? `⚠️ 缓存命中率告警：近7日均值 ${hitSum.avg7}% < 目标 ${hitSum.target}%（今日 ${hitSum.todayRate}%）——进化集已生成建议，可转行动`
+              : `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（目标 ${hitSum.target}%）`}
+          </div>
+        )}
         {/* 迷你对话 */}
         <section className="rw-dash-card rw-dash-mini">
           <div className="rw-dash-title">⚡ 迷你对话 <span className="rw-dash-sub">与对话页同一会话体系（现有 /api/chat）；点「对话页」可展开完整工具视图</span></div>
