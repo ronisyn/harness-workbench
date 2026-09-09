@@ -99,7 +99,6 @@ export default function AgentWizard({ initial, onClose, onDone }) {
       let canary = null;
       try { canary = await api.shellCanary(r.key); } catch { canary = null; }
       setResult({ shellKey: r.key, canary });
-      if (onDone) onDone({ key: r.key, canary });
     } catch (e) { setErr('建壳失败：' + e.message); }
     finally { setBusy(false); }
   };
@@ -165,13 +164,12 @@ export default function AgentWizard({ initial, onClose, onDone }) {
           <div className="rw-cap-gtitle">选择壳模板（预填 persona/领域/工具三态/技能，可再改；或自建空壳）</div>
           <div className="rw-dash-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))' }}>
             {(tpls.length ? tpls : [{ key: 'blank', name: '自建（空壳起步）', hint: '手填身份/人格/领域，不预填' }]).map((t) => (
-              <div key={t.key} className="rw-dash-card" style={{ cursor: 'pointer' }} onClick={() => (t.key === 'blank' && !tpls.length ? setStep(1) : applyTpl(t))}>
+              <div key={t.key} className="rw-dash-card" style={{ cursor: 'pointer' }} onClick={() => applyTpl(t)}>
                 <div className="rw-dash-title">🧩 {t.name}</div>
                 <div className="rw-dash-muted" style={{ fontSize: 12 }}>{t.hint || ''}</div>
                 {(t.skills || []).map((s) => <span key={s} className="rw-provider-model">技能:{s}</span>)}
               </div>
             ))}
-            {tpls.some((t) => t.key === 'blank') && <div className="rw-dash-card" style={{ cursor: 'pointer' }} onClick={() => setStep(1)}><div className="rw-dash-title">🧩 自建（跳过模板）</div><div className="rw-dash-muted" style={{ fontSize: 12 }}>手填全部字段</div></div>}
           </div>
         </div>
       )}
@@ -343,7 +341,7 @@ export default function AgentWizard({ initial, onClose, onDone }) {
       <div className="rw-console-toolbar" style={{ marginTop: 12 }}>
         <button className="rw-btn" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>← 上一步</button>
         {step < 8 && <button className="rw-btn pri" onClick={() => setStep((s) => s + 1)} disabled={!canNext()}>下一步 →</button>}
-        {step === 8 && initial && <button className="rw-btn" onClick={() => onClose && onClose()}>完成</button>}
+        {step === 8 && (initial || result) && <button className="rw-btn pri" onClick={() => onClose && onClose()}>{result ? '完成，返回列表' : '完成'}</button>}
         {step !== 8 && <button className="rw-btn" onClick={() => (onClose ? onClose() : setStep(8))}>{initial ? '取消' : '跳到验收预览'}</button>}
       </div>
     </div>
