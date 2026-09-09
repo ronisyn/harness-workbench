@@ -1,6 +1,7 @@
 // src/console/Console.jsx - 统一后台（分组导航：平台 / Agent / 应用市场；入口 /console/*，同站同账号）
 // 2026-09-09 重分组（用户定）：平台（模型广场/观测/知识库/设置）；Agent（能力/进化）；
-// 应用市场（壳开发/应用，插件体系建设中占位）。板块 code 不变（URL 兼容），仅分组/标签调整。
+// 应用市场（Agent壳/应用/扩展中心）。板块 code 不变（URL 兼容），仅分组/标签调整。
+// A5：技能库=平台板块（code 'skills'；能力页=工具集内容仍在 agent-caps 以保 URL 兼容）。
 import React from 'react';
 import ModelObsBoard from './ModelObs.jsx';
 import KbBoard from './KbBoard.jsx';
@@ -11,16 +12,19 @@ import CapsBoard from './CapsBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
 import AppsBoard from './AppsBoard.jsx';
 import ExtCenterBoard from './ExtCenterBoard.jsx';
+import SkillsBoard from './SkillsBoard.jsx';
 
 // 板块注册表：code → { group, label, render }（group 决定左侧分组）
 export const BOARDS = {
   // —— 平台 ——
   'models-plaza': { group: '平台', label: '模型广场', render: () => <ModelPlazaBoard /> },
   'models-obs': { group: '平台', label: '模型观测', render: () => <ModelObsBoard /> },
+  'skills': { group: '平台', label: '技能库', render: () => <SkillsBoard /> },
   'kb': { group: '平台', label: '知识库', render: () => <KbBoard /> },
   'settings': { group: '平台', label: '设置', render: () => <SettingsBoard /> },
   // —— Agent ——
-  'agent-caps': { group: 'Agent', label: 'Agent 能力', render: () => <CapsBoard /> },
+  // A4：工具集/规则（§8.5）已按定版归入 平台组；code agent-caps 保留兼容旧链，页面注册移到平台组
+  'agent-caps': { group: '平台', label: '工具集', render: () => <CapsBoard /> },
   'agent-evo': { group: 'Agent', label: 'Agent 进化', render: () => <EvoBoard /> },
   // —— 应用市场 ——
   // A2：壳开发 1.3 升级为 Agent（壳）页 = 壳列表/详情/新建 + 装配向导 + 任务模板库子区（§8.9；URL code 不变兼容旧链）

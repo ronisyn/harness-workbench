@@ -14,7 +14,7 @@
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
 import { execFileSync } from 'node:child_process';
 import { TOOL_META, PLATFORM_EXEMPT } from './meta.js';
-
+import { db } from '../db.js';
 const registry = [];
 const MAX_HOOKS = 128;
 
@@ -213,6 +213,27 @@ registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
   const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
   if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
     return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
+  }
+  return {};
+}, { builtin: true, failClosed: false });
+
+// A5 硬闸门（§8.6 关键流程技能）：开发需求采集必须走 intake 流程——
+// 未在本会话载入对应 intake 技能（plugin-dev-intake/app-dev-intake/shell-intake）时拒绝 intake_submit，
+// 引导先 skill_load 该技能完成字段采集（不猜口令词、不跳流程；动作层拦截）。
+const INTAKE_SKILL_BY_TYPE = { plugin: 'plugin-dev-intake', app: 'app-dev-intake', shell: 'shell-intake' };
+registerHook('before', 'intake_submit', 'intake_skill_guard', async ({ args, ctx }) => {
+  const atype = args && args.assetType;
+  const need = INTAKE_SKILL_BY_TYPE[atype];
+  if (!need) return {};
+  const loaded = new Set(Object.keys((ctx && ctx.skills) || {}));
+  if (ctx && ctx.conversationId) {
+    try {
+      const rows = await db.query('SELECT skill_name FROM conv_skills WHERE conversation_id=?', [ctx.conversationId]);
+      for (const r of rows) loaded.add(r.skill_name);
+    } catch { /* DB 不可用时以 ctx.skills 为准 */ }
+  }
+  if (!loaded.has(need)) {
+    return { stop: true, reason: `开发需求采集硬闸（§8.6）：intake_submit(${atype}) 前必须先载入流程技能 "${need}"（skill_load {name:"${need}"}）——它会逐项向你采集 触发场景/期望效果/涉及壳/代码动作类型，字段齐才允许立项，防跳过需求采集直接开发。` };
   }
   return {};
 }, { builtin: true, failClosed: false });

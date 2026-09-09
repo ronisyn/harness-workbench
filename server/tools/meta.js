@@ -28,7 +28,7 @@ export const TOOL_META = {
   get_goal: { tier: 'core', when: '查看当前活动目标与进度', not: '—', ex: 'get_goal {}' },
   update_goal: { tier: 'core', when: '汇报目标进展/标记完成/放弃', not: '—', ex: 'update_goal {progress, status:"done"}' },
   repo_map: { tier: 'core', when: '大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）', not: '小目录直接 list_dir；找符号位置用 grep_search', ex: 'repo_map {dir:"/srv/harness-workbench"}' },
-  // ===== pro(32) =====
+  // ===== pro(33) =====
   ocr_image: { tier: 'pro', when: '图片含文字需提取（截图/扫描件）', not: '图片理解用 view_image', ex: 'ocr_image {path}' },
   view_image: { tier: 'pro', when: '视觉理解图片内容', not: '纯文字提取用 ocr_image', ex: 'view_image {path}' },
   extract_pdf: { tier: 'pro', when: '解析 PDF 文本', not: '文本文件用 read_file', ex: 'extract_pdf {path}' },
@@ -57,6 +57,8 @@ export const TOOL_META = {
   skill_load: { tier: 'pro', when: '载入技能（全文入系统提示，会话内持续生效）', not: '一次性约定用 kb_add', ex: 'skill_load {name}' },
   skill_save: { tier: 'pro', when: '新建/更新技能（复盘结论固化）', not: '零散经验用 kb_add', ex: 'skill_save {name, description, body}' },
   ralph: { tier: 'pro', when: '难题多轮"全新视角"逼近（每轮无历史）', not: '常规任务别用（成本高）', ex: 'ralph {objective}' },
+  // A5 开发需求采集收口（intake_submit：四字段齐落 extension_demands 待审；须先载入对应 intake 技能——硬闸门见 hooks.js）
+  intake_submit: { tier: 'pro', when: 'intake 技能（plugin/app/shell-dev-intake）采集齐 触发场景/期望效果/涉及壳/代码动作类型 后提交开发需求', not: '字段未齐/未载入对应 intake 技能（会被硬闸拦）；未审批不得自行开发', ex: 'intake_submit {assetType:"plugin", scene, effect, shells, actionType}' },
   feishu_doc_read: { tier: 'pro', when: '读飞书云文档/知识库内容', not: '非飞书用 fetch_url', ex: 'feishu_doc_read {url}' },
   feishu_sheet_read: { tier: 'pro', when: '读飞书电子表格', not: '—', ex: 'feishu_sheet_read {url, range}' },
   feishu_bitable_read: { tier: 'pro', when: '读飞书多维表格', not: '—', ex: 'feishu_bitable_read {appToken, tableId}' },
@@ -84,7 +86,8 @@ export const DEFAULT_TOOLSET = [
 // 平台控制工具豁免启用集（始终可用；仍受 preset 分级约束；P4 后 plan_mode/exit_plan_mode 已退役移除）
 // O-6（2026-09 批2）：hooks_list/undo_checkpoint 属平台纪律工具——拦截提示引导用 hooks_list 排查，若受启用集约束则被拦后无法自诊；
 // undo_checkpoint 是写坏文件的安全网回滚端，二者均应恒可用（不依赖用户勾选）。
-export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'hooks_list', 'undo_checkpoint'];
+// A5：intake_submit 恒可用（受 intake 技能硬闸门约束，动作层再拦，见 hooks.js）。
+export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'hooks_list', 'undo_checkpoint', 'intake_submit'];
 
 // P1 轻量工具集（2026-09 批1）：普通问答统一通道的轻量 schema——覆盖高频日常任务（读写文件/查库/检索/搜网/测试/知识），
 // 不含高危与重型工具（delete_file/db_write/git_pull_push/run_command/kill_process/reload/set_limits/plan_mode/子代理族）。
@@ -118,6 +121,8 @@ export const TOOL_CN = {
   subagent_report: '子代理复盘', subagent_list: '子代理列表', ralph: '多轮全新视角',
   // 契约/平台
   create_contract: '创建任务契约', conv_summarize: '归档会话', set_limits: '调整护栏', reload_platform: '重载平台', hooks_list: '查看钩子', plan_mode: '规划模式', exit_plan_mode: '退出规划',
+  // A5 intake 收口
+  intake_submit: '提交开发需求',
   // 飞书/外部
   feishu_doc_read: '读飞书文档', feishu_sheet_read: '读飞书表格', feishu_bitable_read: '读飞书多维表',
 };

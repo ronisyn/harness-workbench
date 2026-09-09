@@ -848,6 +848,28 @@ export const TOOLS = [
       return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。' };
     } },
 
+  // ---------- A5 开发需求采集（单一 intake 收口，§8.8 收敛与分层①）：intake 技能采集齐字段后 → intake_submit 落 extension_demands(待审)。
+  // 硬闸门（§8.6）：必须流程技能（plugin-dev-intake/app-dev-intake/shell-intake）未载入时本工具拒绝——见 hooks.js intake_skill_guard。
+  { name: 'intake_submit', description: '提交开发需求（单一 intake 收口）：四字段齐备后落 extension_demands 待审，供进化集审批台审。必须先在本会话 skill_load 载入对应的 intake 技能（plugin-dev-intake→插件 / app-dev-intake→应用），未载入会被硬闸拒绝。', permission: 'write',
+    params: {
+      assetType: { type: 'string', required: true, enum: ['plugin', 'app', 'shell'], desc: '资产类型：plugin 插件 / app 应用 / shell 壳' },
+      assetKey: { type: 'string', required: false, desc: '关联扩展资产 key（升级既有资产时填；新资产留空=新立项）' },
+      scene: { type: 'string', required: true, desc: '触发场景（何时要用）' },
+      effect: { type: 'string', required: true, desc: '期望效果' },
+      shells: { type: 'string', required: true, desc: '涉及壳（如 code / 全部）' },
+      actionType: { type: 'string', required: true, desc: '代码动作类型（新增/升级/修 bug）' },
+    },
+    run: async (a, ctx) => {
+      const { assetType, scene, effect, shells, actionType } = a;
+      if (!scene || !effect || !shells || !actionType) throw new Error('intake 采集字段需齐备（scene/effect/shells/actionType）');
+      const kind = 'manual';
+      const content = `【能力类型】${assetType === 'plugin' ? '插件' : assetType === 'app' ? '应用' : '壳'}\n【能力名】${a.assetKey || '(新资产-待立项)'}\n【触发场景】${scene}\n【期望效果】${effect}\n【涉及壳】${shells}\n【代码动作类型】${actionType}`;
+      const key = String(a.assetKey || '').slice(0, 64) || null;
+      const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key, kind, '会话(intake)', content.slice(0, 2000)]);
+      try { await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId ?? null, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' via=intake_submit id=' + r.insertId]); } catch { /* 审计失败不阻断 */ }
+      return { ok: true, id: r.insertId, status: '待审', note: '已进入需求闭环：进化集审批台统一审（采纳→立项；驳回→记录）。请勿在审批前自行开发。' };
+    } },
+
   // ---------- 技能系统（F15：机制=挂载 SKILL.md；内容由用户/服务器自定，平台不预设） ----------
   { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', permission: 'read',
     params: {},
@@ -859,6 +881,7 @@ export const TOOLS = [
         const p = path.join(SKILLS_ROOT, d.name, 'SKILL.md');
         if (!fs.existsSync(p)) continue;
         const { meta } = parseSkillFront(fs.readFileSync(p, 'utf8'));
+        if (String(meta.enabled || '') === 'false') continue; // A5 停用语义：enabled:false 软停（文件保留，列表/载入跳过）
         out.push({ name: d.name, description: meta.description || '(无简介)', version: meta.version || '1.0.0' });
       }
       return { skills: out, root: SKILLS_ROOT };
@@ -872,6 +895,7 @@ export const TOOLS = [
       if (!fs.existsSync(p)) throw new Error('技能不存在: ' + name + '（可先用 skill_save 创建）');
       const full = fs.readFileSync(p, 'utf8').slice(0, 16000);
       const { meta, body } = parseSkillFront(full);
+      if (String(meta.enabled || '') === 'false') throw new Error('技能 ' + name + ' 已停用（enabled:false，技能库页可看到）。请勿使用停用技能。'); // A5
       ctx.skills = ctx.skills || {};
       ctx.skills[name] = { name, description: meta.description || '', content: full };
       if (ctx.conversationId) {

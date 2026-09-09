@@ -17,6 +17,7 @@ import { resolveTaskProfile } from './profile.js';
 import { listShells, getShellByKey, importShell, cloneShell, disableShell, patchShell, shellTools, exportShell } from './shellstore.js';
 import { runGoldenChecks, loadGoldenItems } from './canary.js';
 import { SHELL_TEMPLATES } from './shelltemplates.js';
+import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skillNameOk } from './skillsmgr.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
@@ -157,32 +158,74 @@ app.get('/api/toolusage', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
-// 技能库只读列表（Agent 装配向导 step5 勾选 / 技能库页用；文件权威=skills/<key>/SKILL.md，与 skill_load 同根目录）
-function parseSkillFrontMeta(raw) {
-  const meta = {};
-  const m = String(raw).match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (m) {
-    for (const line of m[1].split('\n')) {
-      const i = line.indexOf(':');
-      if (i > 0) meta[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return meta;
-}
+// A5 技能库（§8.6：skills/<名>/SKILL.md 文件权威；三层校验①静态②冲突③运行回环；停用=enabled:false 软停）
 app.get('/api/skills', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, skills: listSkillsMeta() }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.get('/api/skills/:name', requireAuth, async (req, res) => {
   try {
-    const out = [];
-    if (fs.existsSync(SKILLS_ROOT)) {
-      for (const d of fs.readdirSync(SKILLS_ROOT, { withFileTypes: true })) {
-        if (!d.isDirectory()) continue;
-        const p = path.join(SKILLS_ROOT, d.name, 'SKILL.md');
-        if (!fs.existsSync(p)) continue;
-        const meta = parseSkillFrontMeta(fs.readFileSync(p, 'utf8'));
-        out.push({ name: d.name, description: meta.description || '(无简介)', version: meta.version || '1.0.0' });
-      }
-    }
-    res.json({ ok: true, skills: out.sort((a, b) => String(a.name).localeCompare(String(b.name))) });
+    const s = getSkill(req.params.name);
+    if (!s) return res.status(404).json({ ok: false, message: '技能不存在' });
+    res.json({ ok: true, skill: s });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 保存（新建/更新；静态校验不过=400；返回冲突警告）
+app.post('/api/skills/:name', requireAuth, async (req, res) => {
+  try {
+    const name = String(req.params.name || '');
+    const content = String((req.body || {}).content || '');
+    if (!skillNameOk(name)) return res.status(400).json({ ok: false, message: 'name 非法（小写字母数字连字符）' });
+    if (!content) return res.status(400).json({ ok: false, message: 'content(SKILL.md 全文) 必填' });
+    const r = saveSkill(name, content, { enabled: (req.body || {}).enabled });
+    if (!r.ok) return res.status(400).json({ ok: false, message: '静态校验不过：' + r.errors.join('；') });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'skill:save', name + (r.enabled === false ? ' (enabled:false)' : '')]);
+    res.json({ ok: true, name, enabled: r.enabled, conflictWarnings: r.conflictWarnings || [] });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 停用/启用（软停：enabled:false；文件保留）
+app.patch('/api/skills/:name', requireAuth, async (req, res) => {
+  try {
+    const enabled = (req.body || {}).enabled !== false;
+    const r = setSkillEnabled(req.params.name, enabled);
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.message || '操作失败' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, enabled ? 'skill:enable' : 'skill:disable', req.params.name]);
+    res.json({ ok: true, name: req.params.name, enabled });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 删除（须先停用）
+app.delete('/api/skills/:name', requireAuth, async (req, res) => {
+  try {
+    const r = deleteSkill(req.params.name);
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.message || '删除失败' });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'skill:delete', req.params.name]);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 运行回环（第③层校验：存后跑一条真实会话载入技能，验证可载入+可执行初检；前台"保存并冒烟"用）
+app.post('/api/skills/:name/smoke', requireAuth, async (req, res) => {
+  try {
+    const name = String(req.params.name);
+    if (!skillNameOk(name)) return res.status(400).json({ ok: false, message: 'name 非法' });
+    const s = getSkill(name);
+    if (!s) return res.status(404).json({ ok: false, message: '技能不存在' });
+    const acc = req.user.id;
+    const conv = await db.query('INSERT INTO conversations (account_id, title, permission, preset) VALUES (?,?,?,?)', [acc, '技能冒烟:' + name, 'read', 'all']);
+    const cid = conv.insertId;
+    const result = await runAgent({
+      provider: 'deepseek', model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: '先 skill_load 载入技能 "' + name + '"，然后仅回答：已载入，技能适用场景是 ' + String(s.meta.description || '').slice(0, 200) + '。不要调用其它工具。' }],
+      permission: 'read', ctx: { permission: 'read', accountId: acc, conversationId: cid, root: process.env.RW_WORKSPACE || '/srv/rw-workspace', __light: false }, keys: config.keys,
+    });
+    const ok = !result.error && !(result.guard) && (String(result.content || '').includes('已载入') || String(result.content || '').length > 20);
+    const summary = String(result.content || result.error || '（无输出）').slice(0, 400);
+    await db.query('DELETE FROM conversations WHERE id=?', [cid]).catch(() => {});
+    for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_skills']) {
+      try { await db.query(`DELETE FROM ${t} WHERE conversation_id=?`, [cid]); } catch { /* 个别表未建则跳过 */ }
+    }
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [acc, 'skill:smoke', name + (ok ? ' PASS' : ' FAIL') + ' ' + summary.slice(0, 120)]);
+    res.json({ ok: true, name, passed: ok, summary });
+  } catch (e) { res.status(400).json({ ok: false, message: '冒烟异常: ' + e.message }); }
 });
 
 // ---------- 会话 ----------
