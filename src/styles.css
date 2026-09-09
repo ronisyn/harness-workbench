@@ -191,7 +191,7 @@ body {
   border-left: 1px solid var(--rw-border); box-shadow: -12px 0 40px rgba(0, 0, 0, 0.12); }
 .rw-drawer-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px;
   border-bottom: 1px solid var(--rw-border); font-weight: 700; font-size: 14px; }
-.rw-drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+.rw-drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px; scrollbar-gutter: stable; }
 .rw-cap-group { margin-bottom: 18px; }
 .rw-cap-gtitle { color: var(--rw-red); font-weight: 700; margin-bottom: 8px; font-size: 13px; letter-spacing: 0.5px; }
 .rw-cap-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; font-size: 13px; }
@@ -244,19 +244,22 @@ body {
 .rw-kb-err { margin-top: 8px; padding: 6px 10px; background: #fdecea; color: #c62828; border-radius: 6px; font-size: 12px; }
 /* 上传工具条（2026-09-09 卡片化） */
 .rw-kb-upload { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  background: var(--rw-panel); border: 1px solid var(--rw-border); border-radius: 10px; padding: 8px 10px; }
-.rw-kb-upload .rw-select { max-width: 190px; }
-.rw-kb-file { flex: 1; min-width: 200px; display: inline-flex; align-items: center; gap: 6px;
+  background: var(--rw-panel); border: 1px solid var(--rw-border); border-radius: 10px; padding: 8px 10px;
+  width: 100%; min-width: 0; box-sizing: border-box; }
+.rw-kb-upload > * { flex-shrink: 0; }
+.rw-kb-upload .rw-select { max-width: 200px; min-width: 0; }
+.rw-kb-file { flex: 1 1 220px; min-width: 180px; display: inline-flex; align-items: center; gap: 6px;
   border: 1px dashed var(--rw-border); border-radius: 8px; padding: 6px 10px; cursor: pointer;
   font-size: 12px; color: var(--rw-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rw-kb-file:hover { border-color: var(--rw-red); color: var(--rw-red); }
 .rw-kb-file input[type=file] { display: none; }
 .rw-kb-hdr { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--rw-muted);
-  border: 1px solid var(--rw-border); border-radius: 8px; padding: 6px 9px; cursor: pointer; }
+  border: 1px solid var(--rw-border); border-radius: 8px; padding: 6px 9px; cursor: pointer; white-space: nowrap; }
 .rw-kb-hdr input { accent-color: var(--rw-red); }
-.rw-kb-filters { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+.rw-kb-filters { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; width: 100%; }
 .rw-kb-filters .rw-input { flex: 1; min-width: 120px; }
-.rw-kb-list { display: flex; flex-direction: column; gap: 8px; max-height: 42vh; overflow-y: auto; }
+/* 列表：不设内滚小框——随外层(抽屉 body / console-main 整页)自然滚动，与 Agent 广场一致（2026-09-09 修复：27 寸屏小区域下拉） */
+.rw-kb-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; width: 100%; }
 .rw-kb-empty { color: var(--rw-muted); font-size: 12px; padding: 10px; text-align: center;
   border: 1px dashed var(--rw-border); border-radius: 10px; }
 .rw-kb-item { border: 1px solid var(--rw-border); border-radius: 10px; padding: 8px 10px; font-size: 12px;
@@ -264,7 +267,7 @@ body {
 .rw-kb-item:hover { border-color: var(--rw-yellow); box-shadow: 0 2px 8px rgba(180, 130, 40, .10); }
 .rw-kb-item-ico { flex-shrink: 0; width: 34px; height: 34px; border-radius: 8px; color: #fff;
   display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; }
-.rw-kb-item-main { flex: 1; min-width: 0; }
+.rw-kb-item-main { flex: 1; min-width: 0; overflow: hidden; }
 .rw-kb-item-head { display: flex; align-items: center; gap: 8px; }
 .rw-kb-item-head b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .rw-kb-tag { font-size: 10px; padding: 1px 7px; border-radius: 5px; flex-shrink: 0; }
@@ -273,13 +276,15 @@ body {
 .rw-kb-tag.conv { background: #e3f2fd; color: #1565c0; }
 .rw-kb-body { color: var(--rw-muted); margin-top: 4px; word-break: break-all; line-height: 1.45;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-/* 2026-09-09 文档型升级：kind Tab（像 885 文档/技能分组） */
-.rw-kb-kindtabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--rw-border); }
+.rw-kb-content { min-width: 0; width: 100%; box-sizing: border-box; }
+.rw-kb-content .rw-kb-list { min-width: 0; }
+/* 2026-09-09 文档型升级：kind Tab（像 885 文档/技能分组）——.on 用底色+下边框而非加粗，防切 Tab 行宽/高度抖动 */
+.rw-kb-kindtabs { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--rw-border); min-height: 32px; }
 .rw-kb-kind { font-size: 12px; color: var(--rw-muted); padding: 5px 10px; cursor: pointer;
-  border-bottom: 2px solid transparent; white-space: nowrap; }
-.rw-kb-kind:hover { color: var(--rw-red); }
-.rw-kb-kind.on { color: var(--rw-red); font-weight: 700; border-bottom-color: var(--rw-red); }
-.rw-kb-kindc { font-style: normal; font-size: 10.5px; background: var(--rw-tint); color: var(--rw-red);
+  border-bottom: 2px solid transparent; white-space: nowrap; border-radius: 8px 8px 0 0; user-select: none; }
+.rw-kb-kind:hover { color: var(--rw-red); background: var(--rw-tint); }
+.rw-kb-kind.on { color: var(--rw-red); background: var(--rw-tint); border-bottom-color: var(--rw-red); }
+.rw-kb-kindc { font-style: normal; font-size: 10.5px; background: #fff; color: var(--rw-red);
   border-radius: 99px; padding: 0 6px; margin-left: 3px; }
 .rw-kb-kindtag { font-size: 9.5px; padding: 1px 7px; border-radius: 5px; flex-shrink: 0; font-weight: 700; letter-spacing: .3px; }
 
@@ -595,7 +600,7 @@ body {
   cursor: pointer; text-decoration: none; margin-bottom: 2px; border: 1px solid transparent; }
 .rw-console-navitem:hover { background: var(--rw-tint); color: var(--rw-red); }
 .rw-console-navitem.sel { background: var(--rw-red); color: #fff; font-weight: 600; }
-.rw-console-main { flex: 1; overflow-y: auto; padding: 18px 22px; background: var(--rw-bg); }
+.rw-console-main { flex: 1; overflow-y: auto; padding: 18px 22px; background: var(--rw-bg); scrollbar-gutter: stable; }
 .rw-console-ph { background: var(--rw-panel); border: 1px dashed var(--rw-border); border-radius: 12px;
   padding: 28px; text-align: center; color: var(--rw-muted); font-size: 13px; }
 .rw-console-ph b { display: block; font-size: 15px; color: var(--rw-red); margin-bottom: 6px; }
@@ -616,6 +621,6 @@ body {
 .rw-set-num { width: 110px; flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .rw-set-card-hint { font-size: 11px; color: var(--rw-muted); line-height: 1.5; }
 @media (max-width: 720px) { .rw-set-card.span2 { grid-column: span 1; } }
-.rw-kb-embed-body { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.rw-kb-embed-body .rw-kb-list { max-height: 56vh; }
-@media (max-width: 900px) { .rw-console-nav { width: 150px; } .rw-kb-embed-body { grid-template-columns: 1fr; } }
+.rw-kb-embed-body { display: block; width: 100%; min-width: 0; } /* 2026-09-09：单栏全宽自适应（KbBody 已是上传+列表合体，原双列 grid 致只占半宽） */
+/* 列表随 console-main 整页滚动（与 Agent 广场一致），不再限定 56vh 内滚小框 */
+@media (max-width: 900px) { .rw-console-nav { width: 150px; } }

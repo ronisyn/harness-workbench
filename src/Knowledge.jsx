@@ -51,15 +51,15 @@ function useKnowledgeState() {
   }, [shellKey]);
   const loadList = useCallback(async () => {
     try {
+      // kind 由前端分组过滤（数据≤500 行，避免切 Tab 重新请求闪空/计数错位）；scope/q 走服务端
       const p = {};
       if (fScope) p.scope = fScope;
-      if (fKind) p.kind = fKind;
       if (q.trim()) p.q = q.trim();
       const d = await api.knowledgeList(p);
       setRows(d.knowledge || []);
     } catch (e) { setErr(e.message); }
     finally { setLoaded(true); }
-  }, [fScope, fKind, q]);
+  }, [fScope, q]);
   useEffect(() => { loadShells(); }, [loadShells]);
   useEffect(() => { loadList(); }, [loadList]);
 
@@ -111,7 +111,9 @@ function kbKindOf(r) {
 }
 function KbBody() {
   const s = useKnowledgeState();
+  // kind 前端分组：计数基于全量 rows；展示按 fKind 过滤（切 Tab 无网络请求、无闪空/错位）
   const counts = s.rows.reduce((o, r) => { const k = String(r.kind || 'fact'); o[k] = (o[k] || 0) + 1; o._all = (o._all || 0) + 1; return o; }, {});
+  const shown = s.fKind ? s.rows.filter((r) => String(r.kind || 'fact') === s.fKind) : s.rows;
   return (
     <div className="rw-kb-content">
       {/* 上传链（工具条式：归属 + 分类 + 目标壳 + 文件 + 表头 + 导入） */}
@@ -140,7 +142,7 @@ function KbBody() {
 
       {/* 列表管理：kind Tab（像 885 文档/技能分组）+ 范围/关键词 */}
       <div className="rw-kb-kindtabs" style={{ marginTop: 14 }}>
-        <span className={'rw-kb-kind' + (s.fKind === '' ? ' on' : '')} onClick={() => s.setFKind('')}>全部 <em className="rw-kb-kindc">{(s.rows.length)}</em></span>
+        <span className={'rw-kb-kind' + (s.fKind === '' ? ' on' : '')} onClick={() => s.setFKind('')}>全部 <em className="rw-kb-kindc">{counts._all || 0}</em></span>
         {KINDS.map((x) => (
           <span key={x.v} className={'rw-kb-kind' + (s.fKind === x.v ? ' on' : '')} onClick={() => s.setFKind(s.fKind === x.v ? '' : x.v)}>
             {x.lb} <em className="rw-kb-kindc">{counts[x.v] || 0}</em>
@@ -160,8 +162,8 @@ function KbBody() {
       </div>
       <div className="rw-kb-list">
         {!s.loaded && <div className="rw-kb-empty">加载中…</div>}
-        {s.loaded && s.rows.length === 0 && <div className="rw-kb-empty">（该分类暂无条目——上传文件并选对分类；条目供 RW 会话内检索，不改变任何运行行为）</div>}
-        {s.rows.map((r) => {
+        {s.loaded && shown.length === 0 && <div className="rw-kb-empty">（{s.fKind ? '该分类' : '当前'}暂无条目——上传文件并选对分类；条目供 RW 会话内检索，不改变任何运行行为）</div>}
+        {shown.map((r) => {
           const k = kbKindOf(r);
           const kk = kindOf(r.kind);
           const scopeLb = r.scope === 'global' ? '全局' : r.scope === 'shell' ? '壳·' + (r.shell_key || r.shell_id) : '会话';
