@@ -174,7 +174,7 @@ async function agentLimits() {
 export const ENV_ENV = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',  '- 平台代码目录：/srv/harness-workbench（可用 write_file/append_file/run_command/git_commit 修改其中代码、执行 node/npm、提交——能否修改与部署见身份层当前权限）',
   '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
   '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
-  '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / capabilities(能力开关)',
+  '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / knowledge(知识库)',
   '- 联网搜索：web_search 工具（SearXNG）；网页抓取 fetch_url',
   '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；改平台代码用 write_file 改 /srv/harness-workbench 下文件。',
 ].join('\n');

@@ -123,7 +123,7 @@ export default function ModelPlaza() {
         </div>
       ))}
       {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
-      <div className="rw-console-note">壳默认模型分配在「1.3 Agent 开发（壳）」；会话显式选模型=绝对锁（C4），此处启停不影响已保存的显式会话选择，只影响模型菜单。</div>
+      <div className="rw-console-note">壳默认模型分配在「🎛 后台 → 应用市场 → 壳开发」；会话显式选模型=绝对锁（C4），此处启停不影响已保存的显式会话选择，只影响模型菜单。</div>
     </div>
   );
 }

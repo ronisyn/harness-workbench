@@ -34,8 +34,6 @@ export const api = {
   messages: (id) => request('/api/conversations/' + id + '/messages'),
   toolcalls: (id) => request('/api/conversations/' + id + '/toolcalls'),
   activity: (id, after) => request('/api/conversations/' + id + '/activity?after=' + (Number(after) || 0)),
-  capabilities: () => request('/api/capabilities'),
-  setCapabilities: (updates) => request('/api/capabilities', { method: 'PUT', body: JSON.stringify({ updates }) }),
   getToolset: () => request('/api/toolset'),
   setToolset: (enabled) => request('/api/toolset', { method: 'PUT', body: JSON.stringify({ enabled }) }),
   getRules: () => request('/api/access-rules'),

@@ -1,5 +1,6 @@
-// src/console/Console.jsx - M2 统一后台（§7.1/§7.2 四组八项；入口 /console/*，同站同账号）
-// 布局：顶栏（首页/对话/后台互跳）+ 左侧分组导航 + 内容区；板块注册表集中于此，随 M2 组次逐个落地。
+// src/console/Console.jsx - 统一后台（分组导航：平台 / Agent / 应用市场；入口 /console/*，同站同账号）
+// 2026-09-09 重分组（用户定）：平台（模型广场/观测/知识库/设置）；Agent（能力/进化）；
+// 应用市场（壳开发/应用，插件体系建设中占位）。板块 code 不变（URL 兼容），仅分组/标签调整。
 import React from 'react';
 import ModelObsBoard from './ModelObs.jsx';
 import KbBoard from './KbBoard.jsx';
@@ -10,26 +11,26 @@ import CapsBoard from './CapsBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
 import AppsBoard from './AppsBoard.jsx';
 
-// 板块注册表：code → { group, label, render }
+// 板块注册表：code → { group, label, render }（group 决定左侧分组）
 export const BOARDS = {
-  'models-plaza': { group: '模型', label: '1.1 模型广场', render: () => <ModelPlazaBoard /> },
-  'models-obs': { group: '模型', label: '1.2 模型观测', render: () => <ModelObsBoard /> },
-  'agent-dev': { group: 'Agent', label: '1.3 Agent 开发（壳）', render: () => <ShellDevBoard /> },
-  'agent-caps': { group: 'Agent', label: '1.4 Agent 能力', render: () => <CapsBoard /> },
-  'agent-evo': { group: 'Agent', label: '1.5 Agent 进化', render: () => <EvoBoard /> },
-  'agent-apps': { group: 'Agent', label: '1.6 Agent 广场（应用）', render: (p) => <AppsBoard {...p} /> },
-  'kb': { group: '知识库', label: '1.7 知识库', render: () => <KbBoard /> },
-  'settings': { group: '系统', label: '1.8 设置', render: () => <SettingsBoard /> },
+  // —— 平台 ——
+  'models-plaza': { group: '平台', label: '模型广场', render: () => <ModelPlazaBoard /> },
+  'models-obs': { group: '平台', label: '模型观测', render: () => <ModelObsBoard /> },
+  'kb': { group: '平台', label: '知识库', render: () => <KbBoard /> },
+  'settings': { group: '平台', label: '设置', render: () => <SettingsBoard /> },
+  // —— Agent ——
+  'agent-caps': { group: 'Agent', label: 'Agent 能力', render: () => <CapsBoard /> },
+  'agent-evo': { group: 'Agent', label: 'Agent 进化', render: () => <EvoBoard /> },
+  // —— 应用市场 ——
+  'agent-dev': { group: '应用市场', label: '壳开发', render: () => <ShellDevBoard /> },
+  'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
+  'plugins': { group: '应用市场', label: '插件', render: () => <div className="rw-console-ph"><b>插件体系（建设中）</b><div>按壳装卸的独立能力包：在通用环境研发验证 → 壳勾选装配 → 删除即整体卸载（A 壳不要就不勾，B 壳要就勾）。Excel/PDF/图片/视频等插件将在此上架；当前为占位，详见讨论方案。</div></div> },
 };
-const GROUPS = ['模型', 'Agent', '知识库', '系统'];
-
-function Placeholder({ text }) {
-  return <div className="rw-console-ph"><b>板块建设中</b><div>{text}</div></div>;
-}
+const GROUPS = ['平台', 'Agent', '应用市场'];
 
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
   const rawCode = path.replace(/^\/console\/?/, '') || '';
-  const code = BOARDS[rawCode] ? rawCode : 'models-plaza'; // P3-10：未知板块回退 1.1，导航高亮跟随实际展示
+  const code = BOARDS[rawCode] ? rawCode : 'models-plaza'; // 未知板块回退 1.1，导航高亮跟随实际展示
   const board = BOARDS[code];
   // 板块可接收公共导航 props（AppsBoard 启动应用后跳对话页——审计 P1-3）
   const boardProps = { onGoChat };
@@ -54,7 +55,7 @@ export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
                 <a key={key} className={'rw-console-navitem' + (code === key ? ' sel' : '')}
                   href={'/console/' + key}
                   onClick={(e) => { e.preventDefault(); history.pushState(null, '', '/console/' + key); window.dispatchEvent(new PopStateEvent('popstate')); }}>
-                  {b.label.replace(/^\d\.\d\s*/, '')}
+                  {b.label}
                 </a>
               ))}
             </div>

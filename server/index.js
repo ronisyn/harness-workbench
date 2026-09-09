@@ -1,5 +1,5 @@
 // server/index.js - Roni Workbench Express 入口 + API 路由
-// P1 核心：登录 + 会话管理 + 多模型流式对话(SSE) + 能力开关 + 用量统计
+// P1 核心：登录 + 会话管理 + 多模型流式对话(SSE) + 工具启用集 + 用量统计
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -10,7 +10,7 @@ import { activeProviders, allProviders, findProvider, syncChatModels } from './l
 import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './tools/meta.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, TOOL_CN, TOOL_TIER_CN } from './tools/meta.js';
 import { shellContext, rowToPack } from './shells.js';
 import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';
@@ -103,48 +103,32 @@ app.put('/api/models/:id', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
-// ---------- 能力开关 ----------
-const A_NAMES = ['标题','粗体/斜体','列表','任务列表','表格','链接','图片','代码高亮','引用','数学公式','分隔线','脚注','定义列表','上下标','高亮标记','目录TOC','Mermaid图表','折叠块','警告块','数据图表','emoji','HTML渲染'];
-const B_NAMES = ['读取文件','写入文件','追加修改','列出目录','建删目录','复制移动','删除文件','查找文件','代码搜索','大文件分段','执行命令','后台长任务','终止进程','联网搜索','读网页','PDF解析','Word解析','Excel解析','PPT解析','图片OCR','数据库查询','数据库写入','Git状态','Git提交','Git分支','Git拉取推送','语法检查','运行测试','上传文件'];
-const C_NAMES = ['多厂商切换','自动路由','流式输出','多会话','会话持久化','长上下文压缩','系统提示词','高级参数','工具调用','技能系统','子代理','定时任务','多模态看图','操作留痕','用量统计','并发限制','对话导出','终止生成','快捷键'];
-const CAPABILITY_LIST = [
-  // A 渲染
-  ...A_NAMES.map((name, i) => ({ key: `a_md_${['headings','bold','list','tasklist','table','link','image','code','quote','math','hr','footnote','deflist','supsub','mark','toc','mermaid','details','admonition','chart','emoji','html'][i]}`, group: 'A', name })),
-  // B 工具
-  ...B_NAMES.map((name, i) => ({ key: `b_tool_${i + 1}`, group: 'B', name })),
-  // C 平台
-  ...C_NAMES.map((name, i) => ({ key: `c_cap_${i + 1}`, group: 'C', name })),
-];
-
-app.get('/api/capabilities', requireAuth, async (req, res) => {
-  const rows = await db.query('SELECT cap_key, enabled FROM capabilities WHERE account_id=?', [req.user.id]);
-  const state = Object.fromEntries(rows.map(r => [r.cap_key, Boolean(r.enabled)]));
-  const list = CAPABILITY_LIST.map(c => ({ ...c, enabled: Boolean(state[c.key]) }));
-  res.json({ ok: true, list });
-});
-
-app.put('/api/capabilities', requireAuth, async (req, res) => {
-  const { updates } = req.body || {}; // {key: bool}
-  for (const [k, v] of Object.entries(updates || {})) {
-    await db.query('INSERT INTO capabilities (account_id, cap_key, enabled) VALUES (?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)', [req.user.id, k, v ? 1 : 0]);
-  }
-  res.json({ ok: true });
-});
+// ---------- 能力开关（2026-09-09 移除：A/B/C 三组从未接线到运行时，属误导展示；真实可配=下方工具启用集 + 壳 tools 三态 + 权限/规则；capabilities 表已随迁移清理） ----------
 
 // 5.3c 工具启用集（默认 DEFAULT_TOOLSET 25；平台豁免工具恒可用；设置→工具 勾选维护）
+// 2026-09-09：真实工具列表人读化——遍历实际注册 TOOLS，附中文名/用途(meta when/not)/权限分级，取代误导性"能力开关"
 app.get('/api/toolset', requireAuth, async (req, res) => {
   try {
     const saved = await getSetting('toolset_enabled', null);
     const list = Array.isArray(saved) ? saved : DEFAULT_TOOLSET;
     const enabled = new Set(list.filter((x) => typeof x === 'string'));
-    const toolNames = new Set(TOOLS.map((t) => t.name));
-    const tools = Object.keys(TOOL_META)
-      .filter((n) => toolNames.has(n))
-      .map((name) => ({
-        name, tier: TOOL_META[name].tier,
-        defaultOn: DEFAULT_TOOLSET.includes(name) || PLATFORM_EXEMPT.includes(name),
-        enabled: enabled.has(name) || PLATFORM_EXEMPT.includes(name),
-      }));
+    const tools = TOOLS.map((t) => {
+      const m = TOOL_META[t.name] || {};
+      return {
+        name: t.name,
+        cn: TOOL_CN[t.name] || t.name,
+        tier: m.tier || 'core',
+        tierCn: TOOL_TIER_CN[m.tier || 'core'] || m.tier || '基础',
+        permission: t.permission || 'read',
+        when: m.when || '', not: m.not || '', ex: m.ex || '',
+        platformExempt: PLATFORM_EXEMPT.includes(t.name),
+        defaultOn: DEFAULT_TOOLSET.includes(t.name) || PLATFORM_EXEMPT.includes(t.name),
+        enabled: enabled.has(t.name) || PLATFORM_EXEMPT.includes(t.name),
+      };
+    }).sort((a, b) => {
+      const o = { core: 0, pro: 1, expert: 2 };
+      return (o[a.tier] - o[b.tier]) || a.cn.localeCompare(b.cn, 'zh');
+    });
     res.json({ ok: true, tools, defaultCount: DEFAULT_TOOLSET.length });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });

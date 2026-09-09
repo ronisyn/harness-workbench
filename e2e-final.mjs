@@ -40,11 +40,10 @@ async function main() {
   const cB = await mk(P + 'B', { shell: 'code' }); cleanup.push(cB.id);
   const cC = await mk(P + 'C', { shell: 'code', provider: 'glm', model: 'glm-4.5' }); cleanup.push(cC.id);
 
-  /* 1) R1/R2/R5 涉及的 API 往返（shared 组件的数据源） */
-  const caps0 = (await j('/api/capabilities', { headers: A })).b.list || [];
-  const capOne = caps0.find((c) => c.key === 'c_cap_5');
-  if (capOne) { await j('/api/capabilities', { method: 'PUT', headers: A, body: JSON.stringify({ updates: { [capOne.key]: !capOne.enabled } }) }); const m = (await j('/api/capabilities', { headers: A })).b.list.find((c) => c.key === capOne.key); chk('1 capabilities 往返', m.enabled === !capOne.enabled); await j('/api/capabilities', { method: 'PUT', headers: A, body: JSON.stringify({ updates: { [capOne.key]: capOne.enabled } }) }); }
+  /* 1) 真实工具面：/api/toolset 人读字段 + 幂等写回（2026-09-09 取代已移除的虚假 capabilities 往返） */
   const ts0 = (await j('/api/toolset', { headers: A })).b.tools || [];
+  const sample = ts0[0] || {};
+  chk('1 toolset 真实字段(cn/when/tier/豁免)', ts0.length > 20 && (typeof sample.cn === 'string') && (typeof sample.when === 'string') && (typeof sample.platformExempt === 'boolean'), 'n=' + ts0.length + ' sample=' + JSON.stringify(sample).slice(0, 120));
   const en0 = ts0.filter((t) => t.enabled).map((t) => t.name);
   const putT = await j('/api/toolset', { method: 'PUT', headers: A, body: JSON.stringify({ enabled: en0 }) });
   chk('2 toolset 幂等写回', putT.status === 200 && (await j('/api/toolset', { headers: A })).b.tools.filter((t) => t.enabled).length === en0.length);

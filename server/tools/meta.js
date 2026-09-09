@@ -95,3 +95,30 @@ export const LIGHT_TOOLSET = [
   'kb_search', 'kb_add', 'skill_load', 'skills_list', 'repo_map',
   'ask_user', 'finish_task', 'plan_tasks', 'plan_done', 'view_image', 'ocr_image',
 ];
+
+// 工具中文名映射（2026-09-09：1.4 真实工具列表人读展示用；覆盖 meta 全量 + 动态注册工具）
+export const TOOL_CN = {
+  // 文件
+  read_file: '读取文件', read_file_range: '分段读取', write_file: '写入文件', append_file: '追加内容', edit_file: '修改文件',
+  delete_file: '删除文件', list_dir: '列出目录', mkdir: '创建目录', copy_move: '复制/移动', find_file: '查找文件',
+  grep_search: '搜索内容', repo_map: '代码地图', undo_checkpoint: '撤销快照', extract_pdf: '解析PDF', extract_docx: '解析Word',
+  extract_xlsx: '解析Excel', extract_pptx: '解析PPT', syntax_check: '语法检查', run_test: '运行测试', view_image: '看图', ocr_image: 'OCR识图',
+  // 执行/后台
+  run_command: '执行命令', run_long_task: '后台长任务', kill_process: '终止进程', job_list: '后台任务列表', job_output: '查看后台输出',
+  // 联网
+  web_search: '联网搜索', fetch_url: '抓取网页',
+  // 数据库/git
+  db_query: '查询数据库', db_write: '写入数据库', git_status: '查看Git状态', git_commit: '提交Git', git_branch: 'Git分支', git_pull_push: 'Git推送/拉取',
+  // 规划/目标/提问
+  plan_tasks: '规划任务', plan_done: '标记步骤', finish_task: '任务提测', ask_user: '向你提问', set_goal: '设定目标', get_goal: '查看目标', update_goal: '更新目标',
+  // 知识/技能
+  kb_add: '写入知识', kb_search: '搜索知识', kb_del: '删除知识', skills_list: '技能列表', skill_load: '载入技能', skill_save: '保存技能',
+  // 子代理/多轮
+  subagent: '子代理执行', subagent_fork: '子代理续上下文', subagent_fanout: '批量派发子代理', subagent_join: '汇总子代理', subagent_output: '取子代理结果',
+  subagent_report: '子代理复盘', subagent_list: '子代理列表', ralph: '多轮全新视角',
+  // 契约/平台
+  create_contract: '创建任务契约', conv_summarize: '归档会话', set_limits: '调整护栏', reload_platform: '重载平台', hooks_list: '查看钩子', plan_mode: '规划模式', exit_plan_mode: '退出规划',
+  // 飞书/外部
+  feishu_doc_read: '读飞书文档', feishu_sheet_read: '读飞书表格', feishu_bitable_read: '读飞书多维表',
+};
+export const TOOL_TIER_CN = { core: '基础', pro: '专业', expert: '高危' };

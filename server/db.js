@@ -90,12 +90,6 @@ const SCHEMA = [
     detail TEXT,
     created_at DATETIME DEFAULT NOW()
   )`,
-  `CREATE TABLE IF NOT EXISTS capabilities (
-    account_id INT,
-    cap_key VARCHAR(64) NOT NULL,
-    enabled TINYINT DEFAULT 0,
-    PRIMARY KEY (account_id, cap_key)
-  )`,
   // ---- v1.7 数据模型：模型与市场 ----
   `CREATE TABLE IF NOT EXISTS providers (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -384,6 +378,8 @@ export async function initSchema() {
     // 2026-09-09 知识库文档型升级：kind 分类（fact=运行事实[默认]/progress=进化进度/guide=平台规范/skill=技能/lesson=错题本）
     // 仅增加表达维度，不改旧行语义（存量默认 fact）；scope 三档(global/shell/conv)不变，不新增隔离面
     "ALTER TABLE knowledge ADD COLUMN kind VARCHAR(12) DEFAULT 'fact'",
+    // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
+    'DROP TABLE IF EXISTS capabilities',
   ];
   for (const sql of MIGRATIONS) {
     try { await pool.query(sql); }

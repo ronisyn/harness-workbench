@@ -38,7 +38,7 @@ const token = lg.token;
 step('login', Boolean(token));
 
 // 3. 基础 API
-for (const p of ['/api/models', '/api/providers', '/api/capabilities', '/api/settings', '/api/tasks', '/api/approvals', '/api/market/list']) {
+for (const p of ['/api/models', '/api/providers', '/api/toolset', '/api/settings', '/api/tasks', '/api/approvals', '/api/market/list']) {
   const r = await json(await jreq(p, {}, token));
   step('GET ' + p, r.ok === true);
 }

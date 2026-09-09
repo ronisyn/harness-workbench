@@ -198,7 +198,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
                 {weekly.last_result && <div className="rw-dash-result">{String(weekly.last_result).slice(0, 140)}</div>}
               </div>
             )}
-            <div className="rw-dash-foot">定时任务（进化载体）管理在「🎛 后台 → 系统 → 1.8 设置」；信号→修订提案链路见方案 §11/D8
+            <div className="rw-dash-foot">定时任务（进化载体）管理在「🎛 后台 → 平台 → 设置」；信号→修订提案链路见方案 §11/D8
               {onGoConsole && <button className="rw-btn" style={{ marginLeft: 8 }} onClick={() => onGoConsole('settings')}>去后台管理</button>}</div>
           </section>
 
@@ -215,7 +215,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
               <span>市场快照模型</span><b>{marketTotal} 个</b>
               <span className="rw-dash-muted">（openrouter/dashscope/siliconflow/tokenhub）</span>
             </div>
-            <div className="rw-dash-foot">厂商 Key 接入/模型启停/市场拉取在「🎛 后台 → 模型 → 1.1 模型广场」
+            <div className="rw-dash-foot">厂商 Key 接入/模型启停/市场拉取在「🎛 后台 → 平台 → 模型广场」
               {onGoConsole && <button className="rw-btn" style={{ marginLeft: 8 }} onClick={() => onGoConsole('models-plaza')}>去模型广场</button>}</div>
           </section>
         </div>
