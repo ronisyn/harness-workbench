@@ -14,6 +14,7 @@ import AppsBoard from './AppsBoard.jsx';
 import ExtCenterBoard from './ExtCenterBoard.jsx';
 import SkillsBoard from './SkillsBoard.jsx';
 import TasksBoard from './TasksBoard.jsx';
+import AuditBoard from './AuditBoard.jsx';
 
 // 板块注册表：code → { group, label, render }（group 决定左侧分组）
 export const BOARDS = {
@@ -32,14 +33,15 @@ export const BOARDS = {
   'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
   // A3：原"插件"占位 code 升级为 扩展中心（插件/MCP/应用统一资产页，§8.8；code 不变兼容 /console/plugins 旧链）
   'plugins': { group: '应用市场', label: '扩展中心', render: () => <ExtCenterBoard /> },
-  // —— 系统（A8 起：任务独立板块；A9 将加审计） ——
+  // —— 系统（A8 任务独立板块；A9 审计） ——
   'tasks': { group: '系统', label: '任务', render: () => <TasksBoard /> },
+  'audit': { group: '系统', label: '审计', render: (p) => <AuditBoard {...p} /> },
   'settings': { group: '系统', label: '设置', render: () => <SettingsBoard /> },
 };
 const GROUPS = ['平台', 'Agent', '应用市场', '系统'];
 
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
-  const rawCode = path.replace(/^\/console\/?/, '') || '';
+  const rawCode = path.replace(/^\/console\/?/, '').split('?')[0] || ''; // A9：剥离 query（/console/audit?conv=N）
   const code = BOARDS[rawCode] ? rawCode : 'models-plaza'; // 未知板块回退 1.1，导航高亮跟随实际展示
   const board = BOARDS[code];
   // 板块可接收公共导航 props（AppsBoard 启动应用后跳对话页——审计 P1-3）

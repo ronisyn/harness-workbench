@@ -813,6 +813,14 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
           {onGoConsole && <button className="rw-btn" onClick={() => onGoConsole()} title="统一后台">🎛 后台</button>}
           <button className="rw-btn" onClick={() => { if (onGoHome) onGoHome(); else { setCur(null); setMsgs([]); } }} title="返回总览首页">🏠 首页</button>
           <button className="rw-btn" onClick={() => setKbOpen(true)} title="知识库：上传/管理（④）">📚 知识</button>
+          {cur && (
+            <button className="rw-btn" onClick={() => {
+              // A9 审计回溯：跳审计页并按当前会话过滤（audit × tool_calls 联动）
+              const u = '/console/audit?conv=' + cur;
+              history.pushState(null, '', u);
+              window.dispatchEvent(new PopStateEvent('popstate'));
+            }} title="审计回溯：本会话全部动作与工具轨迹">🔍 审计</button>
+          )}
           {cur && <button className="rw-btn" onClick={exportConv} title="导出对话 (Ctrl+E)">⬇ 导出</button>}
           {cur && (
             <select className="rw-select" value={curPerm} onChange={(e) => changePermission(e.target.value)} title="会话权限">

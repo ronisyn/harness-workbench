@@ -88,7 +88,23 @@ const SCHEMA = [
     account_id INT,
     action VARCHAR(64),
     detail TEXT,
-    created_at DATETIME DEFAULT NOW()
+    conversation_id INT NULL,
+    created_at DATETIME DEFAULT NOW(),
+    KEY idx_audit_time (created_at),
+    KEY idx_audit_conv (conversation_id)
+  )`,
+  // ---- A9 审计 90 天归档（§8.10：主表不膨胀、归档仍可查；与 audit_log 同构 + archived_at） ----
+  `CREATE TABLE IF NOT EXISTS audit_log_archive (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT,
+    action VARCHAR(64),
+    detail TEXT,
+    conversation_id INT NULL,
+    shell_id INT NULL,
+    created_at DATETIME DEFAULT NOW(),
+    archived_at DATETIME DEFAULT NOW(),
+    KEY idx_arch_time (created_at),
+    KEY idx_arch_conv (conversation_id)
   )`,
   // ---- v1.7 数据模型：模型与市场 ----
   `CREATE TABLE IF NOT EXISTS providers (
@@ -461,6 +477,10 @@ export async function initSchema() {
     "ALTER TABLE knowledge ADD COLUMN related_component VARCHAR(120)",
     // A7 难度人工勾选（§7.2：复测记录带难度 小|中|大，联动一次通过率）
     "ALTER TABLE reviews ADD COLUMN difficulty VARCHAR(8)",
+    // A9 审计回溯（按会话）+ 90 天归档查询索引（§8.10）
+    'ALTER TABLE audit_log ADD COLUMN conversation_id INT NULL',
+    'ALTER TABLE audit_log_archive ADD COLUMN conversation_id INT NULL',
+    'ALTER TABLE audit_log_archive ADD COLUMN shell_id INT NULL',
     // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
     'DROP TABLE IF EXISTS capabilities',
   ];

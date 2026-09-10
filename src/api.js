@@ -116,6 +116,10 @@ export const api = {
   reviewsList: (params) => request('/api/reviews?' + new URLSearchParams(params || {}).toString()),
   reviewsAdd: (conversationId, result, bugReason, difficulty) => request('/api/reviews', { method: 'POST', body: JSON.stringify({ conversationId, result, bugReason, difficulty }) }),
   audit: (limit) => request('/api/audit?limit=' + (Number(limit) || 100)),
+  auditQuery: (params) => request('/api/audit?' + new URLSearchParams(params || {}).toString()),
+  auditArchiveStats: () => request('/api/audit/archive-stats'),
+  auditArchive: (days) => request('/api/audit/archive', { method: 'POST', body: JSON.stringify({ days: Number(days) || 90 }) }),
+  convTrace: (id) => request('/api/conversations/' + id + '/trace'),
   // ⑥ 任务模板库
   templates: () => request('/api/templates'),
   templateGet: (key) => request('/api/templates/' + encodeURIComponent(key)),

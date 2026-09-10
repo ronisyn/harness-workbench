@@ -364,16 +364,93 @@ app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
 });
 function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
 
-// P26(O-30)：审计查询 API（audit_log 只写不读缺口）——单管理员场景默认返回全部；detail 再脱敏一次防残留
+// ---------- A9 审计（§8.10）：过滤器（时间/动作分类/壳/关键词）+ 按会话回溯 + 90 天归档 ----------
+const AUDIT_CATS = {
+  tool: ['tool:%'],
+  knowledge: ['knowledge:%', 'kb:%'],
+  ext: ['ext:%'],
+  shell: ['shell:%', 'conv:shell', 'template:%', 'canary:%'],
+  task: ['task:%', 'route:%', 'review:%'],
+  model: ['model:%', 'provider:%', 'settings:%', 'skill:%', 'evo:%'],
+  auth: ['auth:%', 'login%', 'logout%'],
+};
+function auditCatConds(cat) {
+  const pats = AUDIT_CATS[cat];
+  if (!pats) return null;
+  return '(' + pats.map(() => 'action LIKE ?').join(' OR ') + ')';
+}
+// 归档：把 90 天前审计搬入 audit_log_archive（主表不膨胀；归档仍可查 archived=1）
+export async function archiveAudit(days = 90) {
+  const rows = await db.query('SELECT id FROM audit_log WHERE created_at < NOW() - INTERVAL ? DAY LIMIT 5000', [days]);
+  if (!rows.length) return { moved: 0 };
+  const ids = rows.map((r) => r.id);
+  const ph = ids.map(() => '?').join(',');
+  await db.query(`INSERT INTO audit_log_archive (account_id, action, detail, conversation_id, shell_id, created_at)
+    SELECT account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE id IN (${ph})`, ids);
+  await db.query(`DELETE FROM audit_log WHERE id IN (${ph})`, ids);
+  return { moved: ids.length };
+}
+// 审计查询：GET /api/audit?limit&q&category&days&conversation_id&shell_id&archived=0|1|all
 app.get('/api/audit', requireAuth, async (req, res) => {
   try {
     const n = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
     const q = String(req.query.q || '').trim();
-    const cond = q ? ' WHERE action LIKE ? OR detail LIKE ?' : '';
-    const p = q ? ['%' + q + '%', '%' + q + '%', n] : [n];
-    const rows = await db.query('SELECT id, account_id, action, detail, created_at FROM audit_log' + cond + ' ORDER BY id DESC LIMIT ?', p);
-    res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })) });
-  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+    const cat = String(req.query.category || '').trim();
+    const days = Number(req.query.days) || 0;
+    const archived = String(req.query.archived || '0');
+    const convId = Number(req.query.conversation_id) || 0;
+    const shellId = Number(req.query.shell_id) || 0;
+    const conds = ['1=1']; const p = [];
+    if (q) { conds.push('(action LIKE ? OR detail LIKE ?)'); p.push('%' + q + '%', '%' + q + '%'); }
+    if (days > 0) { conds.push('created_at > NOW() - INTERVAL ? DAY'); p.push(days); }
+    if (convId) { conds.push('conversation_id=?'); p.push(convId); }
+    if (shellId) { conds.push('shell_id=?'); p.push(shellId); }
+    if (cat && AUDIT_CATS[cat]) { conds.push(auditCatConds(cat)); p.push(...AUDIT_CATS[cat]); }
+    const fetch = (tbl) => db.query(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM ${tbl} WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...p, n]);
+    let rows;
+    if (archived === 'all') {
+      const [cur, arc] = await Promise.all([fetch('audit_log'), fetch('audit_log_archive')]);
+      rows = [...cur.map((r) => ({ ...r, archived: 0 })), ...arc.map((r) => ({ ...r, archived: 1 }))].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, n);
+    } else {
+      rows = (await fetch(archived === '1' ? 'audit_log_archive' : 'audit_log')).map((r) => ({ ...r, archived: archived === '1' ? 1 : 0 }));
+    }
+    res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })), categories: Object.keys(AUDIT_CATS) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 按会话回溯（§8.10：从某会话看它全部动作，tool_calls 轨迹与 audit 联动；对话页可跳审计页）
+app.get('/api/conversations/:id/trace', requireAuth, async (req, res) => {
+  try {
+    const cid = Number(req.params.id) || 0;
+    const own = (await db.query('SELECT id, title, shell_id FROM conversations WHERE id=? AND (account_id=? OR (channel!="web" AND account_id IS NULL))', [cid, req.user.id]))[0];
+    if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
+    const audit = await db.query(
+      'SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=? OR detail LIKE ? ORDER BY id DESC LIMIT 200',
+      [cid, '%conv=' + cid + '%']);
+    const tools = await db.query('SELECT id, tool_name, status, duration_ms, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 200', [cid]);
+    const usage = (await db.query('SELECT COUNT(*) n, COALESCE(SUM(cost),0) cost, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout FROM usage_stats WHERE conversation_id=?', [cid]))[0] || {};
+    res.json({
+      ok: true, conversation: { id: own.id, title: own.title, shell_id: own.shell_id },
+      audit: audit.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })),
+      toolCalls: tools, usage: { calls: Number(usage.n || 0), cost: Number(usage.cost || 0), tokensIn: Number(usage.tin || 0), tokensOut: Number(usage.tout || 0) },
+    });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 归档状态/手动触发（管理员）
+app.get('/api/audit/archive-stats', requireAuth, async (req, res) => {
+  try {
+    const [a, b] = await Promise.all([
+      db.query('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log'),
+      db.query('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log_archive'),
+    ]);
+    res.json({ ok: true, current: { rows: Number(a[0].c || 0), oldest: a[0].oldest }, archived: { rows: Number(b[0].c || 0), oldest: b[0].oldest } });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.post('/api/audit/archive', requireAuth, async (req, res) => {
+  try {
+    const r = await archiveAudit(Number((req.body || {}).days) || 90);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'audit:archive', 'moved=' + r.moved]);
+    res.json({ ok: true, ...r });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
 // 会话轨迹（工具调用记录）
@@ -801,8 +878,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (cl.label !== 'chat' || cl.echo) {
       // §8 审计脱敏：sample=用户原文可能含 sk-/ghp_ 等 → redactSecrets
       const detail = JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) });
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-        [req.user.id, 'intent:' + cl.label, redactSecrets(detail).slice(0, 900), convShellId]);
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+        [req.user.id, 'intent:' + cl.label, redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
     }
   } catch { /* 意图事件失败不影响对话 */ }
   // B3/壳默认：路由灰字事件（档案点名或壳默认生效时；显式模型优先不受影响；不入消息正文/导出）
@@ -812,13 +889,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         // 第三级壳默认（§6.2）：会话无显式、未点名档案时按壳 modelPolicy 路由
         send({ type: 'route', profile: null, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '🧩 壳默认模型：本会话按壳默认使用 ' + profileSuggestion.model + '（显式选模型可覆盖）' });
         const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, shellDefault: true });
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-          [req.user.id, 'route:shell-default', redactSecrets(detail).slice(0, 900), convShellId]);
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [req.user.id, 'route:shell-default', redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
       } else {
         send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
         const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) });
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)',
-          [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId]);
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
       }
     } catch { /* 路由事件失败不影响对话 */ }
   }
@@ -2173,6 +2250,16 @@ async function main() {
     if (staleN > 0 || aliveN > 0) console.log(`[jobs] 启动清理：标记 ${staleN} 个陈旧 running 任务为 stale，保留 ${aliveN} 个日志仍活跃的任务`);
   } catch (e) { console.error('[jobs] 启动清理失败:', e.message); }
   scheduleMarketRefresh();
+  // A9 审计 90 天归档：启动跑一次 + 每 24h 一次（主表不膨胀；归档仍可查 archived=1/all）
+  try {
+    const a = await archiveAudit(90);
+    if (a.moved) console.log('[audit] 启动归档 ' + a.moved + ' 行（>90 天）');
+  } catch (e) { console.error('[audit] 启动归档失败:', e.message); }
+  const auditArchTimer = setInterval(async () => {
+    try { const a = await archiveAudit(90); if (a.moved) console.log('[audit] 定时归档 ' + a.moved + ' 行'); }
+    catch (e) { console.error('[audit] 定时归档失败:', e.message); }
+  }, 24 * 60 * 60 * 1000);
+  if (auditArchTimer.unref) auditArchTimer.unref();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // A6 知识库月度巡检任务种子（§7.3 治理机制：由 RW 每月巡检冗余/重复/冲突/缺陷/过时 → 报告+修订建议 → 进化集审批后清理）

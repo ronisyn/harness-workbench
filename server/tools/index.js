@@ -1210,7 +1210,7 @@ export async function execTool(name, args, ctx) {
       // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
       const rArgs = JSON.stringify(args).slice(0, 2000);
       const rResult = JSON.stringify(result).slice(0, 2000);
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id) VALUES (?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null]);
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
       await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?)',
         [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
     } catch { /* 留痕失败不影响 */ }
