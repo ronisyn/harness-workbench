@@ -1330,6 +1330,141 @@ app.delete('/api/tasks/:id', requireAuth, async (req, res) => {
   await db.query('DELETE FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
   res.json({ ok: true });
 });
+// A8 任务▶跑一次（手动补跑 + 审计；失败告警落状态带数据源）与执行历史（task_history）
+app.post('/api/tasks/:id/run', requireAuth, async (req, res) => {
+  try {
+    const t = (await db.query('SELECT * FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (!t) return res.status(404).json({ ok: false, message: '任务不存在' });
+    const { executeScheduledTask } = await import('./scheduler.js');
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'task:run_once', 'id=' + t.id + ' name=' + String(t.name).slice(0, 60)]);
+    res.json({ ok: true, started: true });
+    // 异步执行（不阻塞响应）：执行器内部推进 next_run 与 last_result，并写 task_history
+    executeScheduledTask({ ...t, __manual: true }).catch((e) => console.error('[task] 手动跑异常:', e.message));
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 任务执行历史：GET /api/tasks/:id/history?limit=20
+app.get('/api/tasks/:id/history', requireAuth, async (req, res) => {
+  try {
+    const own = (await db.query('SELECT id FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (!own) return res.status(404).json({ ok: false, message: '任务不存在' });
+    const n = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const rows = await db.query('SELECT id, started_at, finished_at, ok, note, cost FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT ?', [Number(req.params.id), n]);
+    res.json({ ok: true, history: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 任务失败告警（首页状态带 + 进化集审批台记录数据源）：近 24h 失败任务
+app.get('/api/tasks/alerts', requireAuth, async (req, res) => {
+  try {
+    const rows = await db.query(
+      `SELECT h.task_id, t.name, h.finished_at, h.note FROM task_history h JOIN scheduled_tasks t ON t.id=h.task_id
+       WHERE t.account_id=? AND h.ok=0 AND h.finished_at > NOW() - INTERVAL 24 HOUR ORDER BY h.id DESC LIMIT 20`, [req.user.id]);
+    res.json({ ok: true, alerts: rows });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// ---------- A7 进化集 API（§8.7：进化目标=人控事项；目标×任务绑定；备忘录区；护栏三条在 UI 呈现） ----------
+// 目标列表（带绑定任务 id 数组）
+app.get('/api/evo/goals', requireAuth, async (req, res) => {
+  try {
+    const goals = await db.query('SELECT id, name, descr, status, created_at, updated_at FROM evo_goals WHERE account_id=? ORDER BY id DESC', [req.user.id]);
+    const binds = await db.query('SELECT goal_id, task_id FROM evo_goal_tasks');
+    res.json({ ok: true, goals: goals.map((g) => ({ ...g, taskIds: binds.filter((b) => b.goal_id === g.id).map((b) => b.task_id) })) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+app.post('/api/evo/goals', requireAuth, async (req, res) => {
+  try {
+    const name = String((req.body || {}).name || '').trim();
+    if (!name) return res.status(400).json({ ok: false, message: 'name 必填（一句事项描述，如"优化 token 成本"）' });
+    const r = await db.query('INSERT INTO evo_goals (account_id, name, descr) VALUES (?,?,?)', [req.user.id, name.slice(0, 200), String((req.body || {}).descr || '').slice(0, 1000)]);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'evo:goal_create', 'id=' + r.insertId + ' ' + name.slice(0, 80)]);
+    res.json({ ok: true, id: r.insertId });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.patch('/api/evo/goals/:id', requireAuth, async (req, res) => {
+  try {
+    const { name, descr, status } = req.body || {};
+    const sets = [], ps = [];
+    if (name) { sets.push('name=?'); ps.push(String(name).slice(0, 200)); }
+    if (descr !== undefined) { sets.push('descr=?'); ps.push(String(descr).slice(0, 1000)); }
+    if (status) { if (!['active', 'paused'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 active|paused' }); sets.push('status=?'); ps.push(status); }
+    if (!sets.length) return res.json({ ok: true });
+    ps.push(req.params.id, req.user.id);
+    await db.query(`UPDATE evo_goals SET ${sets.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, ps);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.delete('/api/evo/goals/:id', requireAuth, async (req, res) => {
+  await db.query('DELETE FROM evo_goal_tasks WHERE goal_id=?', [req.params.id]);
+  await db.query('DELETE FROM evo_goals WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
+  res.json({ ok: true });
+});
+// 目标×任务绑定（整表替换该目标的绑定集）
+app.put('/api/evo/goals/:id/tasks', requireAuth, async (req, res) => {
+  try {
+    const g = (await db.query('SELECT id FROM evo_goals WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (!g) return res.status(404).json({ ok: false, message: '目标不存在' });
+    const list = Array.isArray((req.body || {}).taskIds) ? (req.body).taskIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0) : [];
+    await db.query('DELETE FROM evo_goal_tasks WHERE goal_id=?', [g.id]);
+    for (const tid of [...new Set(list)]) {
+      const own = (await db.query('SELECT id FROM scheduled_tasks WHERE id=? AND account_id=?', [tid, req.user.id]))[0];
+      if (own) await db.query('INSERT IGNORE INTO evo_goal_tasks (goal_id, task_id) VALUES (?,?)', [g.id, tid]);
+    }
+    // 反向写在目标描述里供任务侧展示（任务页显示"此任务绑了哪些目标"）
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'evo:goal_bind', 'goal=' + g.id + ' tasks=' + list.join(',')]);
+    res.json({ ok: true, goalId: g.id, taskIds: list });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 任务→目标反查（任务页卡上"绑了哪些目标"）
+app.get('/api/evo/goals/by-task/:taskId', requireAuth, async (req, res) => {
+  try {
+    const rows = await db.query('SELECT g.id, g.name, g.status FROM evo_goal_tasks b JOIN evo_goals g ON g.id=b.goal_id WHERE b.task_id=? AND g.account_id=?', [Number(req.params.taskId), req.user.id]);
+    res.json({ ok: true, goals: rows });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+// 备忘录区（仅建议类落点，用户决定做不做）
+app.get('/api/evo/memos', requireAuth, async (req, res) => {
+  try { res.json({ ok: true, memos: await db.query('SELECT id, content, done, created_at FROM evo_memos WHERE account_id=? ORDER BY done, id DESC LIMIT 200', [req.user.id]) }); }
+  catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.post('/api/evo/memos', requireAuth, async (req, res) => {
+  try {
+    const content = String((req.body || {}).content || '').trim();
+    if (!content) return res.status(400).json({ ok: false, message: 'content 必填' });
+    const r = await db.query('INSERT INTO evo_memos (account_id, content) VALUES (?,?)', [req.user.id, content.slice(0, 2000)]);
+    res.json({ ok: true, id: r.insertId });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.patch('/api/evo/memos/:id', requireAuth, async (req, res) => {
+  try {
+    await db.query('UPDATE evo_memos SET done=? WHERE id=? AND account_id=?', [(req.body || {}).done ? 1 : 0, Number(req.params.id) || 0, req.user.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
+});
+app.delete('/api/evo/memos/:id', requireAuth, async (req, res) => {
+  await db.query('DELETE FROM evo_memos WHERE id=? AND account_id=?', [Number(req.params.id) || 0, req.user.id]);
+  res.json({ ok: true });
+});
+// 进化集概览（状态行：每日进化/周报状态、启用目标数、待审需求+待审提案数、最近一轮摘要、缓存告警）
+app.get('/api/evo/summary', requireAuth, async (req, res) => {
+  try {
+    const tasks = await db.query('SELECT id, name, enabled, last_run, last_result FROM scheduled_tasks WHERE account_id=? ORDER BY id DESC', [req.user.id]);
+    const goals = await db.query('SELECT COUNT(*) c FROM evo_goals WHERE account_id=? AND status="active"', [req.user.id]);
+    const demands = await db.query('SELECT COUNT(*) c FROM extension_demands WHERE status="待审"', []);
+    let proposals = 0;
+    try { const fs = await import('node:fs'); proposals = fs.readdirSync(path.join(ROOT, 'proposals')).filter((f) => f.endsWith('.md')).length; } catch { proposals = 0; }
+    const kpi = tasks.find((t) => /KPI|周报/.test(String(t.name)));
+    const daily = tasks.find((t) => /每日自我进化/.test(String(t.name)));
+    res.json({
+      ok: true,
+      daily: daily || null, kpi: kpi || null,
+      activeGoals: Number(goals[0]?.c || 0),
+      openDemands: Number(demands[0]?.c || 0),
+      proposalFiles: proposals,
+      taskCount: tasks.length,
+      tasks: tasks.map((t) => ({ id: t.id, name: t.name, enabled: t.enabled, last_run: t.last_run })),
+    });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
 
 // ---------- 健康检查（Agent 自开发演示产物，RW 自我开发闭环验证） ----------
 app.get('/api/health', (req, res) => {
@@ -1475,15 +1610,16 @@ async function maybeAutoCanary(key, accountId) {
 }
 
 // ---------- ⑤ 模型观测数据面 API（复测 reviews 读写 + telemetry 视图查询；§8） ----------
-// 复测记录写入：result ∈ pass|bug；bug 必填 bug_reason（§6.4 打回必填原因）
+// 复测记录写入：result ∈ pass|bug；bug 必填 bug_reason（§6.4 打回必填原因）；difficulty 小|中|大（A7 难度人工勾选，v1 联动画板用）
 app.post('/api/reviews', requireAuth, async (req, res) => {
   try {
     const { conversationId, result, bugReason } = req.body || {};
+    const difficulty = ['小', '中', '大'].includes((req.body || {}).difficulty) ? (req.body).difficulty : null;
     if (!conversationId || !['pass', 'bug'].includes(result)) return res.status(400).json({ ok: false, message: 'conversationId 与 result(pass|bug) 必填' });
     if (result === 'bug' && !String(bugReason || '').trim()) return res.status(400).json({ ok: false, message: '打回(bug)必须填写原因' });
     const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
-    const r = await db.query('INSERT INTO reviews (conversation_id, account_id, result, bug_reason) VALUES (?,?,?,?)', [conversationId, req.user.id, result, result === 'bug' ? String(bugReason).trim() : null]);
+    const r = await db.query('INSERT INTO reviews (conversation_id, account_id, result, bug_reason, difficulty) VALUES (?,?,?,?,?)', [conversationId, req.user.id, result, result === 'bug' ? String(bugReason).trim() : null, difficulty]);
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'review:' + result, 'conversation=' + conversationId + (result === 'bug' ? ' reason=' + String(bugReason).trim().slice(0, 200) : '')]);
     res.json({ ok: true, id: r.insertId });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
@@ -1493,10 +1629,10 @@ app.get('/api/reviews', requireAuth, async (req, res) => {
   try {
     const cid = Number(req.query.conversation_id) || 0;
     if (cid) {
-      const rows = await db.query('SELECT id, conversation_id, result, bug_reason, created_at FROM reviews WHERE conversation_id=? AND account_id=? ORDER BY id DESC', [cid, req.user.id]);
+      const rows = await db.query('SELECT id, conversation_id, result, bug_reason, difficulty, created_at FROM reviews WHERE conversation_id=? AND account_id=? ORDER BY id DESC', [cid, req.user.id]);
       return res.json({ ok: true, reviews: rows });
     }
-    const rows = await db.query('SELECT id, conversation_id, result, bug_reason, created_at FROM reviews WHERE account_id=? ORDER BY id DESC LIMIT 100', [req.user.id]);
+    const rows = await db.query('SELECT id, conversation_id, result, bug_reason, difficulty, created_at FROM reviews WHERE account_id=? ORDER BY id DESC LIMIT 100', [req.user.id]);
     res.json({ ok: true, reviews: rows });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });

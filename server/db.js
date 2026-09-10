@@ -338,8 +338,41 @@ const SCHEMA = [
     account_id INT,
     result VARCHAR(8) NOT NULL,
     bug_reason TEXT,
+    difficulty VARCHAR(8),
     created_at DATETIME DEFAULT NOW(),
     KEY idx_reviews_conv (conversation_id)
+  )`,
+  // ---- A7 进化集产品载体（总方案 §8.7/§9.3"产品批状态载体随批定义"）：进化目标（人控事项）+ 目标×定时任务绑定 + 备忘录区 ----
+  `CREATE TABLE IF NOT EXISTS evo_goals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    descr VARCHAR(1000),
+    status VARCHAR(12) DEFAULT 'active',   -- active|paused
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW()
+  )`,
+  `CREATE TABLE IF NOT EXISTS evo_goal_tasks (
+    goal_id INT NOT NULL,
+    task_id INT NOT NULL,
+    created_at DATETIME DEFAULT NOW(),
+    PRIMARY KEY (goal_id, task_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS evo_memos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL,
+    content TEXT NOT NULL,
+    done TINYINT DEFAULT 0,
+    created_at DATETIME DEFAULT NOW()
+  )`,
+  `CREATE TABLE IF NOT EXISTS task_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    task_id INT NOT NULL,
+    started_at DATETIME DEFAULT NOW(),
+    finished_at DATETIME,
+    ok TINYINT DEFAULT 0,
+    note TEXT,
+    cost DECIMAL(10,4) DEFAULT 0
   )`,
   // ---- 2026-09-11 A0 扩展中心数据载体（总方案 §9.3 载体①②④⑧；随扩展中心批使用）----
   // extensions：可装载业务资产注册表（插件/MCP/应用统一；manifest 详情随批落 manifest_ref）
@@ -426,6 +459,8 @@ export async function initSchema() {
     // A6 知识治理（§7.3 条目结构化字段）：状态 active|superseded|obsolete + 关联组件/版本（superseded/obsolete 注入降权或仅历史）
     "ALTER TABLE knowledge ADD COLUMN status VARCHAR(12) DEFAULT 'active'",
     "ALTER TABLE knowledge ADD COLUMN related_component VARCHAR(120)",
+    // A7 难度人工勾选（§7.2：复测记录带难度 小|中|大，联动一次通过率）
+    "ALTER TABLE reviews ADD COLUMN difficulty VARCHAR(8)",
     // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
     'DROP TABLE IF EXISTS capabilities',
   ];

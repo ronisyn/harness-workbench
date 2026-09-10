@@ -52,11 +52,17 @@ export async function computeNextRuns() {
 }
 
 // 执行一个定时任务
+// A8：写 task_history（执行历史/失败告警数据源）；手动补跑（task.__manual=true）不推进 next_run
 export async function executeScheduledTask(task) {
-  console.log(`[scheduler] 执行定时任务 ${task.id}: ${task.name}`);
+  console.log(`[scheduler] 执行定时任务 ${task.id}: ${task.name}${task.__manual ? '（手动跑一次）' : ''}`);
   const t0 = Date.now();
   let resultText = '';
+  let histId = null;
   try {
+    try {
+      const h = await db.query('INSERT INTO task_history (task_id, started_at, ok) VALUES (?, NOW(), 0)', [task.id]);
+      histId = h.insertId;
+    } catch { /* task_history 不可用不影响执行 */ }
     const acc = await db.query('SELECT id FROM accounts WHERE id=?', [task.account_id]);
     if (!acc.length) { resultText = '账号不存在'; }
     else {
@@ -68,20 +74,36 @@ export async function executeScheduledTask(task) {
       }
       let accessRules = null;
       try { const ar = await db.query("SELECT svalue FROM settings WHERE skey='access_rules'"); if (ar[0]) { const v = JSON.parse(ar[0].svalue); if (Array.isArray(v)) accessRules = v; } } catch { accessRules = null; }
+      // A7/A8：任务绑定的进化目标（勾选目标 → 逐条拼进指令，一次跑完所有勾选目标；无绑定=仅跑原 prompt）
+      let goalLines = '';
+      try {
+        const gs = await db.query('SELECT g.name, g.descr FROM evo_goal_tasks b JOIN evo_goals g ON g.id=b.goal_id WHERE b.task_id=? AND g.status="active"', [task.id]);
+        if (gs.length) goalLines = '\n\n【本次须执行的目标（进化集勾选，逐条完成）】\n' + gs.map((g, i) => (i + 1) + '. ' + g.name + (g.descr ? '——' + String(g.descr).slice(0, 300) : '')).join('\n');
+      } catch { /* 目标绑定不可用则忽略 */ }
       const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (process.env.RW_WORKSPACE || '/srv/rw-workspace'), __accessRules: accessRules };
-      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt }], permission: task.permission || 'full', ctx, keys: config.keys });
+      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt + goalLines }], permission: task.permission || 'full', ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）
-      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', '【定时任务】' + task.name + '\n' + task.prompt]);
+      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', '【定时任务】' + task.name + (task.__manual ? '（手动跑一次）' : '') + '\n' + task.prompt + goalLines]);
       await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'assistant', resultText]);
     }
   } catch (e) {
     resultText = '执行失败: ' + e.message;
   }
+  const failed = /^执行失败/.test(resultText);
   const next = cronToNext(task.cron);
-  await db.query('UPDATE scheduled_tasks SET last_run=NOW(), last_result=?, next_run=?, enabled=enabled WHERE id=?',
-    [resultText.slice(0, 3000), next, task.id]);
-  console.log(`[scheduler] 任务 ${task.id} 完成（${Date.now() - t0}ms）`);
+  // 手动跑一次：保留既有 next_run（不因补跑打乱排程）
+  if (task.__manual) {
+    await db.query('UPDATE scheduled_tasks SET last_run=NOW(), last_result=?, enabled=enabled WHERE id=?', [resultText.slice(0, 3000), task.id]);
+  } else {
+    await db.query('UPDATE scheduled_tasks SET last_run=NOW(), last_result=?, next_run=?, enabled=enabled WHERE id=?',
+      [resultText.slice(0, 3000), next, task.id]);
+  }
+  try {
+    if (histId) await db.query('UPDATE task_history SET finished_at=NOW(), ok=?, note=? WHERE id=?', [failed ? 0 : 1, resultText.slice(0, 1000), histId]);
+    else await db.query('INSERT INTO task_history (task_id, started_at, finished_at, ok, note) VALUES (?, NOW(), NOW(), ?, ?)', [task.id, failed ? 0 : 1, resultText.slice(0, 1000)]);
+  } catch { /* 历史写失败不影响任务 */ }
+  console.log(`[scheduler] 任务 ${task.id} 完成（${Date.now() - t0}ms${failed ? '，失败' : ''}）`);
   return resultText;
 }
 
