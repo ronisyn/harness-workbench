@@ -95,6 +95,63 @@ app.get('/api/models', requireAuth, async (req, res) => {
 
 // M2-① 模型广场：models.enabled 启停（菜单闸门；显式会话锁不受影响——C4 显式=绝对锁不被覆盖）
 // body { enabled: bool }；审计 model:toggle
+// ---------- A10 模型广场补强（§9 登记③：auto 全局默认 default_models 写口 + 跨壳默认一览） ----------
+// 全局默认模型（auto 路由各厂商默认）：GET 返回现值 + 各厂商可选模型
+app.get('/api/default-models', requireAuth, async (req, res) => {
+  try {
+    const dm = await getSetting('default_models', null);
+    const over = (dm && typeof dm === 'object') ? dm : {};
+    const providers = await db.query('SELECT id, provider_key, name FROM providers ORDER BY sort_order, id');
+    const models = await db.query('SELECT id, provider_id, model_id, enabled FROM models WHERE enabled=1 ORDER BY provider_id, model_id');
+    res.json({
+      ok: true, defaults: over,
+      providers: providers.map((p) => ({ key: p.provider_key, name: p.name, models: models.filter((m) => m.provider_id === p.id).map((m) => m.model_id) })),
+    });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 写入（校验：模型必须存在于该厂商且已启用——防伪配置把 auto 路由指到不存在的模型；审计 model:default）
+app.put('/api/default-models', requireAuth, async (req, res) => {
+  try {
+    const patch = (req.body || {}).defaults;
+    if (!patch || typeof patch !== 'object') return res.status(400).json({ ok: false, message: 'body.defaults 需为 {providerKey: modelId} 对象' });
+    const providers = await db.query('SELECT id, provider_key, name FROM providers');
+    const models = await db.query('SELECT provider_id, model_id, enabled FROM models');
+    const next = {};
+    const cur = await getSetting('default_models', null);
+    if (cur && typeof cur === 'object') Object.assign(next, cur);
+    for (const [pk, mid] of Object.entries(patch)) {
+      const p = providers.find((x) => x.provider_key === pk);
+      if (!p) return res.status(400).json({ ok: false, message: '厂商不存在：' + pk });
+      const m = String(mid || '').trim();
+      if (!m) { delete next[pk]; continue; } // 空=清除该厂商默认覆盖（回落厂商硬编码默认）
+      const hit = models.find((x) => x.provider_id === p.id && x.model_id === m);
+      if (!hit) return res.status(400).json({ ok: false, message: '模型 ' + m + ' 不属于厂商 ' + pk + '（或未入库）——请先在模型广场启用该模型' });
+      if (!hit.enabled) return res.status(400).json({ ok: false, message: '模型 ' + m + ' 当前已停用，不能设为默认（启用后再设）' });
+      next[pk] = m;
+    }
+    await setSetting('default_models', next);
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'model:default', JSON.stringify(patch).slice(0, 400)]);
+    res.json({ ok: true, defaults: next });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 跨壳默认模型一览（管理视图=只读；壳级 modelPolicy 唯一写点=Agent 装配向导 step4，此处不双写）
+app.get('/api/shells/model-overview', requireAuth, async (req, res) => {
+  try {
+    const rows = await db.query('SELECT skey, name, status, model_policy, tools_preset FROM shells ORDER BY id');
+    const out = rows.map((r) => {
+      let mp = {};
+      try { mp = typeof r.model_policy === 'string' ? JSON.parse(r.model_policy || '{}') : (r.model_policy || {}); } catch { mp = {}; }
+      return {
+        key: r.skey, name: r.name, status: r.status, presetBase: r.tools_preset || 'standard',
+        defaultProvider: mp.defaultProvider || '', defaultModel: mp.defaultModel || '',
+        budgetYuan: Number(mp.budgetYuan || 0), qualityCostBias: mp.qualityCostBias == null ? null : mp.qualityCostBias,
+        hasDefault: !!(mp.defaultProvider && mp.defaultModel),
+      };
+    });
+    const dm = await getSetting('default_models', null);
+    res.json({ ok: true, shells: out, globalDefaults: (dm && typeof dm === 'object') ? dm : {} });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
 app.put('/api/models/:id', requireAuth, async (req, res) => {
   try {
     const mid = Number(req.params.id) || 0;

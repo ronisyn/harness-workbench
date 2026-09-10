@@ -111,6 +111,9 @@ export const api = {
   knowledgePatch: (id, patch) => request('/api/knowledge/' + id, { method: 'PATCH', body: JSON.stringify(patch) }),
   // M2/A 系列统一后台（console 各板块 API）
   modelToggle: (id, enabled) => request('/api/models/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  defaultModels: () => request('/api/default-models'),
+  setDefaultModels: (defaults) => request('/api/default-models', { method: 'PUT', body: JSON.stringify({ defaults }) }),
+  shellModelOverview: () => request('/api/shells/model-overview'),
   providerTest: (baseUrl, apiKey) => request('/api/providers/test', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey }) }),
   telemetryDaily: (params) => request('/api/telemetry/daily?' + new URLSearchParams(params || {}).toString()),
   reviewsList: (params) => request('/api/reviews?' + new URLSearchParams(params || {}).toString()),
