@@ -38,7 +38,7 @@ MCP server 的 env 中含密钥的键（键名匹配 `token|secret|key|password|
 - **状态：待用户执行 / 平台侧无法核实**——轮换属平台外操作（GitHub 侧生成新 PAT + 服务器改配置），本次自动化批次不改代码、不代执行；在用户完成前，上文"token 明文仅存 server settings"的现状依旧成立。
 - **轮换步骤**（平台外，约 2 分钟）：
   1. GitHub → Settings → Developer settings → Personal access tokens：吊销旧 token，生成新 token（最小权限：repo 只读或按需）；
-  2. 服务器编辑 settings `mcp_servers` 中 `github.env.GITHUB_PERSONAL_ACCESS_TOKEN`（后台：应用市场 → 扩展中心 → MCP 外部服务接入；或 `PUT /api/settings` 后 `POST /api/mcp/reload`）；
+  2. 服务器编辑 settings `mcp_servers` 中 `github.env.GITHUB_PERSONAL_ACCESS_TOKEN`（后台：应用 → 扩展中心 → MCP 外部服务接入；或 `PUT /api/settings` 后 `POST /api/mcp/reload`）；
   3. 验证：会话内调用 `mcp_github_list_commits` 返回真实提交即成功（`mcp_assetize`/资产卡的健康度指标同源可见）。
 - **登记落点**：总方案 §11.4 运维待办；轮换完成后在本节补一行"已完成 日期 + 验证动作"，并把本文按 §8 治理退役入 `docs/archive/`（改造为凭证引用后）。
 - **关联现状（2026-09-11 A3 批）**：MCP 已资产化登记（`extensions` type=mcp，`meta.untrustedInput=true` 记录"外部不可信输入"提示注入触发条件），但**凭证引用化（§9 credentials_ref）仍随 D10 连接器批后置**——在此之前明文现状不变。
