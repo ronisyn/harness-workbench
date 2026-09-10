@@ -33,6 +33,16 @@ MCP server 的 env 中含密钥的键（键名匹配 `token|secret|key|password|
 - 前端保存时若该键仍为占位符 → 服务端保留 DB 原值不覆盖；填入新值才替换；
 - 已实测：占位回存 + reload 后 `mcp_github_list_commits` 仍返回真实提交（token 有效，commit `68968c5` 修复 / `6b7219c` UI 提示）。
 
+## C1 轮换登记（2026-09-11，平台外一次性操作）
+
+- **状态：待用户执行 / 平台侧无法核实**——轮换属平台外操作（GitHub 侧生成新 PAT + 服务器改配置），本次自动化批次不改代码、不代执行；在用户完成前，上文"token 明文仅存 server settings"的现状依旧成立。
+- **轮换步骤**（平台外，约 2 分钟）：
+  1. GitHub → Settings → Developer settings → Personal access tokens：吊销旧 token，生成新 token（最小权限：repo 只读或按需）；
+  2. 服务器编辑 settings `mcp_servers` 中 `github.env.GITHUB_PERSONAL_ACCESS_TOKEN`（后台：应用市场 → 扩展中心 → MCP 外部服务接入；或 `PUT /api/settings` 后 `POST /api/mcp/reload`）；
+  3. 验证：会话内调用 `mcp_github_list_commits` 返回真实提交即成功（`mcp_assetize`/资产卡的健康度指标同源可见）。
+- **登记落点**：总方案 §11.4 运维待办；轮换完成后在本节补一行"已完成 日期 + 验证动作"，并把本文按 §8 治理退役入 `docs/archive/`（改造为凭证引用后）。
+- **关联现状（2026-09-11 A3 批）**：MCP 已资产化登记（`extensions` type=mcp，`meta.untrustedInput=true` 记录"外部不可信输入"提示注入触发条件），但**凭证引用化（§9 credentials_ref）仍随 D10 连接器批后置**——在此之前明文现状不变。
+
 ## 版本注
 
 框架：蓝图 v2.5.5 批5（P11）。现行总纲注（2026-09-10）：=《RW-Agent 平台化改造总方案》B；本文为快照，凭证口径以 B §9/§11.4 为准。配置面板与修复提交：`060f9dc`（UI）、`1d48502`（工具名去重）、`dfe503b`（schema 注册修复）、`8940f91`（名解析修复）、`68968c5`（密钥脱敏）、`6b7219c`（占位提示）、`a31d715`（重连看门狗）。
