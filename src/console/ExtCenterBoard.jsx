@@ -1,15 +1,17 @@
-// src/console/ExtCenterBoard.jsx - A3 扩展中心（§8.8）：插件/MCP/应用 统一资产卡片墙 + 需求闭环(单一 intake) + 指标 v1 前两层
-// + MCP 资产化 + 发布闸门 + 提示注入触发注（外部 MCP=不可信输入）。数据载体=extensions/shell_extensions/extension_demands（A0 §9.3）。
+// src/console/ExtCenterBoard.jsx - 应用·扩展中心（§8.8；定版导航 code 'ext'）：插件/MCP/应用 统一资产卡片墙 + 需求闭环(单一 intake) + 指标 v1 前两层
+// + MCP 资产化 + 发布闸门 + 提示注入触发注（外部 MCP=不可信输入）+ 应用成品入口（AppLaunch，原「应用」板块并入）。
+// 数据载体=extensions/shell_extensions/extension_demands（A0 §9.3）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 import McpManager from './McpManager.jsx';
+import AppLaunch from '../shared/AppLaunch.jsx';
 
 const TYPE_CN = { plugin: '插件', mcp: 'MCP', app: '应用' };
 const STATUS_CN = { dev: '研发', test: '测试', published: '已上架', retired: '退役' };
 const TYPE_COLOR = { plugin: '#1565c0', mcp: '#6a1b9a', app: '#2e7d32' };
 const EMPTY_FORM = { type: 'plugin', key: '', name: '', version: '0.1.0', status: 'dev', scope: 'global', capability: '', manifestRef: '' };
 
-export default function ExtCenterBoard() {
+export default function ExtCenterBoard({ onGoChat }) {
   const [exts, setExts] = useState([]);          // 列表（列表摘要）
   const [metrics, setMetrics] = useState([]);    // 指标 v1（按资产键）
   const [tab, setTab] = useState('all');         // all|plugin|mcp|app
@@ -265,6 +267,10 @@ export default function ExtCenterBoard() {
       )}
 
       <div className="rw-console-note">资产=可装载业务资产（插件=壳内能力零件 / MCP=外部服务 / 应用=壳内点开成品入口）；平台只研发+测试+上架，壳需要时在 Agent 装配向导 step6 勾选装载。发布闸门=上架需 capability/manifest 声明；指标 v1 先做 健康度(失败率/均耗时)+活跃度(调用/活跃壳) 两层（MCP 按工具前缀归集；插件/应用调用维度待 tool_calls 增 asset 留痕，后置）。月度扩展巡检=进化集定时任务（需求≥3 或故障回升 → 建议升级）。</div>
+
+      {/* 应用（成品入口）：§8.2/§8.8——应用不单列导航，资产页内提供"点开即用"入口；壳详情另有本壳入口 */}
+      <div className="rw-cap-gtitle" style={{ marginTop: 16 }}>应用（带壳身份成品入口；原「应用」板块已按 §8.2 取消导航级，能力并入本页）</div>
+      <AppLaunch onGoChat={onGoChat} compact />
 
       {/* A8：MCP 外部服务接入（自设置页迁入，§8.10 设置收窄） */}
       <McpManager />

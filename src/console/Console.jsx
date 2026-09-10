@@ -1,51 +1,56 @@
-// src/console/Console.jsx - 统一后台（分组导航：平台 / Agent / 应用市场；入口 /console/*，同站同账号）
-// 2026-09-09 重分组（用户定）：平台（模型广场/观测/知识库/设置）；Agent（能力/进化）；
-// 应用市场（Agent壳/应用/扩展中心）。板块 code 不变（URL 兼容），仅分组/标签调整。
-// A5：技能库=平台板块（code 'skills'；能力页=工具集内容仍在 agent-caps 以保 URL 兼容）。
-import React from 'react';
+// src/console/Console.jsx - 统一后台（导航=蓝图 §8.2 定版：4 组 11 板块，命名/顺序即定版表）
+// 模型：模型广场 / 模型观测；平台：工具集 / 技能库 / 知识库 / 进化集；
+// 应用：Agent / 扩展中心；系统：任务 / 审计 / 设置。
+// 板块 code = 定版英文短码（toolset/evo/agent/ext…）；历史 code 仅作 URL 兼容别名（ALIAS），
+// 进入即 replaceState 归一到定版链，导航只出现定版 11 项（不再保留旧板块"第二套入口"）。
+import React, { useEffect } from 'react';
 import ModelObsBoard from './ModelObs.jsx';
 import KbBoard from './KbBoard.jsx';
 import SettingsBoard from './SettingsBoard.jsx';
 import ModelPlazaBoard from './ModelPlaza.jsx';
 import AgentBoard from './AgentBoard.jsx';
-import CapsBoard from './CapsBoard.jsx';
+import ToolsetBoard from './ToolsetBoard.jsx';
 import EvoBoard from './EvoBoard.jsx';
-import AppsBoard from './AppsBoard.jsx';
 import ExtCenterBoard from './ExtCenterBoard.jsx';
 import SkillsBoard from './SkillsBoard.jsx';
 import TasksBoard from './TasksBoard.jsx';
 import AuditBoard from './AuditBoard.jsx';
 
-// 板块注册表：code → { group, label, render }（group 决定左侧分组）
+// 板块注册表：code → { group, label, render }（group 决定左侧分组；顺序即定版导航顺序）
 export const BOARDS = {
+  // —— 模型 ——
+  'models-plaza': { group: '模型', label: '模型广场', render: () => <ModelPlazaBoard /> },
+  'models-obs': { group: '模型', label: '模型观测', render: () => <ModelObsBoard /> },
   // —— 平台 ——
-  'models-plaza': { group: '平台', label: '模型广场', render: () => <ModelPlazaBoard /> },
-  'models-obs': { group: '平台', label: '模型观测', render: () => <ModelObsBoard /> },
+  'toolset': { group: '平台', label: '工具集', render: () => <ToolsetBoard /> },
   'skills': { group: '平台', label: '技能库', render: () => <SkillsBoard /> },
   'kb': { group: '平台', label: '知识库', render: () => <KbBoard /> },
-  // A4：工具集/规则（§8.5）归平台组；code agent-caps 保留兼容旧链
-  'agent-caps': { group: '平台', label: '工具集', render: () => <CapsBoard /> },
-  // —— Agent ——
-  'agent-evo': { group: 'Agent', label: '进化集', render: () => <EvoBoard /> },
-  // —— 应用市场 ——
-  // A2：壳开发 1.3 升级为 Agent（壳）页 = 壳列表/详情/新建 + 装配向导 + 任务模板库子区（§8.9；URL code 不变兼容旧链）
-  'agent-dev': { group: '应用市场', label: 'Agent（壳）', render: () => <AgentBoard /> },
-  'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
-  // A3：原"插件"占位 code 升级为 扩展中心（插件/MCP/应用统一资产页，§8.8；code 不变兼容 /console/plugins 旧链）
-  'plugins': { group: '应用市场', label: '扩展中心', render: () => <ExtCenterBoard /> },
-  // —— 系统（A8 任务独立板块；A9 审计） ——
+  'evo': { group: '平台', label: '进化集', render: () => <EvoBoard /> },
+  // —— 应用 ——
+  'agent': { group: '应用', label: 'Agent', render: (p) => <AgentBoard {...p} /> },
+  'ext': { group: '应用', label: '扩展中心', render: (p) => <ExtCenterBoard {...p} /> },
+  // —— 系统 ——
   'tasks': { group: '系统', label: '任务', render: () => <TasksBoard /> },
   'audit': { group: '系统', label: '审计', render: (p) => <AuditBoard {...p} /> },
   'settings': { group: '系统', label: '设置', render: () => <SettingsBoard /> },
 };
-const GROUPS = ['平台', 'Agent', '应用市场', '系统'];
+export const GROUPS = ['模型', '平台', '应用', '系统'];
+// 历史 code → 定版 code（仅 URL 兼容；不进导航）：agent-caps=旧"能力/工具集"、agent-evo=旧进化集、
+// agent-dev=旧"Agent（壳）"、plugins=旧"插件"占位、agent-apps=旧"应用"板块（已并入扩展中心，§8.2/§8.8）。
+export const ALIAS = { 'agent-caps': 'toolset', 'agent-evo': 'evo', 'agent-dev': 'agent', 'plugins': 'ext', 'agent-apps': 'ext' };
 
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
-  const rawCode = path.replace(/^\/console\/?/, '').split('?')[0] || ''; // A9：剥离 query（/console/audit?conv=N）
-  const code = BOARDS[rawCode] ? rawCode : 'models-plaza'; // 未知板块回退 1.1，导航高亮跟随实际展示
+  const m = path.match(/^\/console\/?([^?]*)(\?.*)?$/);
+  const rawCode = (m && m[1]) || '';
+  const search = (m && m[2]) || '';       // 保留 query（如 /console/audit?conv=N）
+  const code = BOARDS[rawCode] ? rawCode : (ALIAS[rawCode] || 'models-plaza'); // 未知板块回退定版首项
   const board = BOARDS[code];
-  // 板块可接收公共导航 props（AppsBoard 启动应用后跳对话页——审计 P1-3）
-  const boardProps = { onGoChat };
+  // 旧链进来即归一为新链（地址栏/刷新/分享都指向定版 code）
+  useEffect(() => {
+    if (rawCode && rawCode !== code) history.replaceState(null, '', '/console/' + code + search);
+  }, [rawCode, code, search]);
+  // 板块可接收公共导航 props（应用启动后跳对话页）
+  const boardProps = { onGoChat, code };
   return (
     <div className="rw-shell">
       <header className="rw-topbar">

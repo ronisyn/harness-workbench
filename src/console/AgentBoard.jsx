@@ -1,11 +1,12 @@
-// src/console/AgentBoard.jsx - A2 §8.9 Agent（壳）页：壳列表/详情/新建 + 装配向导 + 页内任务模板库子区（§7.5 定案 A）
-// 原 1.3 壳开发升级：pack 导入 JSON 保留为"高级"折叠区；新建/编辑走装配向导；模板库同页子区（不再只挂在应用板）。
+// src/console/AgentBoard.jsx - 应用·Agent 页（§8.9；定版导航 code 'agent'）：壳列表/详情/新建 + 装配向导 + 页内任务模板库子区（§7.5 定案 A）+ 壳详情本壳可用应用入口
+// 原 1.3 壳开发升级：pack 导入 JSON 保留为"高级"折叠区；新建/编辑走装配向导；模板库同页子区。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 import AgentWizard from './AgentWizard.jsx';
 import TemplateBoard from './TemplateBoard.jsx';
+import AppLaunch from '../shared/AppLaunch.jsx';
 
-export default function AgentBoard() {
+export default function AgentBoard({ onGoChat }) {
   const [shells, setShells] = useState([]);
   const [detail, setDetail] = useState(null);    // 选中壳详情 {shell, tools}
   const [wiz, setWiz] = useState(null);          // 向导：null=关 | {key:'new'} | {key:'edit', shellKey, pack}
@@ -171,6 +172,9 @@ export default function AgentBoard() {
                   </span>
                 ))}
               </div>
+              {/* 本壳可用应用（§8.2：壳内可用应用入口放 Agent 装配向导 + 壳详情；同一 AppLaunch 实现） */}
+              <div className="rw-cap-gtitle" style={{ marginTop: 12 }}>本壳可用应用（启动即在本壳下开会话；应用清单=扩展中心成品资产 §8.8）</div>
+              <AppLaunch onGoChat={onGoChat} shellKey={detail.shell.skey || ''} compact />
             </div>
           )}
 

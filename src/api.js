@@ -24,7 +24,6 @@ export const api = {
   login: (username, password) => request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   me: () => request('/api/auth/me'),
-  models: () => request('/api/models'),
   providers: () => request('/api/providers'),
   conversations: () => request('/api/conversations'),
   createConversation: (title, permission) => request('/api/conversations', { method: 'POST', body: JSON.stringify({ title, permission }) }),

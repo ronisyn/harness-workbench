@@ -1,5 +1,5 @@
-// src/shared/ProposalsManager.jsx - R1 单一事实源：平台修订提案（列表/查看/新建）
-// 统一后台 1.5 Agent 进化（提案区）使用（原对话页⚙设置抽屉已退役）；数据自管（/api/proposals）。
+// src/shared/ProposalsManager.jsx - 单一事实源：平台修订提案（列表/查看/新建）
+// 落点=应用无关的进化集页提案区（§8.2/§9.2：原"设置·提案页"表述已过时，对话页⚙抽屉 09-09 退役）；数据自管（/api/proposals）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 

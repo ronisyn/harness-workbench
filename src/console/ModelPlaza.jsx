@@ -137,7 +137,7 @@ export default function ModelPlaza() {
         </tbody>
       </table>
 
-      <div className="rw-cap-gtitle" style={{ marginTop: 18 }}>跨壳默认模型一览（只读：壳级 modelPolicy 唯一写点=「应用市场 → Agent（壳）」装配向导 step4，此处不双写）</div>
+      <div className="rw-cap-gtitle" style={{ marginTop: 18 }}>跨壳默认模型一览（只读：壳级 modelPolicy 唯一写点=「应用 → Agent」装配向导 step4，此处不双写）</div>
       <table className="rw-console-table">
         <thead><tr><th>壳</th><th>状态</th><th>默认模型</th><th>工具档</th><th>预算(元)</th><th>质量成本偏好</th></tr></thead>
         <tbody>
@@ -182,7 +182,7 @@ export default function ModelPlaza() {
         </div>
       ))}
       {!market.length && <div className="rw-empty">点击「刷新市场」加载模型</div>}
-      <div className="rw-console-note">壳默认模型分配在「应用市场 → Agent（壳）」装配向导 step4（本页跨壳一览为只读）；会话显式选模型=绝对锁（C4），此处启停不影响已保存的显式会话选择，只影响模型菜单。auto 全局默认写入口现已开放（校验模型归属+启用态，防伪配置）。</div>
+      <div className="rw-console-note">壳默认模型分配在「应用 → Agent」装配向导 step4（本页跨壳一览为只读）；会话显式选模型=绝对锁（C4），此处启停不影响已保存的显式会话选择，只影响模型菜单。auto 全局默认写入口现已开放（校验模型归属+启用态，防伪配置）。</div>
     </div>
   );
 }
