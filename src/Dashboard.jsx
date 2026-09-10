@@ -15,6 +15,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
   // —— 看板 ——
   const [stats, setStats] = useState(null);
   const [hitSum, setHitSum] = useState(null);   // 缓存命中率目标摘要（A1 状态带）
+  const [taskAlerts, setTaskAlerts] = useState([]); // A8 任务失败告警（近 24h，状态带同源）
   const [statsLoaded, setStatsLoaded] = useState(false);
   const [statsErr, setStatsErr] = useState(false);
   const [shells, setShells] = useState([]);
@@ -35,6 +36,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
     catch { setStatsErr(true); }
     finally { setStatsLoaded(true); }
     try { const h = await api.cacheHitSummary(); setHitSum(h); } catch { /* ignore */ }
+    try { const a = await api.taskAlerts(); setTaskAlerts(a.alerts || []); } catch { /* 告警查询失败不阻断首页 */ }
     try { const sh = await api.shells(); setShells((sh.shells || []).filter((x) => x.status === 'enabled')); } catch { /* ignore */ }
     try { const kb = await api.knowledgeList({}); setKbCount((kb.knowledge || []).length); } catch { /* ignore */ }
     try { const t = await api.tasks(); setTasks(t.tasks || []); } catch { /* ignore */ }
@@ -121,11 +123,20 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
         </div>
       </header>
       <div className="rw-dash">
-        {hitSum && hitSum.target > 0 && (
+        {/* 状态带（§8.3/§8.10）：任务失败告警 + 缓存命中率目标告警同源呈现；无告警时显示命中率当日/7 日均值 */}
+        {taskAlerts.length > 0 && (
+          <div style={{ marginBottom: 8, padding: '6px 12px', borderRadius: 8, background: '#fff1f0', border: '1px solid #ffa39e', color: '#cf1322' }}>
+            ⚠️ 任务失败告警：{taskAlerts.slice(0, 3).map((a) => a.name + '（' + String(a.finished_at).slice(5, 16) + '）').join('；')}
+            {taskAlerts.length > 3 ? ` 等 ${taskAlerts.length} 项` : ''}
+          </div>
+        )}
+        {hitSum && (
           <div style={{ marginBottom: 10, padding: '6px 12px', borderRadius: 8, background: hitSum.alert ? '#fff1f0' : '#f0f7ff', border: '1px solid ' + (hitSum.alert ? '#ffa39e' : '#91caff'), color: hitSum.alert ? '#cf1322' : '#0958d9' }}>
             {hitSum.alert
               ? `⚠️ 缓存命中率告警：近7日均值 ${hitSum.avg7}% < 目标 ${hitSum.target}%（今日 ${hitSum.todayRate}%）——进化集已生成建议，可转行动`
-              : `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（目标 ${hitSum.target}%）`}
+              : (hitSum.target > 0
+                ? `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（目标 ${hitSum.target}%）`
+                : `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（未启用目标——设置→观测组可设阈值告警）`)}
           </div>
         )}
         {/* 迷你对话 */}

@@ -180,6 +180,21 @@ export default function EvoBoard() {
 
       {/* ④ 审批台卡区 */}
       <div className="rw-cap-gtitle" style={{ marginTop: 16 }}>审批台（待审建议按时间排；采纳→按类型分派：技能→技能库候选 / 插件·应用·工具→立项 intake / 平台 bug·成本→提案；仅建议类→备忘录）</div>
+      {/* A8/A7：任务失败记录（近 24h，与首页状态带同源 §8.10） */}
+      {alerts.length > 0 && (
+        <div className="rw-provider" style={{ padding: 8, marginBottom: 8, borderColor: '#ffa39e' }}>
+          <div style={{ fontSize: 12 }}>
+            <b style={{ color: '#cf1322' }}>⚠️ 任务失败记录（近 24h）</b>
+            <span className="rw-dash-muted" style={{ marginLeft: 6 }}>同源首页状态带；任务页可看执行历史与重跑</span>
+          </div>
+          {alerts.map((a, i) => (
+            <div key={i} style={{ fontSize: 12, marginTop: 4 }}>
+              <code>{a.name}</code> · {String(a.finished_at).slice(0, 16)} · {String(a.note || '').slice(0, 120)}
+              <button className="rw-btn" style={{ marginLeft: 8, padding: '0 6px' }} onClick={() => api.evoMemoCreate('【任务失败】' + a.name + '：' + String(a.note || '').slice(0, 200)).then(() => { tell('已转备忘录区'); load(); })}>转备忘录</button>
+            </div>
+          ))}
+        </div>
+      )}
       {demands.length === 0 && <div className="rw-dash-muted">（暂无待审需求/建议）</div>}
       {demands.map((d) => (
         <div key={d.id} className="rw-provider" style={{ padding: 8, marginBottom: 6 }}>
