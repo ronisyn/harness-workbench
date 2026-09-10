@@ -710,15 +710,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
       const st = await db.query('SELECT tool_name, mode FROM shell_tools WHERE shell_id=?', [convShellId]);
       for (const r of st) { if (r.mode === 'force_on') shellToolsOn.push(r.tool_name); else if (r.mode === 'force_off') shellToolsOff.push(r.tool_name); }
-      // A2：按壳 MCP 装载（shell_extensions type=mcp → 与已连接 mcp 客户端 id 交集的 serverId 白名单；无行=null 维持全局）
+      // A2/A3 按壳 MCP 装载（shell_extensions type=mcp → 已连接 mcp 客户端 id 白名单）
+      // 口径（§9.2 "MCP 按壳启用需该新注册层，不复用现状全局注册"）：非 default 壳 → **严格按壳裁剪**，
+      // 未装载任何 mcp 资产时白名单为空数组=该壳看不到任何 MCP 工具（exec 层同口径拦截）；
+      // 无壳会话（shell_id NULL）与 default 中性壳不受此约束（维持全局 MCP，行为不变）。
       if (convShellCtx && convShellCtx.key !== 'default') {
         try {
           const { listMcpClients } = await import('./mcp.js');
           const connIds = new Set((listMcpClients() || []).map((c) => c.id));
           const rows = await db.query('SELECT asset_key FROM shell_extensions WHERE shell_id=? AND asset_type="mcp"', [convShellId]);
-          const allow = rows.map((r) => r.asset_key).filter((k) => connIds.has(k));
-          if (allow.length) shellMcpAllow = allow; // 壳显式装载了 MCP → 裁剪到装载集
-        } catch { shellMcpAllow = null; }
+          shellMcpAllow = rows.map((r) => r.asset_key).filter((k) => connIds.has(k)); // 空数组=该壳未装载 → 不暴露 MCP
+        } catch { shellMcpAllow = null; } // MCP 子系统异常时不误裁剪（保守回退全局，仅本会话）
       }
     } catch { convShellCtx = null; }
   }
