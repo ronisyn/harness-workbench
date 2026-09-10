@@ -383,40 +383,25 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   res.json({ ok: true, messages: rows });
 });
 
-// 对话导出（Markdown，含思考/轨迹；前端亦可用本地 Blob 导出）
+// 对话导出（P26 机器可读导出：messages+tool_calls 逐行 JSONL，可回放/审计/迁移）
+// 2026-09-11 导航/冗余清整：原 markdown 分支与对话页本地导出（Chat.jsx exportConv，Blob 直出 Markdown）重复，
+// 已删除服务端 markdown 生成——人工可读导出唯一实现=对话页「⬇ 导出」；本端点只留机器可读（jsonl）能力。
 app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
   try {
     const conv = (await db.query('SELECT title, provider, model FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
     const ms = await db.query('SELECT id, role, content, reasoning, model, provider, tokens_in, tokens_out, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
     const tc = await db.query('SELECT message_id, tool_name, args, result_summary, status, duration_ms FROM tool_calls WHERE conversation_id=? ORDER BY id', [req.params.id]);
-    // P26：?format=jsonl 机器可读导出（对齐 harness JSONL：消息+工具调用逐行 JSON，可回放/审计/迁移）
-    if (req.query.format === 'jsonl') {
-      const byMsg = {};
-      for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
-      const rows = ms.map((m) => ({
-        type: 'message', id: m.id, role: m.role, content: m.content,
-        ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-        ...(m.model ? { model: m.model, provider: m.provider || null, tokens_in: m.tokens_in || 0, tokens_out: m.tokens_out || 0 } : {}),
-        created_at: m.created_at,
-        tool_calls: (byMsg[m.id] || []).map((t) => ({ tool: t.tool_name, args: safeJson(t.args), result: safeJson(t.result_summary), status: t.status, duration_ms: t.duration_ms || 0 })),
-      }));
-      return res.json({ ok: true, filename: (conv.title || '对话') + '.jsonl', content: rows.map((r) => JSON.stringify(r)).join('\n') });
-    }
     const byMsg = {};
     for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
-    const lines = [];
-    for (const m of ms) {
-      lines.push('## ' + (m.role === 'user' ? '我' : 'AI') + '  \n');
-      if (m.role === 'assistant') {
-        if (m.reasoning) lines.push(m.reasoning.split('\n').filter(Boolean).map((l) => '> 🧠 ' + l).join('\n') + '  \n');
-        const ts = byMsg[m.id] || [];
-        for (const t of ts) lines.push(`> 🔧 ${t.tool_name}${t.status === 'fail' ? ' ✕' : ''}${t.result_summary ? '\n> ' + String(t.result_summary).slice(0, 200) : ''}  `);
-        if (ts.length) lines.push('');
-      }
-      lines.push(String(m.content || '') + '\n\n---\n');
-    }
-    res.json({ ok: true, filename: (conv.title || '对话') + '.md', content: '# ' + (conv.title || '对话') + '\n\n' + lines.join('\n') });
+    const rows = ms.map((m) => ({
+      type: 'message', id: m.id, role: m.role, content: m.content,
+      ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+      ...(m.model ? { model: m.model, provider: m.provider || null, tokens_in: m.tokens_in || 0, tokens_out: m.tokens_out || 0 } : {}),
+      created_at: m.created_at,
+      tool_calls: (byMsg[m.id] || []).map((t) => ({ tool: t.tool_name, args: safeJson(t.args), result: safeJson(t.result_summary), status: t.status, duration_ms: t.duration_ms || 0 })),
+    }));
+    res.json({ ok: true, filename: (conv.title || '对话') + '.jsonl', content: rows.map((r) => JSON.stringify(r)).join('\n') });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
