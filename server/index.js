@@ -968,6 +968,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     catch { return true; } // 校验失败不阻塞主流程（宁可多写不丢回复）
   };
   const TRUNC_NOTE = '\n\n> ⚠️ 本段输出达到模型单次长度上限（已截断）。需要完整内容的话，告诉我"继续"，我会接着分段输出。';
+  // ⑤ model_telemetry 落表器（成功/异常路径共用；由执行块内赋值，见下方 teleBase 之后）：
+  // 以 id>teleBase 的新增 usage_stats 行为本执行真实消耗；无消耗（护栏前置拦截）不落空行；
+  // 会话已删（并发删除）时 EXISTS 守卫 → 不插孤儿。异常路径也调用（原先仅成功分支落表 → execs/成本口径不一致）。
+  let recordTelemetry = null;
   const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
   abortMap.set(akey, actrl);
@@ -1028,6 +1032,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
       let teleBase = null;
       try { teleBase = ((await db.query('SELECT COALESCE(MAX(id),0) m FROM usage_stats WHERE conversation_id=?', [conversationId]))[0] || {}).m || 0; } catch { teleBase = null; }
+      // 观测落表器（作用域内闭包：引用本次 teleBase/provider/model/壳/档案）
+      recordTelemetry = async () => {
+        if (teleBase === null) return;
+        try {
+          const agg = (await db.query('SELECT COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COALESCE(SUM(cost),0) cost, COUNT(*) n FROM usage_stats WHERE conversation_id=? AND id>? AND kind IN ("round","collapse")', [conversationId, teleBase]))[0] || {};
+          if ((agg.n || 0) > 0) {
+            await db.query('INSERT INTO model_telemetry (conversation_id, account_id, shell_id, provider, model, profile_key, difficulty, tokens_in, tokens_out, cache_hit, cache_miss, cost, duration_ms, created_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,NOW() FROM conversations WHERE id=?',
+              [conversationId, req.user.id, convShellId, provider, model, profileSuggestion ? profileSuggestion.key : null, null, agg.tin || 0, agg.tout || 0, agg.hit || 0, agg.miss || 0, agg.cost || 0, Date.now() - t0, conversationId]);
+          }
+        } catch { /* 观测落表失败不影响对话 */ }
+      };
       const result = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
@@ -1074,17 +1089,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
       // ⑤ model_telemetry 落表：本次执行消耗（id>teleBase 的新增 usage_stats 行=本执行真实消耗，round/collapse 均属执行；
       // summary/title 等旁路（摘要/自动标题）不入执行口径——§8 观测事实表按"执行模型×难度×档案"归集）
-      if (!skipStore && teleBase !== null) {
-        try {
-          const agg = (await db.query('SELECT COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COALESCE(SUM(cost),0) cost, COUNT(*) n FROM usage_stats WHERE conversation_id=? AND id>? AND kind IN ("round","collapse")', [conversationId, teleBase]))[0] || {};
-          // 仅真实发生 LLM 执行才落观测（护栏前置拦截/零消耗不产生空行污染 execs 口径）；
-          // 原子守卫：会话已被删（删会话与收尾并发）则 EXISTS 为假 → 不插入 → 无孤儿 telemetry
-          if ((agg.n || 0) > 0) {
-            await db.query('INSERT INTO model_telemetry (conversation_id, account_id, shell_id, provider, model, profile_key, difficulty, tokens_in, tokens_out, cache_hit, cache_miss, cost, duration_ms, created_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,NOW() FROM conversations WHERE id=?',
-              [conversationId, req.user.id, convShellId, provider, model, profileSuggestion ? profileSuggestion.key : null, null, agg.tin || 0, agg.tout || 0, agg.hit || 0, agg.miss || 0, agg.cost || 0, Date.now() - t0, conversationId]);
-          }
-        } catch { /* 观测落表失败不影响对话 */ }
-      }
+      // 2026-09-11 自审：抽成 recordTelemetry()，异常路径同调用——原先仅在成功分支落表，
+      // 导致"执行出错/工具被壳拦截"的轮次用量在账本中有、观测表缺行（execs 与成本口径不一致）。
+      if (recordTelemetry) await recordTelemetry();
       if (!skipStore) {
         answer = result.content || '（无输出）';
         usage = result.usage || {};
@@ -1143,6 +1150,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       await db.query('INSERT INTO messages (conversation_id, role, content) SELECT ?,?,? FROM conversations WHERE id=?',
         [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）', conversationId]);
     } catch { /* 忽略 */ }
+    // 自审补：异常路径同样落观测（该轮真实消耗已入 usage_stats，观测表须同口径有行）
+    if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
   }
   if (abortMap.get(akey) === actrl) abortMap.delete(akey);

@@ -1096,10 +1096,12 @@ export async function execTool(name, args, ctx) {
   // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
   let tool = null;
   const mcpMatch = /^mcp_([a-zA-Z0-9]+)_(.+)$/.exec(name);
-  // A2 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝（防模型绕过 schema 直呼）
+  // A2/A3 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝。
+  // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw —— throw 会逸出 execTool 的 catch 并中断整轮
+  // （与其它 hook 纪律拦截"失败可见、模型可改用它法继续"口径不一致），且导致该轮观测不落表。
   if (mcpMatch && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow)) {
     if (!ctx.__shellSchema.mcpAllow.includes(mcpMatch[1])) {
-      throw new Error('MCP server ' + mcpMatch[1] + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试。');
+      return { error: 'MCP server ' + mcpMatch[1] + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试，或改用本壳已装配的工具完成。' };
     }
   }
   if (mcpMatch) {
@@ -1119,9 +1121,11 @@ export async function execTool(name, args, ctx) {
     tool = findTool(name);
   }
   if (!tool) throw new Error('未知工具: ' + name);
-  // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）
+  // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）。
+  // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw——throw 逸出 execTool catch → 整轮判"执行失败"中断
+  // （模型无法改用其它工具继续，且该轮观测/计量收尾被跳过）。拦截语义不变：绝不执行，仅以失败结果回填给模型。
   if (ctx.shellToolsOff && ctx.shellToolsOff.length && ctx.shellToolsOff.includes(name) && !PLATFORM_EXEMPT.includes(name)) {
-    throw new Error('工具 ' + name + ' 已被当前壳禁用（force_off）。如需使用，请切换会话/壳或修改壳配置后重试。');
+    return { error: '工具 ' + name + ' 已被当前壳禁用（force_off）。如需使用，请切换会话/壳或修改壳配置后重试；本轮请改用本壳可用工具完成。' };
   }
   if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
   // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
