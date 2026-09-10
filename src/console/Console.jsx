@@ -13,6 +13,7 @@ import EvoBoard from './EvoBoard.jsx';
 import AppsBoard from './AppsBoard.jsx';
 import ExtCenterBoard from './ExtCenterBoard.jsx';
 import SkillsBoard from './SkillsBoard.jsx';
+import TasksBoard from './TasksBoard.jsx';
 
 // 板块注册表：code → { group, label, render }（group 决定左侧分组）
 export const BOARDS = {
@@ -21,19 +22,21 @@ export const BOARDS = {
   'models-obs': { group: '平台', label: '模型观测', render: () => <ModelObsBoard /> },
   'skills': { group: '平台', label: '技能库', render: () => <SkillsBoard /> },
   'kb': { group: '平台', label: '知识库', render: () => <KbBoard /> },
-  'settings': { group: '平台', label: '设置', render: () => <SettingsBoard /> },
-  // —— Agent ——
-  // A4：工具集/规则（§8.5）已按定版归入 平台组；code agent-caps 保留兼容旧链，页面注册移到平台组
+  // A4：工具集/规则（§8.5）归平台组；code agent-caps 保留兼容旧链
   'agent-caps': { group: '平台', label: '工具集', render: () => <CapsBoard /> },
-  'agent-evo': { group: 'Agent', label: 'Agent 进化', render: () => <EvoBoard /> },
+  // —— Agent ——
+  'agent-evo': { group: 'Agent', label: '进化集', render: () => <EvoBoard /> },
   // —— 应用市场 ——
   // A2：壳开发 1.3 升级为 Agent（壳）页 = 壳列表/详情/新建 + 装配向导 + 任务模板库子区（§8.9；URL code 不变兼容旧链）
   'agent-dev': { group: '应用市场', label: 'Agent（壳）', render: () => <AgentBoard /> },
   'agent-apps': { group: '应用市场', label: '应用', render: (p) => <AppsBoard {...p} /> },
   // A3：原"插件"占位 code 升级为 扩展中心（插件/MCP/应用统一资产页，§8.8；code 不变兼容 /console/plugins 旧链）
   'plugins': { group: '应用市场', label: '扩展中心', render: () => <ExtCenterBoard /> },
+  // —— 系统（A8 起：任务独立板块；A9 将加审计） ——
+  'tasks': { group: '系统', label: '任务', render: () => <TasksBoard /> },
+  'settings': { group: '系统', label: '设置', render: () => <SettingsBoard /> },
 };
-const GROUPS = ['平台', 'Agent', '应用市场'];
+const GROUPS = ['平台', 'Agent', '应用市场', '系统'];
 
 export default function Console({ user, path, onGoHome, onGoChat, onLogout }) {
   const rawCode = path.replace(/^\/console\/?/, '') || '';

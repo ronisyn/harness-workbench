@@ -2,6 +2,7 @@
 // + MCP 资产化 + 发布闸门 + 提示注入触发注（外部 MCP=不可信输入）。数据载体=extensions/shell_extensions/extension_demands（A0 §9.3）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
+import McpManager from './McpManager.jsx';
 
 const TYPE_CN = { plugin: '插件', mcp: 'MCP', app: '应用' };
 const STATUS_CN = { dev: '研发', test: '测试', published: '已上架', retired: '退役' };
@@ -248,6 +249,9 @@ export default function ExtCenterBoard() {
       )}
 
       <div className="rw-console-note">资产=可装载业务资产（插件=壳内能力零件 / MCP=外部服务 / 应用=壳内点开成品入口）；平台只研发+测试+上架，壳需要时在 Agent 装配向导 step6 勾选装载。发布闸门=上架需 capability/manifest 声明；指标 v1 先做 健康度(失败率/均耗时)+活跃度(调用/活跃壳) 两层（MCP 按工具前缀归集；插件/应用调用维度待 tool_calls 增 asset 留痕，后置）。月度扩展巡检=进化集定时任务（需求≥3 或故障回升 → 建议升级）。</div>
+
+      {/* A8：MCP 外部服务接入（自设置页迁入，§8.10 设置收窄） */}
+      <McpManager />
     </div>
   );
 }
