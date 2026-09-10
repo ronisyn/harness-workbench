@@ -1754,6 +1754,11 @@ app.post('/api/reviews', requireAuth, async (req, res) => {
     const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
     const r = await db.query('INSERT INTO reviews (conversation_id, account_id, result, bug_reason, difficulty) VALUES (?,?,?,?,?)', [conversationId, req.user.id, result, result === 'bug' ? String(bugReason).trim() : null, difficulty]);
+    // A7/A 系列审计补：难度同时回填该会话的观测事实行（model_telemetry.difficulty 为 §9.1 归集维度之一，
+    // 此前恒空=双载体未接线）。只回填为空的行，避免覆盖既有标注。
+    if (difficulty) {
+      try { await db.query('UPDATE model_telemetry SET difficulty=? WHERE conversation_id=? AND (difficulty IS NULL OR difficulty="")', [difficulty, conversationId]); } catch { /* 观测表不可用不影响复测记录 */ }
+    }
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'review:' + result, 'conversation=' + conversationId + (result === 'bug' ? ' reason=' + String(bugReason).trim().slice(0, 200) : '')]);
     res.json({ ok: true, id: r.insertId });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }

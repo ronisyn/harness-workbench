@@ -19,10 +19,10 @@ export default function SkillsBoard() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const openNew = () => setCur({ name: '', raw: '---\nname: my-skill\ndescription: 一句话说明何时用\nversion: 1.0.0\nenabled: true\nwhen: \nnot: \n---\n\n# 步骤\n1. \n\n## 完成定义\n- ' });
+  const openNew = () => setCur({ name: '', raw: '---\nname: my-skill\ndescription: 一句话说明何时用\nversion: 1.0.0\nenabled: true\nwhen: \nnot: \n---\n\n# 步骤\n1. \n\n## 完成定义\n- ', existing: false });
   const openEdit = async (name) => {
     setErr(''); setMsg(''); setSmoke(null); setConflictWarns([]);
-    try { const d = await api.skillGet(name); setCur({ name, raw: d.skill.raw || '' }); }
+    try { const d = await api.skillGet(name); setCur({ name, raw: d.skill.raw || '', existing: true }); }
     catch (e) { setErr(e.message); }
   };
   const save = async () => {
@@ -71,8 +71,9 @@ export default function SkillsBoard() {
         <div className="rw-provider" style={{ marginBottom: 12 }}>
           <div className="rw-dash-title">编辑技能：{cur.name || '（新技能）'}</div>
           <div className="rw-cap-item col">
-            <span>技能目录名（小写字母数字连字符；保存后不可改目录=用新建替代）</span>
-            <input className="rw-input" value={cur.name} onChange={(e) => setCur((c) => ({ ...c, name: e.target.value }))} disabled={!!(cur.raw && cur.name && cur.raw.includes('name: ' + cur.name)) && false} placeholder="my-skill" />
+            <span>技能目录名（小写字母数字连字符；既有技能不可改名——改名=新建目录，请用「新建技能」）</span>
+            <input className="rw-input" value={cur.name} disabled={!!cur.existing}
+              onChange={(e) => setCur((c) => ({ ...c, name: e.target.value }))} placeholder="my-skill" />
           </div>
           <div className="rw-cap-item col">
             <span>SKILL.md 全文（frontmatter: name/description/version/enabled/when/not + 正文步骤/完成定义）</span>

@@ -50,9 +50,25 @@ export default function ExtCenterBoard() {
   };
 
   const saveShellLoads = async (type, key) => {
-    const target = shells.filter((s) => shellLoad[s.skey]).map((s) => ({ type, key }));
-    try { await api.setShellExtensions(key, target); setMsg('已保存壳装载 ' + target.length + ' 个'); openDetail(type, key); reload(); }
-    catch (e) { setErr(e.message); }
+    setBusy('load'); setErr('');
+    try {
+      // 逐壳合并保存：PUT /api/shells/:shellKey/extensions 语义=该壳扩展「整表替换」，
+      // 因此必须先读该壳现有清单，再按本次勾选增/删"本资产"，避免把该壳其它已装载资产冲掉。
+      let changed = 0;
+      for (const s of shells) {
+        const cur = await api.shellExtensions(s.skey);
+        const list = (cur.extensions || []).map((x) => ({ type: x.asset_type, key: x.asset_key }));
+        const has = list.some((x) => x.type === type && x.key === key);
+        const want = !!shellLoad[s.skey];
+        if (want === has) continue;
+        const next = want ? [...list, { type, key }] : list.filter((x) => !(x.type === type && x.key === key));
+        await api.setShellExtensions(s.skey, next);
+        changed++;
+      }
+      setMsg(changed ? ('壳装载已更新（' + changed + ' 个壳变更）') : '壳装载无变化');
+      await openDetail(type, key); await reload();
+    } catch (e) { setErr('保存装载失败：' + e.message); }
+    finally { setBusy(''); }
   };
 
   const doRegister = async () => {
@@ -199,7 +215,7 @@ export default function ExtCenterBoard() {
                 </span>
               );
             })}
-            <button className="rw-btn pri" onClick={() => saveShellLoads(detail.extension.type, detail.extension.key)}>保存装载</button>
+            <button className="rw-btn pri" disabled={busy === 'load'} onClick={() => saveShellLoads(detail.extension.type, detail.extension.key)}>{busy === 'load' ? '保存中…' : '保存装载'}</button>
             <button className="rw-btn" onClick={() => { const l = {}; for (const s of shells) l[s.skey] = (detail.loadedShells || []).some((x) => x.shell_id === s.id); setShellLoad(l); }}>重置</button>
           </div>
           <div className="rw-cap-gtitle" style={{ marginTop: 8 }}>需求/升级流（待审→采纳→立项；驳回→记录；≥3 条同类=月度巡检标升级）</div>

@@ -67,7 +67,6 @@ export const api = {
   evoGoalPatch: (id, p) => request('/api/evo/goals/' + id, { method: 'PATCH', body: JSON.stringify(p) }),
   evoGoalDelete: (id) => request('/api/evo/goals/' + id, { method: 'DELETE' }),
   evoGoalBind: (id, taskIds) => request('/api/evo/goals/' + id + '/tasks', { method: 'PUT', body: JSON.stringify({ taskIds }) }),
-  evoGoalsByTask: (taskId) => request('/api/evo/goals/by-task/' + taskId),
   evoMemos: () => request('/api/evo/memos'),
   evoMemoCreate: (content) => request('/api/evo/memos', { method: 'POST', body: JSON.stringify({ content }) }),
   evoMemoPatch: (id, p) => request('/api/evo/memos/' + id, { method: 'PATCH', body: JSON.stringify(p) }),

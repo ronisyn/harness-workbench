@@ -766,8 +766,9 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
     if (skey === curShell) return;
     try {
       await api.patchConversation(cur, { shell: skey || null });
+      // 本地态同步为服务端真值：shell_key/shell_id/shell_name 三者一致（shell_id 取所选壳的 id，非沿用旧值）
       const s = shells.find((x) => x.skey === skey);
-      setConvs((cs) => cs.map((c) => (c.id === cur ? { ...c, shell_key: skey || null, shell_id: skey ? c.shell_id : null, shell_name: skey ? (s ? s.name : '') : null } : c)));
+      setConvs((cs) => cs.map((c) => (c.id === cur ? { ...c, shell_key: skey || null, shell_id: s ? s.id : null, shell_name: s ? s.name : null } : c)));
       setToast(skey ? '已挂壳：' + (s ? s.name : skey) + '（新消息按该壳身份/工具面执行）' : '已摘下壳（回默认中性语义）');
     } catch (e) { setToast(e.message || '切换壳失败'); }
   };
