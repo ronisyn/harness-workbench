@@ -1,5 +1,5 @@
 // src/shared/SettingsPanel.jsx - R2 单一事实源：高级参数（温度/系统提示词/运行护栏/预算/上下文，schema 驱动）
-// 统一后台 1.8 设置使用（原对话页⚙设置抽屉已退役）；数据自管（GET/PUT /api/settings）。
+// 统一后台「系统 → 设置」使用（原对话页⚙设置抽屉已退役；2026-09-11 A8 收窄：仅运行时参数，任务/MCP/工具规则已迁出）；数据自管（GET/PUT /api/settings）。
 // 2026-09-09 UI：后台 1.8 样式优化——竖排窄行改两列卡片网格（标签+输入同行，hint 撑高防"矮长条"）。
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';

@@ -1,6 +1,7 @@
 // src/Chat.jsx - 主界面（参照 3080 布局重构）
 // 顶栏(logo 左上 + 对话标题 + 权限/停止) + 左栏(模型切换上方 + 会话列表) + 对话区
-// 2026-09-09 去冗余：设置入口退役——能力/工具/规则/提案/高级参数/MCP/定时/厂商/模型市场统一在「🎛 后台」（1.1/1.4/1.5/1.8），本页聚焦对话
+// 2026-09-09 去冗余：设置入口退役——能力/工具/规则/提案/高级参数/MCP/定时/厂商/模型市场统一在「🎛 后台」，本页聚焦对话
+// 2026-09-12 入口同步（A8 设置收窄后）：能力/工具/规则→平台·工具集；MCP→应用·扩展中心；定时任务→系统·任务；厂商/模型→模型·模型广场；高级参数→系统·设置
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -245,7 +246,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
   const [stats, setStats] = useState({});
   const [kbOpen, setKbOpen] = useState(false); // ④ 知识库面板
   // 2026-09-09 去冗余：对话页⚙设置抽屉退役——能力/工具/规则/提案已由共享组件在后台 1.4/1.5 呈现，
-  // 高级参数/MCP/定时任务→后台 1.8 设置，厂商/模型市场→后台 1.1 模型广场（服务端接口不变，仅入口迁移）
+  // 高级参数→后台 系统·设置；MCP→应用·扩展中心；定时任务→系统·任务；厂商/模型市场→模型·模型广场（服务端接口不变，仅入口迁移；2026-09-12 同步 A8 收窄后导航）
   const [provList, setProvList] = useState([]); // 全量厂商+模型（openConv 恢复会话模型选择 / switchProvider 级联用）
   const [toast, setToast] = useState('');
   const [queue, setQueue] = useState([]);       // 输入队列：执行中输入的消息排队，结束后自动发送
