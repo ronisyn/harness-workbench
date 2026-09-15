@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from '../server/db.js';
+// 环境事实（平台目录/技能目录）只从 server/env.js 取：这里原先各自重算过一遍，与 env.js 形成两个事实源。
+import { RW_PLATFORM_DIR, RW_SKILLS } from '../server/env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -18,7 +20,7 @@ const out = { generatedAt: new Date().toISOString(), days: DAYS };
 
 async function rows(sql, p) {
   try { return await db.query(sql, p); }
-  catch (e) { console.error('[kpi] DB 查询失败: ' + e.message + '\n提示：需在服务器（/srv/harness-workbench）或可连 MySQL 的环境运行。'); process.exit(2); }
+  catch (e) { console.error('[kpi] DB 查询失败: ' + e.message + '\n提示：需在服务器（' + RW_PLATFORM_DIR + '）或可连 MySQL 的环境运行。'); process.exit(2); }
 }
 const mid = (arr) => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2 * 100) / 100; };
 const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 100) / 100 : 0;
@@ -81,7 +83,8 @@ const kbNew = await rows('SELECT COUNT(*) c FROM knowledge WHERE created_at > NO
 const kbReuse = await rows(`SELECT COUNT(*) c FROM tool_calls WHERE tool_name IN ('skill_load','kb_search') AND created_at > NOW() - INTERVAL ? DAY`, [DAYS]);
 let skillNew = 0;
 try {
-  const skillsRoot = process.env.RW_SKILLS || path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'skills');
+  // 技能根目录直接用 env.js 的口径（RW_SKILLS 已含 RW_WORKSPACE/skills 的默认推导），不再本地重算
+  const skillsRoot = RW_SKILLS;
   const since = Date.now() - DAYS * 86400000;
   const walk = (d) => { let n = 0; for (const it of fs.readdirSync(d, { withFileTypes: true })) { if (it.isDirectory()) n += walk(path.join(d, it.name)); else if (it.name === 'SKILL.md' && fs.statSync(path.join(d, it.name)).mtimeMs > since) n++; } return n; };
   skillNew = walk(skillsRoot);

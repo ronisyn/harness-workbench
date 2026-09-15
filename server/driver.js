@@ -12,7 +12,8 @@ import path from 'node:path';
 import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
-import { RW_WORKSPACE } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
+import { SHELL_FILE, shellArgs } from './shell.js';
 
 const WS = RW_WORKSPACE;
 const MAX_AUTO_ROUNDS = 60;        // 单契约每次激活最多自动轮次（进展型护栏，防失控账单）
@@ -47,9 +48,12 @@ async function findOrCreateConv(c) {
 
 function runShellCmd(line) {
   return new Promise((resolve) => {
-    execFile('/bin/bash', ['-c', String(line).slice(0, 2000)], { cwd: WS, timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    // 验收命令行按**本机 shell**执行（server/shell.js）：Linux 是 bash -c，Windows 是 PowerShell -Command；
+    // 以前写死 Linux 上 bash 的绝对路径，客户机上不存在该文件 → 契约永远验收不通过（且报 ENOENT 而不是"环境不对"）。
+    const ch = execFile(SHELL_FILE, shellArgs(String(line).slice(0, 2000)), { cwd: WS, timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 2000), err: String(stderr || '').slice(0, 1000) });
     });
+    ch.on('error', (e) => resolve({ ok: false, code: e.code ?? 1, out: '', err: 'shell 启动失败: ' + e.message }));
   });
 }
 
@@ -140,7 +144,7 @@ async function driveContract(c) {
     let accessRules = null;
     try { const ar = await db.query("SELECT svalue FROM settings WHERE skey='access_rules'"); if (ar[0]) { const v = JSON.parse(ar[0].svalue); if (Array.isArray(v)) accessRules = v; } } catch { accessRules = null; }
     const ctx = {
-      permission: 'full', accountId: c.account_id ?? null, conversationId: convId, root: '/',
+      permission: 'full', accountId: c.account_id ?? null, conversationId: convId, root: RW_FS_ROOT,
       __autonomous: true, __accessRules: accessRules,
       __needInput: (payload) => needInput(c, payload),
     };

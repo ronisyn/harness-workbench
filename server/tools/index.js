@@ -8,7 +8,7 @@ import { db, bumpPolicyRev } from '../db.js';
 import { chatOnce, calcCost } from '../llm/gateway.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
 import { createApproval, cancelApproval } from '../approval.js';
-import { requestRestart } from '../restart.js';
+import { requestRestart, restartPlan } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
@@ -19,7 +19,8 @@ import { armDeadline, toolTimeoutResult } from './deadline.js';
 import { fail, classifyToolThrow, inputError } from '../failures.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
-import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
+import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT, RW_OS } from '../env.js';
+import { runShellLine, spawnShellLine } from '../shell.js';
 import { readSpill, lineAlignedPreview, READ_INLINE_CHARS } from './spill.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
@@ -118,9 +119,12 @@ function parseSkillFront(full) {
   return { meta, body: m ? String(full).slice(m[0].length) : String(full) };
 }
 
-function inside(p, root) {
-  const r = path.resolve(root);
-  return path.resolve(p) === r || path.resolve(p).startsWith(r + path.sep);
+export function inside(p, root) {
+  // 用 path.relative 判包含关系：拼字符串的写法有两处必错——根自己是 "C:\" 或 "/" 时拼出双分隔符，
+  // 于是根下的任何路径都被判成"在外面"；Windows 上还要吃大小写（NTFS 不敏感、字符串比较敏感）。
+  // path.relative 两件事都处理好了（实测：同级大小写混用 = inside，越界/跨盘 = outside）。
+  const rel = path.relative(path.resolve(root), path.resolve(p));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 function runCmd(cmd, args, opts = {}, timeout = 30000) {
@@ -441,10 +445,15 @@ const RAW_TOOLS = [
     params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, cwd: { type: 'string', desc: '工作目录；相对路径按工作区根解析（换目录用它，不要在命令里 cd）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
-        const allow = ['ls', 'cat', 'node --check', 'git status', 'npm test', 'pwd', 'echo', 'find', 'grep'];
-        if (!allow.some((p) => a.cmd.startsWith(p))) throw new Error('write 级仅允许工作区常用命令，此命令需 full 权限');
+        // write 级白名单：Linux 名字 + Windows 等价名字（同一份白名单两边都能用，用不上的名字只是没机会命中）。
+        // 白名单是**前缀**匹配，所以这一档必须同时保证"只有一条简单命令"——否则 `ls; rm -rf x` 也算以 ls 开头。
+        // （本档位本来就不走 shell，这里是把这条边界写成显式规则，而不是靠"没走 shell 所以凑巧没事"。）
+        const allow = ['ls', 'cat', 'node --check', 'git status', 'npm test', 'pwd', 'echo', 'find', 'grep',
+          'dir', 'type', 'findstr', 'where'];
+        if (/[;&|<>`$()\r\n]/.test(a.cmd) || !allow.some((p) => a.cmd.startsWith(p))) {
+          throw new Error('write 级仅允许工作区常用命令（单条、不含管道/重定向/连接符），此命令需 full 权限');
+        }
       }
-      const [cmd, ...args] = a.cmd.split(/\s+/);
       // 换目录 = 参数，不是命令（2026-09-15 对齐 DSH `dsh-tool-bash` 的 workdir：每次调用都是新 shell，
       // cd 本来就不会保留；我们此前没有这个参数，模型只能写 `cd X && ...`，于是 65 次纪律拦截里 40 次是 cd）。
       let dir = ctx.root;
@@ -456,7 +465,19 @@ const RAW_TOOLS = [
       // timeout 参数是模型选的（5-300s）；声明的 timeoutMs=300s 是它的上限，两者取小即"一个界限一个出处"
       const want = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
       const t = ctx.__deadline ? Math.min(want, Math.max(1, ctx.__deadline - Date.now())) : want;
-      const r = await runCmd(cmd, args, { cwd: dir }, t);
+      // 怎么执行由权限档位决定（2026-09-16，D2′ Windows 交付）：
+      // · full：把命令串交给本机 shell（server/shell.js）——模型写的是 shell 语法，而不是 argv；
+      //   Windows 上 npm/npx 只有 .cmd 形式，execFile 直呼必然 ENOENT。full 会话本就能读写整台机器，
+      //   走 shell 不扩大能力面。
+      // · read/write（上面那段白名单）：仍按空格拆 argv 直接 execFile，**不过 shell**——
+      //   白名单是前缀匹配，一旦过 shell 就能"以白名单命令开头、再执行第二条命令"。
+      let r;
+      if (ctx.limitPath) {
+        const [cmd, ...args] = String(a.cmd).split(/\s+/);
+        r = await runCmd(cmd, args, { cwd: dir }, t);
+      } else {
+        r = await runShellLine(String(a.cmd), { cwd: dir, timeout: t });
+      }
       // 读型别名不再拦截（2026-09-15 决定，见 hooks.js 第 6 条），改成**结果里附一行提示**：
       // 模型照样看得见建议，但不必为一个写法白花一整轮。只在命中时出现，不占常驻前缀。
       const head = String(a.cmd).trim().split(/\s+/)[0];
@@ -467,13 +488,12 @@ const RAW_TOOLS = [
     params: { cmd: { type: 'string', required: true } },
     run: async (a) => {
       pruneJobs();
-      const [cmd, ...args] = a.cmd.split(/\s+/);
-      const { spawn } = await import('node:child_process');
-      const logDir = '/tmp/rw-jobs';
+      const logDir = RW_JOBS_DIR; // 操作系统临时目录（macOS/Linux/Windows 同一个出处，见 env.js）
       fs.mkdirSync(logDir, { recursive: true });
       const logFile = path.join(logDir, 'job-' + Date.now() + '.log');
       const fd = fs.openSync(logFile, 'a');
-      const child = spawn(cmd, args, { detached: true, stdio: ['ignore', fd, fd] });
+      // 长任务同样交给本机 shell：Windows 上 npm/npx 只有 .cmd 形式，管道与重定向也只有走 shell 才成立
+      const child = spawnShellLine(String(a.cmd), { detached: true, stdio: ['ignore', fd, fd] });
       child.unref();
       const jobRec = { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' };
       jobs.set(String(child.pid), jobRec);
@@ -484,14 +504,22 @@ const RAW_TOOLS = [
   { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
     run: async (a) => {
+      // Windows 上没有真信号：process.kill 一律强杀，且不收敛子树；而后台任务是 detached 起的一整棵树，
+      // 所以用 taskkill /T 连子树一起收（/F 是 Windows 上唯一可靠的方式）。
+      if (RW_OS === 'win32') {
+        const r = await runShellLine('taskkill /PID ' + Number(a.pid) + ' /T /F', { timeout: 20000 });
+        if (r.ok) { jobDbSetStatus(String(a.pid), 'killed'); return { killed: true }; }
+        if (/not found|没有找到|找不到/i.test(r.out + r.err)) { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 ' + RW_JOBS_DIR + ' 下可查' }; }
+        throw new Error('终止失败: ' + (r.err || r.out || ('taskkill 返回 ' + r.code)));
+      }
       try {
         process.kill(a.pid, 'SIGTERM');
         jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
         return { killed: true };
       }
       catch (e) {
-        // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可去 /tmp/rw-jobs 按时间找
-        if (e.code === 'ESRCH') { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 /tmp/rw-jobs 下可查' }; }
+        // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可按目录找
+        if (e.code === 'ESRCH') { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 ' + RW_JOBS_DIR + ' 下可查' }; }
         throw new Error('终止失败: ' + e.message);
       }
     } },
@@ -518,7 +546,7 @@ const RAW_TOOLS = [
         let out = ''; try { out = fs.readFileSync(dj.log_file, 'utf8'); } catch { /* ignore */ }
         return { jobId: String(dj.job_id), status: dj.status, output: out.slice(-8000), log: dj.log_file, persisted: true };
       }
-      return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表与持久化记录中（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 /tmp/rw-jobs/job-<时间戳>.log 下，可按时间戳查找。' };
+      return { jobId: a.jobId, status: 'gone', note: '该任务不在当前进程表与持久化记录中（可能已结束超保留期，或服务器重启后进程表清空）。原始日志在 ' + RW_JOBS_DIR + '/job-<时间戳>.log 下，可按时间戳查找。' };
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
@@ -596,7 +624,7 @@ const RAW_TOOLS = [
   { name: 'syntax_check', description: 'JS 语法检查（node --check）', permission: 'read', params: { path: { type: 'string', required: true } },
     run: async (a) => { const r = await runCmd('node', ['--check', a.path]); return { ok: r.ok, err: r.err }; } },
   { name: 'run_test', description: '运行测试（write 级仅工作区内）', permission: 'write', params: { dir: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await runCmd('npm', ['test'], { cwd: a.dir }); return { ok: r.ok, out: r.out, err: r.err }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await runShellLine('npm test', { cwd: a.dir }); return { ok: r.ok, out: r.out, err: r.err }; } },
 
   // ---------- F9 动态任务清单（多步任务规划与进度展示） ----------
   { name: 'plan_tasks', description: '为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）', permission: 'read',
@@ -903,7 +931,7 @@ const RAW_TOOLS = [
     params: {
       goal: { type: 'string', required: true, desc: '任务目标（完整、含交付物）' },
       title: { type: 'string', desc: '简短标题' },
-      acceptance: { type: 'string', desc: '验收 shell 命令 JSON 数组字符串，如 ["grep -q OK /srv/rw-workspace/a.txt"]；空=仅自检' },
+      acceptance: { type: 'string', desc: '验收 shell 命令 JSON 数组字符串，如 ["grep -q OK <工作区>/{文件名}"]；空=仅自检' },
       boundaries: { type: 'string', desc: '边界/约束（不许动什么、注意什么）' },
       runAt: { type: 'string', desc: 'ISO 时间；空=立即执行' },
     },
@@ -928,11 +956,14 @@ const RAW_TOOLS = [
       const summary = String(a.summary || '').slice(0, 2000);
       let autoCommit = null;
       // P5 auto-commit（2026-09 批4）：业务/工作区 git 仓库自动提交（非平台代码目录——平台走 C5 手动+提案）。
-      // 判定：root（工作区根）非平台目录 /srv/harness-workbench，且该目录是 git 仓库，且有未提交改动。
+      // 判定：root（工作区根）不在平台目录内，且该目录是 git 仓库，且有未提交改动。
       try {
         const ws = ctx?.root || RW_WORKSPACE;
         const platformDir = RW_PLATFORM_DIR;
-        const isPlatform = ws === platformDir || ws.startsWith(platformDir + '/');
+        // 用 path.relative 判包含关系，不拼 '/'(Windows 上是 '\\')：拼分隔符的写法在客户机上恒为 false，
+        // 平台自己会被当成业务工作区自动提交。
+        const rel = path.relative(platformDir, ws);
+        const isPlatform = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
         if (!isPlatform && ctx && !ctx.__skipAutoCommit) {
           const fsx = await import('node:fs');
           if (fsx.existsSync(path.join(ws, '.git'))) {
@@ -972,7 +1003,7 @@ const RAW_TOOLS = [
       const objective = String(a.objective || '').trim().slice(0, 1000);
       if (!objective) throw new Error('objective 必填');
       const maxRounds = Math.min(10, Math.max(1, Math.floor(Number(a.rounds) || 5)));
-      const memRoot = ctx.root && ctx.root !== '/' ? ctx.root : '/srv/rw-workspace';
+      const memRoot = ctx.root && ctx.root !== RW_FS_ROOT ? ctx.root : RW_WORKSPACE;
       fs.mkdirSync(memRoot, { recursive: true });
       const mem = path.join(memRoot, '.ralph-' + Date.now().toString(36) + '.md');
       fs.writeFileSync(mem, '### 任务目标\n' + objective + '\n');
@@ -1077,7 +1108,7 @@ const RAW_TOOLS = [
       await bumpPolicyRev(); // 政策版本自增（WS2：护栏变化须让运行中模型看到）
       return { applied: Object.fromEntries(ups), note: '已写入 settings 并自增政策版本；进行中任务每轮读取最新护栏（最快 5s 生效）。0=不限/串行。默认参考值：120分钟/2000轮/连续6次/并行10。' };
     } },
-  { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
+  { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要自己手动重启服务（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
     run: async (a, ctx) => {
       // F2 reload 防撞（2026-09 批2）：重启会打断服务器上一切进行中会话（agent_runs running 会被标 interrupted）。
@@ -1097,6 +1128,10 @@ const RAW_TOOLS = [
         }
       } catch { /* 查询失败不阻断（保守放行，由 maybeSelfRestart 侧兜底） */ }
       const note = String(a.note || '').slice(0, 300);
+      // 本机没有可用重启方式时**当场说**（而不是先回 scheduled:true、再在日志里失败）：
+      // 否则模型以为新代码已生效，接着按新代码的行为往下走，是最难查的一类假象。
+      const plan = restartPlan();
+      if (!plan.argv) return { scheduled: false, error: '无法自动重启：' + plan.hint + PREFIX_COST_NOTE };
       requestRestart(note || 'platform code change');
       return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。', prefixCost: PREFIX_COST_NOTE };
     } },
@@ -1617,7 +1652,7 @@ RAW_TOOLS.push({
   permission: 'read',
   params: { dir: { type: 'string', required: false, desc: '目标目录，缺省=当前工作区' } },
   run: async (a, ctx) => {
-    const dir = a.dir || ctx.root || '/srv/rw-workspace';
+    const dir = a.dir || ctx.root || RW_WORKSPACE;
     const r = buildRepoMap(dir);
     if (!r.ok) return { error: r.error };
     return { ok: true, root: r.root, summary: r.summary, text: r.text, files: r.files };

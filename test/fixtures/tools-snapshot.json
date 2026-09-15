@@ -101,7 +101,7 @@
           },
           "acceptance": {
             "type": "string",
-            "description": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
+            "description": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK <工作区>/{文件名}\"]；空=仅自检"
           },
           "boundaries": {
             "type": "string",
@@ -302,7 +302,7 @@
     },
     {
       "name": "fetch_spill",
-      "description": "取回被溢出（spill）的工具结果全文。上下文里出现\"已省略 N 字节…全文已存 <路径>\"时，用它按范围分段读回\n何时用：上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文\n勿用：读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读\n例：fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}",
+      "description": "取回被溢出（spill）的工具结果全文。上下文里出现\"已省略 N 字节…全文已存 <路径>\"时，用它按范围分段读回\n何时用：上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文\n勿用：读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读\n例：fetch_spill {path:\"<溢出文件绝对路径>\", offset:0, length:20000}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -762,7 +762,7 @@
     },
     {
       "name": "read_file",
-      "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"/srv/harness-workbench/server/agent.js\"}",
+      "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"<文件绝对路径>\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -821,7 +821,7 @@
     },
     {
       "name": "reload_platform",
-      "description": "让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。\n何时用：自改代码生效（先 syntax_check+git commit）\n勿用：仅改配置/数据不需要\n例：reload_platform {}",
+      "description": "让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要自己手动重启服务（会中断你自己的执行）；仅改配置/数据时无需调用。\n何时用：自改代码生效（先 syntax_check+git commit）\n勿用：仅改配置/数据不需要\n例：reload_platform {}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -835,7 +835,7 @@
     },
     {
       "name": "repo_map",
-      "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"/srv/harness-workbench\"}",
+      "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"<目录绝对路径>\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -849,7 +849,7 @@
     },
     {
       "name": "run_command",
-      "description": "执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）\n何时用：无专门工具覆盖的系统操作（npm/部署/systemctl）\n勿用：cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具\n例：run_command {command:\"npm install\"}",
+      "description": "执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）\n何时用：无专门工具覆盖的系统操作（npm/部署/服务重启）\n勿用：cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具\n例：run_command {command:\"npm install\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1343,7 +1343,7 @@
         },
         "acceptance": {
           "type": "string",
-          "desc": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
+          "desc": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK <工作区>/{文件名}\"]；空=仅自检"
         },
         "boundaries": {
           "type": "string",
@@ -2318,7 +2318,7 @@
       "tier": "core",
       "when": "上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文",
       "not": "读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读",
-      "ex": "fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}"
+      "ex": "fetch_spill {path:\"<溢出文件绝对路径>\", offset:0, length:20000}"
     },
     "fetch_url": {
       "tier": "core",
@@ -2462,7 +2462,7 @@
       "tier": "core",
       "when": "读文本内容、改前先读、查实现细节",
       "not": "大文件超限用 read_file_range；列目录用 list_dir",
-      "ex": "read_file {path:\"/srv/harness-workbench/server/agent.js\"}"
+      "ex": "read_file {path:\"<文件绝对路径>\"}"
     },
     "read_file_range": {
       "tier": "core",
@@ -2480,11 +2480,11 @@
       "tier": "core",
       "when": "大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）",
       "not": "小目录直接 list_dir；找符号位置用 grep_search",
-      "ex": "repo_map {dir:\"/srv/harness-workbench\"}"
+      "ex": "repo_map {dir:\"<目录绝对路径>\"}"
     },
     "run_command": {
       "tier": "expert",
-      "when": "无专门工具覆盖的系统操作（npm/部署/systemctl）",
+      "when": "无专门工具覆盖的系统操作（npm/部署/服务重启）",
       "not": "cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具",
       "ex": "run_command {command:\"npm install\"}"
     },

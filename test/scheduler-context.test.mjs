@@ -9,11 +9,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { taskExecContext } from '../server/scheduler.js';
+import { RW_FS_ROOT } from '../server/env.js';
 
-test('full 权限任务：ctx.permission=full 且 root=/（不受工作区围栏限制）', () => {
+test('full 权限任务：ctx.permission=full 且 root=文件系统根（不受工作区围栏限制）', () => {
   const ctx = taskExecContext({ account_id: 1, permission: 'full' }, 42);
   assert.equal(ctx.permission, 'full');
-  assert.equal(ctx.root, '/');
+  // "不受围栏"的判据是**推导出来的文件系统根**（Linux 上是 '/'，Windows 上是盘根）：
+  // 以前这里写死 '/'，在客户机上会变成"当前盘根"以外的另一种意思，且 spawn(cwd='/') 在 Windows 上无效。
+  assert.equal(ctx.root, RW_FS_ROOT);
   assert.equal(ctx.conversationId, 42);
   assert.equal(ctx.accountId, 1);
 });
@@ -21,14 +24,14 @@ test('full 权限任务：ctx.permission=full 且 root=/（不受工作区围栏
 test('read 权限任务：ctx.permission=read，root 落在工作区（围栏生效）', () => {
   const ctx = taskExecContext({ account_id: 1, permission: 'read' }, 7);
   assert.equal(ctx.permission, 'read');
-  assert.notEqual(ctx.root, '/');
+  assert.notEqual(ctx.root, RW_FS_ROOT);
   assert.ok(String(ctx.root).length > 1);
 });
 
 test('未配置权限的任务：按 full 处理（与 executor 的 `task.permission || full` 同口径）', () => {
   const ctx = taskExecContext({ account_id: 1 }, 1);
   assert.equal(ctx.permission, 'full');
-  assert.equal(ctx.root, '/');
+  assert.equal(ctx.root, RW_FS_ROOT);
 });
 
 test('负例：ctx 里必须有 permission 键（缺了它 execTool 会把会话当受限会话）', () => {

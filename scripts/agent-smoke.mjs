@@ -17,19 +17,26 @@
 //
 // 用法：node scripts/agent-smoke.mjs [baseUrl]
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { db } from '../server/db.js';
+// 探针要让 Agent 写/读的路径必须跟着工作区走：写死 /srv/rw-workspace 在客户机（Windows Server）上不存在。
+import { RW_WORKSPACE } from '../server/env.js';
 
 const argv = process.argv.slice(2);
 const BASE = argv[0] || 'http://127.0.0.1:880';
+// 账号文件放在**运行账户的家目录**（原来是写死的 /root/.rw-keys.env）：Linux 上服务以 root 跑时
+// homedir 就是 /root，行为逐字节不变；Windows 客户机上则是服务账户的家目录——同一套写法两边都成立。
+const KEYS_FILE = path.join(os.homedir(), '.rw-keys.env');
 let user = process.env.RW_ADMIN_USER, pass = process.env.RW_ADMIN_PASS;
 if (!user || !pass) {
   try {
-    const env = fs.readFileSync('/root/.rw-keys.env', 'utf8');
+    const env = fs.readFileSync(KEYS_FILE, 'utf8');
     const get = (k) => env.split('\n').find((l) => l.startsWith(k + '='))?.split('=').slice(1).join('=').trim();
     user = user || get('RW_ADMIN_USER'); pass = pass || get('RW_ADMIN_PASS');
   } catch { /* 环境不可用时走参数 */ }
 }
-if (!user || !pass) { console.error('缺账号：设 RW_ADMIN_USER/RW_ADMIN_PASS 或提供 /root/.rw-keys.env'); process.exit(2); }
+if (!user || !pass) { console.error('缺账号：设 RW_ADMIN_USER/RW_ADMIN_PASS，或把两行写进 ' + KEYS_FILE); process.exit(2); }
 
 const ok = [], fail = [];
 const step = (name, cond, extra = '') => { (cond ? ok : fail).push(name); console.log((cond ? '✅' : '❌') + ' ' + name + (extra ? ' — ' + extra : '')); };
@@ -63,7 +70,7 @@ async function chat(text) {
 }
 
 // ① 一轮任务式对话：必须真的调用工具（写盘 + 触发 after 钩子）
-const r1 = await chat('请在 /srv/rw-workspace/tmp 下写一个文件 smoke-agent.mjs，内容只有一行：export const ok = 1;  写完不要做别的。');
+const r1 = await chat(`请在 ${path.join(RW_WORKSPACE, 'tmp')} 下写一个文件 smoke-agent.mjs，内容只有一行：export const ok = 1;  写完不要做别的。`);
 step('对话一：收到 done 且无 error', Boolean(r1.ev.done) && !r1.ev.error, r1.ev.error ? r1.ev.error.message : r1.secs.toFixed(1) + 's');
 step('对话一：run_end 落定', r1.ev.run_end && r1.ev.run_end.status === 'saved', r1.ev.run_end ? r1.ev.run_end.status : '（无 run_end）');
 step('对话一：能力清单里能看到用过的工具', Boolean(r1.ev.run_end && r1.ev.run_end.capabilities && r1.ev.run_end.capabilities.used.length), JSON.stringify(r1.ev.run_end ? r1.ev.run_end.capabilities : null));
@@ -71,7 +78,7 @@ step('对话一：事件流完整（intent→run_start→…→done→run_end）
   ['intent', 'run_start', 'tool_start', 'tool_done', 'done', 'run_end'].every((t) => r1.types.includes(t)), r1.types.join(','));
 
 // ② 第二轮：读回来确认（用 read_file）
-const r2 = await chat('用 read_file 读回 /srv/rw-workspace/tmp/smoke-agent.mjs，确认内容后一句话回答。');
+const r2 = await chat(`用 read_file 读回 ${path.join(RW_WORKSPACE, 'tmp', 'smoke-agent.mjs')}，确认内容后一句话回答。`);
 step('对话二：收到 done 且无 error', Boolean(r2.ev.done) && !r2.ev.error, r2.ev.error ? r2.ev.error.message : r2.secs.toFixed(1) + 's');
 
 // ③ **账本回归锁**：工具调用必须落 tool_calls（这是本脚本存在的首要理由）

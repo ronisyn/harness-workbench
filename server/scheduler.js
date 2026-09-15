@@ -6,7 +6,7 @@ import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { summarizeConversation } from './tools/index.js';
 import { config } from './config.js';
-import { RW_WORKSPACE } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
 
 export function cronToNext(cron, from = new Date()) {
   const parts = String(cron).trim().split(/\s+/);
@@ -68,7 +68,7 @@ export function taskExecContext(task, conversationId, conv = null, accessRules =
     permission,
     accountId: task.account_id,
     conversationId,
-    root: permission === 'full' ? '/' : RW_WORKSPACE,
+    root: permission === 'full' ? RW_FS_ROOT : RW_WORKSPACE,
     __accessRules: accessRules,
     shellId: (conv && conv.shell_id != null) ? conv.shell_id : null,
     // 2026-09-15：定时任务**本来就是无人值守**，此前漏标 `__autonomous`（driver 标了、scheduler 没标）。

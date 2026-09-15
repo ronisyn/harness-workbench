@@ -184,6 +184,12 @@ const DANGER_PATTERNS = [
   { re: /\binit\s+[06]\s*($|[;&|])/, why: 'init 切换运行级（关机/重启）' },
   { re: /\bkill\s+-?9?\s+1\b/, why: 'kill 进程 1（系统核心）' },
   { re: /\bchmod\s+-R\s+777\s+(\/|~)/, why: '递归 chmod 777 根/家目录' },
+  // Windows 侧同名动作（2026-09-16，D2′）：本机是 Windows 时命令走 PowerShell，上面那批 Unix 模式一条也匹配不到，
+  // 声明为 fail-closed 的安全网就成了空网。只列"同类的、不可逆的"几个，不追求穷尽（Linux 侧同样不是穷尽清单）。
+  { re: /\b(Stop-Computer|Restart-Computer)\b/i, why: '关机/重启（影响平台服务器）' },
+  { re: /\bFormat-Volume\b|\bformat\s+[a-z]:/i, why: '格式化磁盘分区' },
+  { re: /\bRemove-Item\b[^\n]*-(Recurse|Force)[^\n]*(\s[a-z]:\\?\s*$|\s[a-z]:\\?\s|["']?[a-z]:\\?["']?\s*$)/i, why: '递归删除盘根' },
+  { re: /\b(rmdir|rd)\s+\/s\s+\/q\s+[a-z]:\\?\s*$/i, why: '递归删除盘根' },
 ];
 registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
   // O-4 修复（2026-09 批2）：run_command 实参键是 cmd（tools/index.js params），此前读 args.command → 从未触发
@@ -201,6 +207,9 @@ registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
 // 路径判定不做 path.resolve（Windows 下会把 /etc 变 E:\etc 破坏匹配；服务器是 Linux，直接按原样正则判定，
 // 同时把 \ 归一为 / 兜底）。工具实参可能是相对路径（工作区内）——相对路径不在系统区，直接放行。
 const SYSTEM_WRITE_RE = /^\/(etc|boot|bin|sbin|dev|proc|sys|root)(\/|$)|^\/usr\/(bin|sbin|lib(64)?)(\/|$)/;
+// Windows 系统关键区（同上：本机是 Windows 时上面那条一条也匹配不到，安全网会变成空网）。
+// 只认盘根下的系统目录，业务目录（如 C:\rw-test）不在内——拦的是"改坏操作系统"，不是"改平台自己的东西"。
+const SYSTEM_WRITE_WIN_RE = /^[a-z]:\/(windows|program files|program files \(x86\)|programdata|users\/[^/]+\/appdata)(\/|$)/i;
 const WRITE_PATH_TOOLS = ['write_file', 'append_file', 'edit_file', 'copy_move', 'delete_file', 'mkdir'];
 for (const w of WRITE_PATH_TOOLS) {
   registerHook('before', w, 'system_write_guard', ({ args }) => {
@@ -211,7 +220,9 @@ for (const w of WRITE_PATH_TOOLS) {
     else if (typeof args.src === 'string') p = args.src;
     if (!p) return {};
     const norm = p.replace(/\\/g, '/');
-    if (norm.startsWith('/') && SYSTEM_WRITE_RE.test(norm)) {
+    // 绝对路径才判（相对路径是工作区内；Windows 盘符路径在归一后以 `X:/` 开头）
+    const absolute = norm.startsWith('/') || /^[a-z]:\//i.test(norm);
+    if (absolute && (SYSTEM_WRITE_RE.test(norm) || SYSTEM_WRITE_WIN_RE.test(norm))) {
       return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + p + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
     }
     return {};

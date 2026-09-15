@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process';
 import { db } from './db.js';
 import { readMcpConfig, resolveEnv, redactSecretValues } from './credentials.js';
+import { RW_OS } from './env.js';
 
 const clients = new Map(); // serverId -> { proc, reqId, pending: Map<id,{resolve,reject}>, buf, tools: [] }
 
@@ -55,6 +56,10 @@ export async function connectMcp(id, command, args = [], env = {}) {
   if (clients.has(id)) return { ok: true, note: '已连接' };
   const proc = spawn(command, args, {
     env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'],
+    // Windows：npm/npx 只有 .cmd 形式，spawn 直呼必然 ENOENT（显式写 .cmd 在 Node 22 上还会 EINVAL）。
+    // 过 shell 让 PATHEXT 解析生效；这里用 Node 的 shell:true（Windows 上就是 cmd /d /s /c）而不是
+    // PowerShell：MCP 是 JSON-RPC 字节流，cmd 只做透传，PowerShell 会按自己的格式化规则改写子进程输出。
+    ...(RW_OS === 'win32' ? { shell: true } : {}),
   });
   const cl = { proc, reqId: 0, pending: new Map(), buf: '', tools: [] };
   clients.set(id, cl);

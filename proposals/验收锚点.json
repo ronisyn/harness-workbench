@@ -942,6 +942,31 @@
         }
       ],
       "note": "**2026-09-16 落地（A0，C-31 实测驱动）**：实测 214 次\"整段重建\"集中在一条 432 轮的会话上（量级 ≈14M tokens），成因是**在活跃会话上反复部署**——改工具面/系统提示会换纪元，所有活跃会话的前缀整段作废。先问了 DSH：**它不做这件事**（核心包里 `prompt cache / cached prefix` 零命中，没有预热/失效预警/延后变更；它的会话是持久日志 + 投影，重建只花钱不影响正确性）。我们的决定：**只做描述性的一半**——判据用现成的 `agent_runs.status='running'`（**不发明时间窗口**），两处提示位：① `reload_platform` 无论被拦还是放行都带代价说明（既有 F2 防撞不动）；② `scripts/release.mjs` 预检按 status=running 列出活跃会话并给\"攒批发布\"的建议，读不到库如实跳过、不阻断发布。**真机两条分支都验过**：无活跃会话 → \"发布的好时机\"；造哨兵 running 会话 → 正确列出（含轮次/最后活动/目标摘要）。"
+    },
+    {
+      "id": "RA-55",
+      "title": "同一份代码在 Linux 与 Windows Server 上都跑得起来（D2′ 客户机交付）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/env.js",
+          "pattern": "RW_FS_ROOT"
+        },
+        {
+          "file": "server/shell.js",
+          "pattern": "powershell.exe"
+        },
+        {
+          "file": "server/restart.js",
+          "pattern": "restartPlan"
+        },
+        {
+          "file": "test/portability.test.mjs",
+          "pattern": "不再有平台专属路径与命令字面量"
+        }
+      ],
+      "note": "**2026-09-16 落地主体（D2′，背景见冲突登记 C-33）**：平台原先照\"部署在 /srv 下的 Linux 机器\"写，换到客户机（Windows Server）时不会报错、只会**悄悄走错分支**。两个真根因已按结构修掉：① 用 `RW_FS_ROOT`（平台所在盘的盘根）替掉兼作\"无边界\"哨兵的根斜杠字符串，`inside()` 改用 `path.relative`（顺带修掉\"根下任何路径都判在外\"的既有错）；② 新增 `server/shell.js` 作为\"命令串怎么执行\"的唯一出处（Linux `bash -c` / Windows `powershell.exe -Command` + UTF-8 前言——**选型是实测的**：`cmd.exe /c` 会吞掉内层引号、返回空输出且 code=0，而 PowerShell 的引号/中文/emoji/退出码都对），`run_command`/`run_test`/`run_long_task`/契约验收钩子/MCP 全部走它。另：环境事实由代码位置推导（平台目录＝`server/` 的上级、工作区＝兄弟目录，**与现行 /srv 部署逐字节相同**）；临时目录用 `os.tmpdir()` 并留 `RW_JOBS_DIR`（Windows 会清 %TEMP%，KB4506040）；`RW_RESTART_CMD` 让 Windows 侧的重启可配（WinSW 的 `restart!` 是唯一为\"进程内自我重启\"设计的入口，`sc stop`/`nssm stop` 会把服务停死）；安全网（系统区写入/危险命令）补齐 Windows 判据（原先只认 Unix 路径 ⇒ 在客户机是空网）。**已在真机验证的**（本机 Windows）：env 的三条推导、shell 的引号/中文/emoji/管道/含空格路径/退出码/命令不存在、restartPlan 四条臂。**尚未验证的（如实记）**：① 还没有在真正的 Windows Server 上端到端起过服务（要等客户机或本地装一个 Server VM）；② `scripts/windows/` 下的安装/升级/卸载脚本只做过语法与静态检查；③ Linux 侧行为不变靠\"推导值与旧字面量逐字节相同\"论证 + 服务器上跑 `npm test`/selfcheck/agent-smoke 复核。"
     }
   ]
 }

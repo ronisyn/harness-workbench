@@ -8,12 +8,13 @@
 //   list_dir    均值   787 字节（最多 200 条名字）
 //   两者都不报"省略了多少"
 //
-// 用法：node scripts/mreduce-probe.mjs [--dir /srv/harness-workbench]
+// 用法：node scripts/mreduce-probe.mjs [--dir <平台目录>]　（缺省＝env.js 的 RW_PLATFORM_DIR，不写死部署路径）
 import { TOOLS } from '../server/tools/index.js';
 import { clearReadCache, markWritten } from '../server/readcache.js';
+import { RW_PLATFORM_DIR } from '../server/env.js';
 
 const argv = process.argv.slice(2);
-const DIR = argv.includes('--dir') ? argv[argv.indexOf('--dir') + 1] : '/srv/harness-workbench';
+const DIR = argv.includes('--dir') ? argv[argv.indexOf('--dir') + 1] : RW_PLATFORM_DIR;
 let CID = 990001;
 const ctxOf = () => ({ permission: 'full', root: '/', conversationId: CID, limitPath: false });
 const T = Object.fromEntries(TOOLS.map((t) => [t.name, t]));

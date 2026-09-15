@@ -55,8 +55,10 @@ test('模型已给 cwd 时不再改写它写的 cd（不猜它想用哪个）', 
 });
 
 test('cwd 参数真的生效（不是只写进了 schema）', async () => {
-  // 注意命令里不能带引号：run_command 是 execFile 直调（不过 shell），引号会被原样传给子进程
-  const r = await execTool('run_command', { cmd: 'node -p process.cwd()', cwd: 'server' }, CTX());
+  // 命令给 `process.cwd()` 加引号：bash 与 Windows PowerShell 都会剥掉引号再交给 node（2026-09-16 实测）。
+  // 不加引号时 PowerShell 会把 `()` 当自己的语法解析而报错——那是"两种 shell 的语言差异"，不是本工具的问题；
+  // 模型侧靠系统提示词里的"本机 shell 是哪一种"来规避（agent.js ENV_DISCIPLINE）。
+  const r = await execTool('run_command', { cmd: 'node -p "process.cwd()"', cwd: 'server' }, CTX());
   const got = String(r.stdout || '').trim().split('\n').pop().replace(/\\/g, '/').toLowerCase();
   assert.equal(got, path.join(process.cwd(), 'server').replace(/\\/g, '/').toLowerCase(), 'cwd 必须传给子进程：' + JSON.stringify(r).slice(0, 160));
 });
@@ -64,7 +66,7 @@ test('cwd 参数真的生效（不是只写进了 schema）', async () => {
 test('读型别名照常执行，但结果里带一行提示（提示不占常驻前缀）', async () => {
   const r = await execTool('run_command', { cmd: 'ls server' }, CTX());
   assert.notEqual(r.code, 'TOOL_HOOK_BLOCKED', '不得再被纪律拦截：' + JSON.stringify(r).slice(0, 160));
-  // 提示按**命令首词**挂，与本次执行成败无关（Windows 上没有 ls，会 ENOENT —— 提示照样要给）
+  // 提示按**命令首词**挂，与本次执行成败无关（Windows 上 ls 是 PowerShell 的内建别名，跑得通；提示照样要给）
   assert.match(String(r.hint || ''), /专门工具/, '应附提示：' + JSON.stringify(r).slice(0, 160));
   const plain = await execTool('run_command', { cmd: 'node -p 1+1' }, CTX());
   assert.equal(plain.hint, undefined, '非读型命令不该附提示');

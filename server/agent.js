@@ -4,7 +4,8 @@
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost, llmRetryDecision, cancellableDelay } from './llm/gateway.js';
 import { createHash } from 'node:crypto';
-import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
+import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN, RW_OS_CN } from './env.js';
+import { SHELL_CN } from './shell.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
 import { diffCore, isUnexpectedBreak, prefixHash } from './prefix.js';
 import { newProgressState, judgeRound, stallMessage, fuseDecision } from './progress.js';
@@ -235,17 +236,17 @@ export const ENV_IDENTITY = (permission = 'full') => [
 ].join('\n');
 
 export const ENV_DISCIPLINE = [  '行动原则（务必遵守）：',
-  '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（Linux 环境：bash/ls/cat/node/npm/python3/git 都可用），不要只给文字建议或代码片段。',
+  '- 用户让你开发/写代码/建页面/渲染/部署/修复 等任务时，你【必须实际动手用工具完成】（本机是 ' + RW_OS_CN + '：node/npm/git 可用，shell 命令按本机语法写），不要只给文字建议或代码片段。',
   '- **假完成会被平台打回**：任务语境下若你直接回复"已执行/已完成/已提交"等完成声称但本轮无任何工具调用记录，平台会自动打回要求补真实执行；连续不改则你的回复会被强制加注"未经工具验证"。诚实路径：真做→展示结果；或明确声明"本轮未执行工具操作"。',
   '- **小步快跑**：把大任务切成一连串小的工具调用（一次一个动作：读→改→验证→下一处），每步依据结果决定下一步，像人在终端里逐步推进；不要试图一次做完，也不要一个命令包办所有步骤。',
   '- **优先使用专门工具，不用 shell 命令替代**：读文件用 read_file（不要 cat）、列目录用 list_dir（不要 ls）、搜索用 grep_search（不要 grep）、查找用 find_file、语法检查用 syntax_check、跑测试用 run_test。run_command 仅在无专门工具时用（npm install/起服务/系统管理/git/日志跟随），避免 shell 引号管道坑。想敲 cat/ls/grep/find/sed/head 读文件时先停——平台会拦并提示（读型命令门禁，审计显示 58% 的 shell 调用本可用专门工具）。',
   '- 复杂任务拆步骤：① 规划（建目录/项目结构）② write_file 写代码 ③ run_command 运行/构建/测试（必要时 npm install）④ 验证结果 ⑤ 向用户报告产物与访问方式。',
   '- 某步失败不要放弃：读错误信息→修复→重试；同一工具同参数失败 2 次后换思路（改路径/换命令/查环境）。',
-  '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
+  '- 本机是 ' + RW_OS_CN + ' 服务器，命令用 ' + RW_OS_CN + ' 的语法与路径写法（本机 shell 是 ' + SHELL_CN + '，run_command 里的命令按它的语法写，如 PowerShell 里 `node -p "process.cwd()"` 的括号要加引号）；用户本机可能是别的系统，不要把用户本机的路径当成平台上的路径。',
   '- 运行护栏（时间预算/轮次上限/循环检测）是可调整可关闭的配置（0=不限），是防失控保险丝而非能力上限：用户要求取消/放宽时，直接用 set_limits 工具改（0=不限），或说明原因后调大。',
   '- 运行时快照：平台每轮自动注入【运行时快照】（轮次/用时/护栏现值/累计 token 与费用/会话属性/政策版本）。以最新快照为准；看到政策版本变化=规则已更新，请丢弃旧理解。',
   `- 行为准则：${RW_PLATFORM_DIR}/docs/RW行为准则-服务器版.md 是本平台行为准则（诚实/小步/命令纪律/护栏哲学/自改纪律/验证与收尾），日常遵守，需要时 read_file 读全文。`,
-  '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）手动 systemctl restart（那会中断你自己）。',
+  '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）自己手动重启服务（那会中断你自己）。',
 ].join('\n');
 
 // 兼容导出：默认按 full 身份拼装（供外部引用/无权限上下文使用）；runAgent 内按实际 permission 动态生成

@@ -39,11 +39,11 @@ import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
 import { autoTitle } from './autotitle.js';
 import { decideApproval, listPending } from './approval.js';
-import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart.js';
+import { takeRestart, isRestartScheduled, markRestartScheduled, restartPlan } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
-import { RW_SERVICE, RW_WORKSPACE } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR } from './env.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -67,10 +67,15 @@ async function maybeSelfRestart() {
   setTimeout(async () => {
     try {
       const { execFile } = await import('node:child_process');
-      const svc = RW_SERVICE;
-      const ch = execFile('systemctl', ['restart', svc], { detached: true, stdio: 'ignore' });
+      const plan = restartPlan();
+      if (!plan.argv) { console.error('[rw] 已收到重启请求，但本机没有可用方式：' + plan.hint); return; }
+      const [file, ...args] = plan.argv;
+      const ch = execFile(file, args, { detached: true, stdio: 'ignore' });
+      // 必须挂 'error'：execFile 找不到可执行文件时抛的是**异步 error 事件**，try/catch 抓不到，
+      // 没有监听器就会以未捕获异常带走整个进程（与 MCP spawn ENOENT 同款坑，见 C-16）。
+      ch.on('error', (e) => { console.error('[rw] 自动重启失败（' + plan.how + '）:', e.message, '—— 请手动重启服务'); });
       ch.unref();
-      console.log('[rw] 已触发 systemctl restart ' + svc);
+      console.log('[rw] 已触发重启（' + plan.how + '）: ' + plan.argv.join(' '));
     } catch (e) { console.error('[rw] 自动重启失败:', e.message); }
   }, 2000);
 }
@@ -1104,7 +1109,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
-      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? '/' : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff, __shellSchema: shellSchema };
+      const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? RW_FS_ROOT : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff, __shellSchema: shellSchema };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
       let teleBase = null;
@@ -1233,7 +1238,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         finishReason: runOutcome.finishReason || '', guard: runOutcome.guard || null,
         usage: usage, totals: runOutcome.usageTotals || null, spentYuan: runOutcome.spentYuan ?? null,
         // RA-31 ③「用了哪些能力」+ §7.2 的 enforcement 诚实上报：紧凑版，只带"没做到 full 的层"与本次用过的工具名。
-        capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome.toolLog || []).map((t) => t.name)),
+        capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome.toolLog || []).map((t) => t.name)),
       });
       // 断线/旁观客户端走 /activity 轮询时，结论由环自己的 run_end（clearActivity 追加，见 agent.js）给出，
       // 不在这里重复往环里塞（环与 SSE 是两条投影，重复塞会让"同一事实两种投影"更乱）。
@@ -1262,7 +1267,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'stopped',
           reason: (actrl.signal && actrl.signal.reason === 'user') ? 'user' : 'disconnect',
           reasonText: why, messageId: placeholderId, totals: runOutcome && runOutcome.usageTotals ? runOutcome.usageTotals : null,
-          capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)),
+          capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)),
         });
       } catch { /* 忽略 */ }
     }
@@ -1287,7 +1292,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       errPlaceholderId = (er && er.insertId) || null;
     } catch { /* 忽略 */ }
     send({ type: 'error', message: e.message });
-    send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId, capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)) });
+    send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId, capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)) });
     // 自审补：异常路径同样落观测（该轮真实消耗已入 usage_stats，观测表须同口径有行）
     if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
@@ -1390,7 +1395,7 @@ app.get('/api/agent/capabilities', requireAuth, async (req, res) => {
     if (convId) conv = (await db.query('SELECT id, permission, preset, mode, shell_id FROM conversations WHERE id=? AND account_id=?', [convId, req.user.id]))[0] || null;
     const permission = (conv && conv.permission) || 'full';
     const preset = (conv && conv.preset) || 'all';
-    const ctx = { permission, preset, mode: (conv && conv.mode) || 'chat', root: permission === 'full' ? '/' : RW_WORKSPACE, shellId: conv ? conv.shell_id : null };
+    const ctx = { permission, preset, mode: (conv && conv.mode) || 'chat', root: permission === 'full' ? RW_FS_ROOT : RW_WORKSPACE, shellId: conv ? conv.shell_id : null };
     // 护栏现值与该会话同源读取（与 runAgent 每轮读 settings 的口径一致）
     let guards = null;
     try {
@@ -2638,6 +2643,12 @@ async function main() {
   await runEventArchive('启动归档');
   const eventArchTimer = setInterval(() => { runEventArchive('定时归档'); }, 6 * 60 * 60 * 1000);
   if (eventArchTimer.unref) eventArchTimer.unref();
+  // 工作区与后台任务日志目录：全新机器（客户机首次安装）上它们还不存在，启动时确保建好——
+  // 否则第一批工具调用会因为"默认目录不存在"报 ENOENT，而这本来不该是安装步骤里的手工动作。
+  // 失败不阻断启动：只读挂载等情况下先照常起来，等真正用到时报错更可诊断。
+  for (const d of [RW_WORKSPACE, RW_JOBS_DIR]) {
+    try { fs.mkdirSync(d, { recursive: true }); } catch (e) { console.error('[rw] 目录创建失败（' + d + '）:', e.message); }
+  }
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // RA-03：清单热重载——工具上下线/改档位改提示，只改 tools/manifest.js，**不重启服务**即刻生效
