@@ -29,12 +29,16 @@
 // `test/jsonrpc.test.mjs` 会去解析那份文档的端点表逐条核对 ⇒ **孤儿映射（指向不存在的端点）会报红**。
 // 要加新能力，先改契约，不在这儿现造。
 import { StringDecoder } from 'node:string_decoder';
+import { RW_VERSION } from './env.js';
 
 export const SERVER_NAME = 'rw-platform-jsonrpc';
 // 这份门面的线协议版本。与 MCP 的 `server/mcp-version.js`（那是 MCP 规范版本）**不是同一个东西**，
 // 故不共用常量：一个是"我按 MCP 规范哪一版说话"，一个是"我这份自家方法的形状是第几版"。
 export const JSONRPC_VERSION = '2.0';
 export const PROTOCOL_VERSION = 1;
+// **实现方软件版本**（v0.3 §4.1 运行面"有版本号"）：单一出处＝`package.json`（经 env.js 的 RW_VERSION）。
+// 调用方接上这门面时要能问出"对面这一版是什么"——否则排障只能靠猜（与 `/api/health` 不报版本同一个缺口）。
+export const SOFTWARE_VERSION = RW_VERSION;
 
 // JSON-RPC 2.0 规范 §5.1 的标准错误码。**只在"你不会说协议"时使用**（业务失败见文件头口径 2）。
 export const ERR = {
@@ -63,7 +67,13 @@ export class Registry {
     if (typeof handler !== 'function') throw new Error('handler 必须是函数：' + name);
     if (!def || !def.contract) throw new Error('方法必须声明它对应的契约端点（contract）：' + name);
     if (!def.params || def.params.type !== 'object') throw new Error('方法必须声明 object 类型的参数表（params）：' + name);
-    this.methods.set(name, { name, handler, description: def.description || '', contract: def.contract, params: def.params });
+    this.methods.set(name, {
+      name, handler, description: def.description || '', contract: def.contract, params: def.params,
+      // 实现方软件版本（v0.3 §4.1 运行面"有版本号"）：METHODS 逐条声明（单一出处＝package.json），
+      // 缺省或显式空 ⇒ 退回本门面自己的版本，**不留 undefined**（对外形态里一格 undefined 会被
+      // JSON.stringify 直接丢掉，调用方看到的就是"这一格不存在"，与"没声明"分不开）。
+      version: def.version || RW_VERSION,
+    });
     return this;
   }
 
@@ -77,7 +87,12 @@ export class Registry {
    * 也是"映射表给调用方看"的落点（v0.3 §7.1 ⑳：每个方法逐条注明对应契约端点）。
    */
   face() {
-    return this.list().map((m) => ({ name: m.name, description: m.description, contract: m.contract, params: m.params }));
+    return this.list().map((m) => ({
+      name: m.name, description: m.description, contract: m.contract, params: m.params,
+      // 逐条带上门面的软件版本（v0.3 §4.1 运行面"有版本号"）：握手块（`system.capabilities` 的后端）
+      // 就是把它摊平进响应里的，调用方据此对账"对面跑的是哪一版"——不额外改后端、不多一处手抄。
+      version: m.version,
+    }));
   }
 }
 
@@ -102,6 +117,11 @@ export const METHODS = [
     // 契约端点：存活探测（唯一一条无需认证的端点）。握手必须**如实反映"平台在不在"**——
     // 进程活着不代表平台活着（后者要连库），所以不自己编一个 ready:true。
     contract: 'GET /api/health',
+    // 平台版本（v0.3 §4.1 运行面"有版本号"）：调用方要能问出"对面这一版是什么"。
+    // 单一出处＝package.json（经 env.js 的 RW_VERSION），**不在这里另写一份字面量**；
+    // 与上面那个 PROTOCOL_VERSION（自家方法形状的版本）是两件事，故并列两格、不互相顶替。
+    // （其余方法不逐条写：声明表末尾统一归一成同一个 SOFTWARE_VERSION，见 METHODS 之后那段。）
+    version: SOFTWARE_VERSION,
     params: P({}, []),
   },
   {
@@ -150,6 +170,11 @@ export const METHODS = [
     }, ['conversationId']),
   },
 ];
+
+// 软件版本**只声明一次**（=METHODS 里那一格），随后逐条归一：门面里每个方法对外都说同一个版本。
+// 为什么在这里补而不是在每条 def 里手抄一遍：手抄 6 份就是 6 处会漂移的事实源，
+// 而"这一版是哪一版"本来就只有一个答案（package.json）。声明过的不覆盖（留给将来真需要逐方法区分时用）。
+for (const m of METHODS) if (!m.version) m.version = SOFTWARE_VERSION;
 
 /** 类型的对外人话（错误信息里要说清楚"你要的是数字、给的是字符串"，而不是回一个 42） */
 const TYPE_CN = (t) => {

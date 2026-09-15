@@ -10,8 +10,17 @@
 //   · 换纪元  —— 指纹在本会话出现过，但中间被别的指纹替换过 ⇒ 前缀面变了（翻转/部署/MCP 漂移）
 //   · 久未用  —— 指纹就是上一次用的那枚，但中间隔了很久 ⇒ 才轮到"缓存过期"这个解释
 //
+//   ⚠️ 三态全是**会话内**口径：一次性会话碰到全新纪元时，它只会显示"真·首见、换纪元 0 次"——
+//      **换纪元这件事会被统计口径吃掉**（实测：近 14 天窗口 8 条冷启动全是"真·首见"，见 audit 读数）。
+//      所以逐轮另给一列**可判性**，回答的是"这一轮到底能不能机检判断是否跨纪元"：
+//      本行带指纹 ⇒ 可判/指纹；本行无指纹但账本有 prefix:epoch-change ⇒ 可判/账本；两者都无 ⇒ 不可判。
+//      汇总给出**可判轮数 / 不可判轮数**，并披露本窗口有多少轮"会话内没有可比对的前序指纹"。
+//      **"看不见"不等于"没发生"**：机检判不了就标"不可判"，不拿"未命中大"倒推成因。
+//
 // 用法：node scripts/prefix-attribution.mjs [--days 7] [--cold 3000]
 import { db } from '../server/db.js';
+// 判据（类别口径 + 可判性）的唯一出处：纯函数在 lib 里，夹具锁的就是脚本真正在跑的那份
+import { classify, judgeability, summarizeJudgeability } from './prefix-attribution-lib.mjs';
 
 const argv = process.argv.slice(2);
 const num = (f, d) => (argv.includes(f) ? Number(argv[argv.indexOf(f) + 1]) : d);
@@ -44,21 +53,36 @@ const rows = await q(`
      AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
    ORDER BY u.id DESC LIMIT 60`, [COLD, DAYS]);
 
+// 可判性判据要用"窗口内账本里有没有 prefix:epoch-change 记录"：有 ⇒ 连没指纹的轮也有账本锚点可判
+const lr = await q("SELECT COUNT(*) n FROM audit_log WHERE action='prefix:epoch-change' AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)", [DAYS]);
+const epochLedgerN = lr[0] && !lr[0].__err ? Number(lr[0].n) : 0;
+// 口径外披露：同窗口同阈值下**没有指纹**的冷启动轮 —— 它们进不了上表，而它们正是机检判不了的那部分
+const br = await q(`SELECT COUNT(*) n FROM usage_stats u
+   WHERE u.kind='round' AND u.prefix_sys_hash IS NULL AND u.cache_miss_tokens > ?
+     AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`, [COLD, DAYS]);
+const blindN = br[0] && !br[0].__err ? Number(br[0].n) : 0;
+
 if (!rows.length) {
   console.log('  （窗口内没有冷启动轮次；或指纹列刚上线、样本还没积累起来）');
 } else {
-  const cls = (r) => (Number(r.seen_before) === 0 ? '真·首见' : (r.prev_tools && r.prev_tools !== r.tools ? '换纪元' : '久未用'));
-  console.log('判定       会话     轮次   输入     未命中   本行指纹(工具)   同会话是否出现过   与上一轮间隔');
+  console.log(`${'判定'.padEnd(9)} ${'可判性'.padEnd(9)} 会话     轮次   输入     未命中   本行指纹(工具)   同会话是否出现过   与上一轮间隔`);
   const tally = {};
   for (const r of rows) {
-    const c = cls(r); tally[c] = (tally[c] || 0) + 1;
+    const c = classify(r); tally[c] = (tally[c] || 0) + 1;
     const gap = r.gap_since_prev == null ? '-' : (r.gap_since_prev / 60).toFixed(1) + ' 分';
-    console.log(`${c.padEnd(9)} conv=${String(r.cid).padEnd(5)} #${String(r.id).padEnd(6)} ${fmt(r.tin).padStart(8)} ${fmt(r.miss).padStart(8)}  ${r.tools}  ${String(Number(r.seen_before) > 0 ? '出现过 ' + r.seen_before + ' 次' : '从未').padEnd(16)} ${gap}`);
+    console.log(`${c.padEnd(9)} ${judgeability(r, epochLedgerN).cell.padEnd(9)} conv=${String(r.cid).padEnd(5)} #${String(r.id).padEnd(6)} ${fmt(r.tin).padStart(8)} ${fmt(r.miss).padStart(8)}  ${r.tools}  ${String(Number(r.seen_before) > 0 ? '出现过 ' + r.seen_before + ' 次' : '从未').padEnd(16)} ${gap}`);
   }
   console.log('\n  小计：' + Object.entries(tally).map(([k, v]) => `${k} ${v}`).join('　·　'));
   console.log('  读法：**"换纪元"条数 = 可以通过前缀面纪律消掉的那部分**；"真·首见"是会话的第一次请求，消不掉；');
   console.log('        "久未用"才是"缓存过期"能解释的那部分 —— 实测它通常最少见（见方案 §2）。');
 }
+
+// 可判性汇总（无条件打印：表为空时这两个计数同样是读数，不能只在有行时才有）
+const jsum = summarizeJudgeability(rows, epochLedgerN);
+console.log(`\n  可判性：**可判 ${jsum.judgeable} 轮 / 不可判 ${jsum.unjudgeable} 轮**（判据：本行带前缀指纹，或窗口内账本有 prefix:epoch-change 记录）`);
+console.log(`  口径披露：三态是**会话内**口径；本窗口 ${jsum.total} 轮里有 ${jsum.noSessionAnchor} 轮"会话内没有可比对的前序指纹"（一次性会话/上一轮无指纹）`);
+console.log('            ⇒ 这些轮的"真·首见"只说明是本会话首轮，**不能读成"没换纪元"**；换纪元要按账本或跨会话指纹判，不拿"未命中大"倒推。');
+console.log(`  口径外：同窗口同阈值另有 ${fmt(blindN)} 轮**无指纹**（机检判不了，本表不收）——"看不见"不等于"没发生"。`);
 
 console.log('\n== 纪元账本（audit_log · prefix:*）==');
 for (const r of await q("SELECT action, COUNT(*) n FROM audit_log WHERE action LIKE 'prefix:%' GROUP BY action ORDER BY n DESC")) console.log(`  ${r.action} × ${r.n}`);

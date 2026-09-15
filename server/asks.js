@@ -4,12 +4,15 @@
 const pending = new Map();
 let seq = 0;
 
-export function createAsk(question, options) {
+export function createAsk(question, options, { conversationId = null } = {}) {
   seq += 1;
   const id = 'ask-' + seq + '-' + Date.now().toString(36);
   let resolveFn;
   const promise = new Promise((resolve) => { resolveFn = resolve; });
-  pending.set(id, { question, options, resolve: resolveFn, createdAt: Date.now() });
+  // `conversationId` 是**归属**（不是显示字段）：跨端一致要求"按会话找得到这张卡"
+  // ——渠道侧据此把卡片发到人所在的端、也据此把人在渠道里的回答对回这一张卡（见 server/cards.js）。
+  const convId = conversationId == null ? null : Number(conversationId);
+  pending.set(id, { question, options, resolve: resolveFn, createdAt: Date.now(), conversationId: Number.isFinite(convId) ? convId : null });
   // 10 分钟无应答按超时处理（不销毁，允许稍后补答：见 decideAsk 对 timeout 的处理）
   setTimeout(() => {
     const p = pending.get(id);
@@ -36,5 +39,7 @@ export function cancelAsk(id) {
 }
 
 export function listPendingAsks() {
-  return [...pending.entries()].map(([id, p]) => ({ id, question: p.question, options: p.options, createdAt: p.createdAt }));
+  // `conversationId` 一并带出（可能为 null：老调用方/无人值守路径没有会话归属）：`GET /api/asks` 靠它
+  // 补上"属于哪个会话、在哪一端等回答"（server/cards.js 的 attachCardRoutes）。
+  return [...pending.entries()].map(([id, p]) => ({ id, question: p.question, options: p.options, createdAt: p.createdAt, conversationId: p.conversationId ?? null }));
 }

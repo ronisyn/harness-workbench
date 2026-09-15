@@ -17,6 +17,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serveStdio } from '../server/mcp-server.js';
+// 自造会话的标题走**统一声明**（`__probe__ …`）：本适配器建的会话是我们自己发起的，不属于"真实流量"
+// （v0.3 §0.3.1 的口径："探针 ≠ 真实流量"；判据唯一实现在 server/cohort.js）。
+// 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
+import { probeTitle } from './cohort.mjs';
 
 const BASE = (process.env.RW_MCP_BASE_URL || 'http://127.0.0.1:880').replace(/\/$/, '');
 const PERMISSION = process.env.RW_MCP_PERMISSION || 'read';
@@ -121,7 +125,7 @@ const backend = {
     let cid = args.conversation_id ? Number(args.conversation_id) : null;
     let created = false;
     if (!cid) {
-      const c = await api('/api/conversations', { method: 'POST', body: { title: 'MCP: ' + String(args.message).slice(0, 40), permission: PERMISSION } });
+      const c = await api('/api/conversations', { method: 'POST', body: { title: probeTitle('MCP: ' + String(args.message).slice(0, 40)), permission: PERMISSION } });
       cid = c.id; created = true;
     }
     const r = await chatStream(cid, String(args.message), Number(args.wait_seconds) || DEFAULT_WAIT);

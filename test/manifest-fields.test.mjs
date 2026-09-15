@@ -10,12 +10,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TOOL_MANIFEST } from '../server/tools/manifest.js';
-import { TOOLS, toolDefs, APPROVAL_REQUIRED, TOOL_POLICY, LIGHT_TOOLSET, PLATFORM_EXEMPT, DEFAULT_TOOLSET } from '../server/tools/index.js';
-import { validateManifest, assembleTools } from '../server/tools/registry.js';
+import { TOOL_MANIFEST, TOOL_PERMISSIONS } from '../server/tools/manifest.js';
+import { TOOLS, toolDefs, APPROVAL_REQUIRED, TOOL_POLICY, LIGHT_TOOLSET, PLATFORM_EXEMPT, DEFAULT_TOOLSET, permOf } from '../server/tools/index.js';
+import { validateManifest, assembleTools, validatePermissions, implementationPermissionProblems } from '../server/tools/registry.js';
 import { PREFIX_PARTICIPANTS } from '../server/prefix-participants.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// 快照＝"改造前的工具面事实"（65 条 name/description/parameters + 顶层 tools[].permission/params）。
+// 权限那一格正是 ⑤ 搬动的基准：搬进清单**不许改档**，所以拿它逐条比（见下面 ⑤ 那条用例）。
+const SNAP = JSON.parse(fs.readFileSync(path.join(ROOT, 'test/fixtures/tools-snapshot.json'), 'utf8'));
 const ENTRIES = Object.entries(TOOL_MANIFEST);
 // 去注释时先规范化换行：仓库文件是 CRLF，而 `.` 不匹配 \r ⇒ `/\/\/.*$/` 在行尾带 \r 时**永远不匹配**
 // （夹具自己被这条绊过一次：注释里的 `timeoutMs: 90000` 被当成真字面量报了出来）。
@@ -103,6 +106,62 @@ test('轻量面闭环：fetch_spill 在轻量集里（否则轻量会话溢出�
   const light = toolDefs('all', null, null).filter((d) => LIGHT_TOOLSET.includes(d.function.name)).map((d) => d.function.name);
   assert.ok(light.includes('fetch_spill'), '轻量会话的工具面里必须真的看得见 fetch_spill');
   assert.ok(PLATFORM_EXEMPT.includes('fetch_spill') && DEFAULT_TOOLSET.includes('fetch_spill') === false, '既有豁免/默认集口径不变（它恒可用但不进默认 28 项）');
+});
+
+// ⑤-2 权限声明化（v0.3 §7.1 ⑤ 的第四类声明，2026-09-16 补齐）：值**逐条与改造前一致**，基准取自快照
+// （`tools-snapshot.json` 的 `tools[].permission`＝搬走之前实现里那 65 个值，逐条比对过）。
+// 判据三条：① 清单里有且只有 65 条声明；② 每条的值＝快照值（搬动不许顺手改档）；③ 装配出来的条目上读到的
+// 与清单同源（实现里那份副本已删——`checkPerm` 走 permOf ⇒ 清单优先）。
+test('⑤ 权限声明化：65 条逐条与快照一致，实现里不许再写一份', () => {
+  const snapTools = SNAP.tools || [];
+  assert.equal(snapTools.length, 65, '快照里必须有 65 条工具（改造前的权限基准）');
+  assert.deepEqual(Object.keys(TOOL_PERMISSIONS).sort(), Object.keys(TOOL_MANIFEST).sort(),
+    '权限表必须与清单**逐条对齐**（少一条＝那条工具没有权限声明，多一条＝幽灵声明）');
+  for (const s of snapTools) {
+    assert.equal(TOOL_PERMISSIONS[s.name], s.permission, s.name + ' 的权限档与改造前不一致（搬动不许改档）');
+  }
+  // 装配出来的条目上读到的是同一份值（快照比对的正是它，见 test/manifest.test.mjs）
+  for (const t of TOOLS) assert.equal(t.permission, TOOL_PERMISSIONS[t.name], t.name + ' 装载后的权限必须来自清单');
+  // checkPerm 读的也是清单（permOf 优先取 TOOL_POLICY；TOOL_POLICY 由清单装配）
+  for (const t of TOOLS) assert.equal(permOf(t), TOOL_PERMISSIONS[t.name], t.name + ' permOf 必须回落到清单声明');
+  assert.equal(TOOL_POLICY.read_file.permission, 'read', 'TOOL_POLICY 里也要有权限档（execTool 的提示文案读它）');
+  // 源码级：实现里不许再留 permission 声明（否则就是两处声明）
+  assert.deepEqual(implementationPermissionProblems(), [], '实现文件里还留着 permission 声明（两处声明）');
+});
+
+// ⑤ 的**负例**（每条对应上面一条判据的"如果写错会怎样"，改回错的就是红）：
+test('负例：清单漏声明某条工具的权限 → 装配期抛错（默认拒绝，不放行）', () => {
+  const bad = { ...TOOL_PERMISSIONS };
+  delete bad.repo_map;
+  assert.deepEqual(validatePermissions(TOOL_MANIFEST, TOOLS, bad), [
+    '清单漏声明 permission（已装载的工具必须在 tools/manifest.js 的 TOOL_PERMISSIONS 里有且只有一处声明）：repo_map',
+  ]);
+});
+
+test('负例：清单把权限档写成非法值 → 装配期抛错', () => {
+  const bad = { ...TOOL_PERMISSIONS, repo_map: 'admin' };
+  assert.deepEqual(validatePermissions(TOOL_MANIFEST, TOOLS, bad), [
+    'permission 取值非法（必须是 read|write|full|global）：repo_map = "admin"',
+  ]);
+});
+
+test('负例：实现里又写回一份 permission（两处声明）→ 源码级核对报出来', () => {
+  // 模拟"作者顺手在实现里补了一句 permission"：注入一段带该字面量的源码，owner 是清单里的工具
+  const src = "const RAW_TOOLS = [\n  { name: 'repo_map', description: 'x', permission: 'full',\n    run: async () => ({}) },\n];\n";
+  assert.deepEqual(implementationPermissionProblems(src, TOOL_MANIFEST), [
+    '工具定义里还留着 permission（两处声明；权限的唯一出处是 tools/manifest.js 的 TOOL_PERMISSIONS）：repo_map',
+  ]);
+  // 反面对照：MCP 动态来源（不在静态清单里）自带的那一份**不算**两处声明——它由装载方声明
+  const mcpSrc = "const MCP_TIMEOUT_MS = 15000;\nentries.push({\n    name,\n    permission: 'write',\n});\n";
+  assert.deepEqual(implementationPermissionProblems(mcpSrc, TOOL_MANIFEST), []);
+});
+
+test('负例：清单与实现漂移（某条工具的权限档被改过）→ 装配期抛错（快照会同时报 permission 漂移）', () => {
+  // 注入一份"少声明了一条"的权限表：真正跑装配路径必须抛错，而不是静默按 undefined 档放行
+  const tweak = { ...TOOL_MANIFEST };
+  const badTools = TOOLS.map((t) => (t.name === 'repo_map' ? { ...t, permission: '' } : t));
+  assert.throws(() => assembleTools(badTools, tweak), /工具缺少 permission：repo_map/);
+  assert.doesNotThrow(() => assembleTools(TOOLS, TOOL_MANIFEST), '原清单必须照常装载');
 });
 
 // ---------- 负例：清单自身字段非法 ----------

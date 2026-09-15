@@ -4,12 +4,15 @@
 const pending = new Map(); // id -> { desc, resolve }
 let seq = 0;
 
-export function createApproval(desc) {
+export function createApproval(desc, { conversationId = null } = {}) {
   seq += 1;
   const id = 'ap-' + seq + '-' + Date.now().toString(36);
   let resolveFn;
   const promise = new Promise((resolve) => { resolveFn = resolve; });
-  pending.set(id, { desc, resolve: resolveFn, createdAt: Date.now() });
+  // `conversationId` 是**归属**（不是显示字段）：跨端一致要求"按会话找得到这张卡"
+  // ——渠道侧据此把卡片发到人所在的端、也据此把人在渠道里的回答对回这一张卡（见 server/cards.js）。
+  const convId = conversationId == null ? null : Number(conversationId);
+  pending.set(id, { desc, resolve: resolveFn, createdAt: Date.now(), conversationId: Number.isFinite(convId) ? convId : null });
   // 超时兜底：5 分钟后自动拒绝（防止 SSE 断开后永远悬挂）
   setTimeout(() => {
     const p = pending.get(id);
@@ -35,5 +38,7 @@ export function cancelApproval(id, decision = 'aborted') {
 }
 
 export function listPending() {
-  return [...pending.entries()].map(([id, p]) => ({ id, desc: p.desc, createdAt: p.createdAt }));
+  // `conversationId` 一并带出（可能为 null：没有会话归属的卡）：`GET /api/approvals` 靠它补上
+  // "属于哪个会话、在哪一端等回答"（server/cards.js 的 attachCardRoutes）。
+  return [...pending.entries()].map(([id, p]) => ({ id, desc: p.desc, createdAt: p.createdAt, conversationId: p.conversationId ?? null }));
 }

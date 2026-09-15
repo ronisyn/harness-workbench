@@ -24,6 +24,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serveStdioWith, SERVER_NAME, PROTOCOL_VERSION } from '../server/jsonrpc.js';
+// 自造会话的标题走**统一声明**（`__probe__ …`）：本适配器建的会话是我们自己发起的，不属于"真实流量"
+// （v0.3 §0.3.1 的口径："探针 ≠ 真实流量"；判据唯一实现在 server/cohort.js）。
+// 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
+import { probeTitle } from './cohort.mjs';
 
 const BASE = (process.env.RW_JSONRPC_BASE_URL || 'http://127.0.0.1:880').replace(/\/$/, '');
 const PERMISSION = process.env.RW_JSONRPC_PERMISSION || 'read';
@@ -150,7 +154,7 @@ const backend = {
     return {
       server: SERVER_NAME,
       protocolVersion: PROTOCOL_VERSION,
-      platform: { ok: h.ok === true, service: h.service || null, ts: h.ts || null },
+      platform: { ok: h.ok === true, service: h.service || null, version: h.version || null, ts: h.ts || null },
       // 方法表从**注册表**出（含每条对应的契约端点）：调用方据此在编码阶段发现方法名写错，
       // 也不必去读我们的文档才知道有哪些方法；手抄一份到这儿就等于多了一个会过期的事实源。
       methods: ctx && ctx.registry ? ctx.registry.face() : [],
@@ -161,7 +165,7 @@ const backend = {
     let cid = args.conversationId ? Number(args.conversationId) : null;
     let created = false;
     if (!cid) {
-      const c = await api('/api/conversations', { method: 'POST', body: { title: 'JSON-RPC: ' + String(args.message).slice(0, 40), permission: PERMISSION } });
+      const c = await api('/api/conversations', { method: 'POST', body: { title: probeTitle('JSON-RPC: ' + String(args.message).slice(0, 40)), permission: PERMISSION } });
       cid = c.id; created = true;
     }
     const headers = args.idempotencyKey ? { 'Idempotency-Key': String(args.idempotencyKey) } : null;

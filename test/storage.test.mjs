@@ -61,17 +61,35 @@ function fakeMysql() {
     return out.map((x) => x.trim());
   };
   const whereOf = (raw, params) => {
-    // WHERE 里的条件是 ` AND ` 连起来的（不是逗号），每个条件恰好一个 `?`，顺序即参数顺序
-    const conds = raw.split(/\s+AND\s+/i).map((c) => {
-      const m = /^(\w+)\s*(<=>|=|>)\s*\?$/.exec(c.trim());
-      if (!m) throw new Error('假 pool 不认识的 WHERE 条件：' + c);
-      return { col: m[1], op: m[2], val: params.shift() };
+    const t = String(raw).trim();
+    // 特例①：会话列表的"我的 ∪ 渠道侧无主会话"（`server/index.js:321` 那条条件，逐字）
+    if (/^account_id=\? OR \(channel != "web" AND account_id IS NULL\)$/i.test(t)) {
+      const acc = params.shift();
+      return (row) => (row.account_id ?? null) === (acc ?? null)
+        || (row.channel !== null && row.channel !== undefined && String(row.channel).toLowerCase() !== 'web' && (row.account_id ?? null) === null);
+    }
+    // 其余条件用 ` AND ` 连起来；每个条件消费 0/1/N 个参数，顺序即参数顺序
+    const conds = t.split(/\s+AND\s+/i).map((c) => {
+      const s = c.trim();
+      let m;
+      if ((m = /^(\w+)\s+IN\s+\(([?\s,]+)\)$/i.exec(s))) {
+        const n = (m[2].match(/\?/g) || []).length;
+        return { col: m[1], in: Array.from({ length: n }, () => params.shift()) };
+      }
+      if ((m = /^(\w+)\s*(<=>|=|>)\s*NOW\(\)$/i.exec(s))) return { col: m[1], op: m[2], now: true };
+      if ((m = /^(\w+)\s*(<=>|=|>)\s*\?$/.exec(s))) return { col: m[1], op: m[2], val: params.shift() };
+      throw new Error('假 pool 不认识的 WHERE 条件：' + s);
     });
-    return (row) => conds.every(({ col, op, val }) => {
-      const v = row[col] === undefined ? null : row[col];
-      if (op === '<=>') return v === (val === undefined ? null : val);   // NULL 安全等（deliveries 的幂等键靠它）
-      if (op === '>') return Number(v) > Number(val);
-      return v === val;
+    return (row) => conds.every((c) => {
+      const v = row[c.col] === undefined ? null : row[c.col];
+      if (c.in) return c.in.includes(v);
+      if (c.now) return new Date(v).getTime() > Date.now();      // 会话到期判据就在 SQL 里（`expires_at > NOW()`）
+      if (c.op === '<=>') return v === (c.val === undefined ? null : c.val);   // NULL 安全等（deliveries 的幂等键靠它）
+      if (c.op === '>') return Number(v) > Number(c.val);
+      // 字符串比较照 MySQL 的默认排序规则（utf8mb4 不区分大小写）：假库若按 === 比，
+      // "大小写不同的用户名也要能查到"这条用例在 mysql 侧就成了假红（而真库是能查到的）
+      if (typeof v === 'string' && typeof c.val === 'string') return v.toLowerCase() === c.val.toLowerCase();
+      return v === c.val;
     });
   };
 
@@ -79,12 +97,15 @@ function fakeMysql() {
     const p = [...(params || [])];
     const q = String(sql).trim();
     let m;
+    let mm;   // 各分支共用的"局部再匹配"变量（在 INSERT 的 VALUES 解析里也要用）
     if ((m = /^INSERT INTO (\w+) \(([^)]+)\) VALUES \((.*?)\)(?: ON DUPLICATE KEY UPDATE (.+))?$/i.exec(q))) {
       const [, table, colsRaw, valsRaw, dupRaw] = m;
       const cols = colsRaw.split(',').map((c) => c.trim());
       const vals = splitTop(valsRaw).map((v) => {
         if (v === '?') return p.shift();
         if (/^NOW\(\)$/i.test(v)) return new Date();
+        // 会话到期：`DATE_ADD(NOW(), INTERVAL ? DAY)`（照 `server/auth.js:29` 那条语句）
+        if ((mm = /^DATE_ADD\(NOW\(\),\s*INTERVAL\s+\?\s+DAY\)$/i.exec(v))) return new Date(Date.now() + Number(p.shift()) * 86400000);
         throw new Error('假 pool 不认识的 VALUES 项：' + v);
       });
       const row = {};
@@ -97,37 +118,70 @@ function fakeMysql() {
         e.code = 'ER_DUP_ENTRY';
         throw e;
       }
+      // accounts.username 也是唯一键（`server/db.js` 建表里那句 `username VARCHAR(64) UNIQUE`）
+      if (table === 'accounts' && [...rowsOf(store, table).values()].some((r) => String(r.username).toLowerCase() === String(row.username).toLowerCase())) {
+        const e = new Error(`Duplicate entry '${row.username}' for key 'username'`);
+        e.code = 'ER_DUP_ENTRY';
+        throw e;
+      }
       // 真库的 `DEFAULT NOW()`：假库照做，否则 toRecord 的 created_at/updated_at 映射没人验
       if (!('created_at' in row)) row.created_at = new Date();
       if (!('updated_at' in row)) row.updated_at = new Date();
-      const keyed = table === 'settings';                 // 主键是字符串（skey），其余是自增 id
-      const key = keyed ? row.skey : (store.counters.set(table, (store.counters.get(table) || 0) + 1), store.counters.get(table));
+      // 主键是字符串的表：settings(skey) / sessions(token)；其余是自增 id
+      const keyedCol = { settings: 'skey', sessions: 'token' }[table] || null;
+      const key = keyedCol ? row[keyedCol] : (store.counters.set(table, (store.counters.get(table) || 0) + 1), store.counters.get(table));
       const rows = rowsOf(store, table);
-      if (keyed && rows.has(key)) {
+      if (keyedCol && rows.has(key)) {
+        if (!dupRaw) {   // 主键冲突（sessions.token）：真库抛 ER_DUP_ENTRY，假库照抛
+          const e = new Error(`Duplicate entry '${key}' for key 'PRIMARY'`);
+          e.code = 'ER_DUP_ENTRY';
+          throw e;
+        }
         const cur = rows.get(key);
         for (const item of splitTop(dupRaw)) {
-          const mm = /^(\w+)\s*=\s*(?:VALUES\((\w+)\)|NOW\(\))$/i.exec(item);
-          if (!mm) throw new Error('假 pool 不认识的 ON DUPLICATE 项：' + item);
-          cur[mm[1]] = mm[2] ? row[mm[2]] : new Date();
+          const mm2 = /^(\w+)\s*=\s*(?:VALUES\((\w+)\)|NOW\(\))$/i.exec(item);
+          if (!mm2) throw new Error('假 pool 不认识的 ON DUPLICATE 项：' + item);
+          cur[mm2[1]] = mm2[2] ? row[mm2[2]] : new Date();
         }
         return { insertId: 0, affectedRows: 2 };
       }
-      if (!keyed) row.id = key;
+      if (!keyedCol) row.id = key;
       rows.set(key, row);
-      return { insertId: keyed ? 0 : key, affectedRows: 1 };
+      return { insertId: keyedCol ? 0 : key, affectedRows: 1 };
+    }
+
+    // 会话校验（`server/auth.js:38` 那条 JOIN + 到期判据）：JOIN 与 `expires_at > NOW()` 是语句形状的一部分，
+    // 所以这里按形状分派（本仓既有做法），而不是把 JOIN 拆成两次查询 —— 拆了就不是同一条语义了
+    if ((m = /^SELECT a\.id, a\.username, a\.role FROM sessions s JOIN accounts a ON a\.id=s\.account_id WHERE s\.token=\? AND s\.expires_at > NOW\(\) LIMIT 1$/i.exec(q))) {
+      const token = p.shift();
+      const sess = [...rowsOf(store, 'sessions').values()].find((s) => s.token === token && new Date(s.expires_at).getTime() > Date.now());
+      if (!sess) return [];
+      // 账号表的 Map 键是自增数字，而 account_id 从会话里取出来可能是字符串 ⇒ 两边都按字符串比
+      const acc = [...rowsOf(store, 'accounts').values()].find((a) => String(a.id) === String(sess.account_id)) || null;
+      return acc ? [{ id: acc.id, username: acc.username, role: acc.role }] : [];
+    }
+
+    // DELETE（`server/auth.js:45` 的退出登录）
+    if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\?$/i.exec(q))) {
+      const rows = rowsOf(store, m[1]);
+      let removed = 0;
+      for (const [k, row] of [...rows]) if (row[m[2]] === p[0]) { rows.delete(k); removed++; }
+      return { insertId: 0, affectedRows: removed };
     }
 
     if ((m = /^SELECT (.+?) FROM (\w+)\b(.*)$/i.exec(q))) {
       const [, colsRaw, table] = m;
       let rest = m[3];
       let limit = null; let desc = false; let orderCol = 'id'; let whereRaw = null;
-      let mm;
       if ((mm = /\s+LIMIT (\d+)\s*$/i.exec(rest))) { limit = Number(mm[1]); rest = rest.slice(0, mm.index); }
       if ((mm = /\s+ORDER BY (\w+)( DESC)?\s*$/i.exec(rest))) { orderCol = mm[1]; desc = !!mm[2]; rest = rest.slice(0, mm.index); }
       if ((mm = /^\s+WHERE (.+)$/i.exec(rest))) whereRaw = mm[1];
       else if (rest.trim()) throw new Error('假 pool 不认识的 SELECT 尾巴：' + rest);
       let rows = [...rowsOf(store, table).values()];
       if (whereRaw) { const f = whereOf(whereRaw, p); rows = rows.filter(f); }
+      // COUNT(*) 是聚合：先筛再数（`ORDER BY`/`LIMIT` 在这两条语句里都没有）
+      const cm = /^COUNT\(\*\)\s+(\w+)$/i.exec(colsRaw.trim());
+      if (cm) return [{ [cm[1]]: rows.length }];
       rows.sort((a, b) => (desc ? Number(b[orderCol]) - Number(a[orderCol]) : Number(a[orderCol]) - Number(b[orderCol])));
       if (limit !== null) rows = rows.slice(0, limit);
       const cols = colsRaw.trim() === '*' ? null : colsRaw.split(',').map((c) => c.trim());
@@ -139,7 +193,6 @@ function fakeMysql() {
       // 参数顺序＝语句里的出现顺序：SET 的 `?` 在 WHERE 之前，所以先取 SET 的参数再解析 WHERE
       const assigned = [];
       for (const item of splitTop(setRaw)) {
-        let mm;
         if ((mm = /^(\w+)=\?$/.exec(item))) assigned.push({ col: mm[1], val: p.shift() });
         else if ((mm = /^(\w+)=NOW\(\)$/i.exec(item))) assigned.push({ col: mm[1], val: new Date() });
         else if ((mm = /^(\w+)=\1\+1$/.exec(item))) assigned.push({ col: mm[1], inc: true });
@@ -297,6 +350,106 @@ function contractSuite(label, make, caps) {
     assert.deepEqual(all[1].payload, { tool: 'x' }, 'payload 回读成对象（不是 JSON 字符串）');
     assert.equal(all[0].id, a.id);
     assert.deepEqual((await s.events.read(3, { afterId: a.id, limit: 10 })).map((r) => r.id), [b.id], 'afterId 是增量读的游标');
+  });
+
+  // ── 登录链（2026-09-16 扩）：账号 / 会话 —— 没有 MySQL 的机器要能进门，就得先有这两样 ──────────
+  test(T('账号：建 → 按用户名查（大小写不敏感，对齐 MySQL 默认排序规则）→ 唯一键冲突 → 查不到＝null'), async () => {
+    const { storage: s } = make();
+    assert.equal(await s.accounts.findByUsername('查无此人'), null, '查不到＝null，不是异常');
+    const { id } = await s.accounts.create({ username: 'Alice', passHash: 'h1' });
+    assert.ok(id > 0);
+    const a = await s.accounts.findByUsername('Alice');
+    assert.equal(a.id, id);
+    assert.equal(a.username, 'Alice');
+    assert.equal(a.passHash, 'h1', '登录要拿它比对密码（bcrypt 串）');
+    assert.equal(a.role, 'user', '不给 role＝默认 user（与建表 DEFAULT 同值，两个实现都一样）');
+    const upper = await s.accounts.findByUsername('ALICE');
+    assert.ok(upper && upper.id === id, '大小写不同的用户名也要命中（MySQL 的 utf8mb4 默认排序规则不区分大小写）');
+    await assert.rejects(() => s.accounts.create({ username: 'alice', passHash: 'h2' }),
+      (e) => e.code === 'ER_DUP_ENTRY', 'username 是唯一键：重名必须抛（调用方据此回"用户名已存在"）');
+  });
+
+  test(T('会话：建 → 校验（带账号信息）→ 过期即无效 → 退出登录幂等'), async () => {
+    const { storage: s } = make();
+    const { id: accId } = await s.accounts.create({ username: 'Bob', passHash: 'h', role: 'admin' });
+    await s.sessions.create({ token: 'tok-1', accountId: accId, days: 5 });
+    const who = await s.sessions.findValid('tok-1');
+    assert.deepEqual(who, { id: accId, username: 'Bob', role: 'admin' }, '校验要连账号信息一起取回（requireAuth 就靠它填 req.user）');
+    assert.equal(await s.sessions.findValid('不存在的 token'), null, '查不到＝null');
+    await assert.rejects(() => s.sessions.create({ token: 'tok-1', accountId: accId, days: 5 }),
+      (e) => e.code === 'ER_DUP_ENTRY', 'token 是主键：重复必须抛');
+
+    // 过期：TTL＝0 ⇒ 到期时间就是此刻，`expires_at > NOW()` 不再成立（判据在介质里，不靠调用方比时间）
+    await s.sessions.create({ token: 'tok-expired', accountId: accId, days: 0 });
+    assert.equal(await s.sessions.findValid('tok-expired'), null, '过期的 token 必须当场失效');
+
+    await s.sessions.remove('tok-1');
+    assert.equal(await s.sessions.findValid('tok-1'), null, '退出登录后 token 不再有效');
+    await s.sessions.remove('tok-1');   // 幂等：再删一次不许抛
+    await s.sessions.remove('从没存在过');
+  });
+
+  test(T('会话列表：我的 ∪ 渠道侧无主会话；按账号读会话/改会话不许越界'), async () => {
+    const { storage: s } = make();
+    const mine = await s.conversations.create({ accountId: 11, title: '我的' });
+    const other = await s.conversations.create({ accountId: 22, title: '别人的' });
+    const chan = await s.conversations.create({ accountId: null, channel: 'feishu', title: '渠道侧无主' });
+    await s.conversations.create({ accountId: null, channel: 'web', title: '无主但不是渠道' });
+
+    const list = await s.conversations.listByAccount(11);
+    const ids = list.map((r) => r.id);
+    assert.ok(ids.includes(mine.id), '我自己的会话必须在列表里');
+    assert.ok(ids.includes(chan.id), '渠道侧无主会话（account_id IS NULL 且 channel != web）也在——那是共享会话');
+    assert.equal(ids.includes(other.id), false, '别人的会话不许出现在我的列表里');
+    assert.equal(list.length, 2, '`channel="web" AND account_id IS NULL` 那种不该被带出来（MySQL 里 `channel != "web"` 遇 NULL 不成立）');
+
+    assert.ok(await s.conversations.findOwned(mine.id, 11), '按账号取自己的会话：能取到');
+    assert.equal(await s.conversations.findOwned(mine.id, 22), null, '换个账号就取不到（会话归属是边界）');
+    assert.equal(await s.conversations.findOwned(999999, 11), null, '不存在＝null');
+
+    await s.conversations.updateOwned(other.id, 11, { title: '越界改名' });
+    assert.equal((await s.conversations.get(other.id)).title, '别人的', '不许改到别人的会话');
+    await s.conversations.updateOwned(mine.id, 11, { title: '改名了', permission: 'read' });
+    const after = await s.conversations.get(mine.id);
+    assert.equal(after.title, '改名了');
+    assert.equal(after.permission, 'read');
+    assert.equal(after.accountId, 11, '没改的字段不动');
+
+    const before = (await s.conversations.get(mine.id)).updatedAt;
+    await new Promise((r) => setTimeout(r, 5));   // 让时间戳真的前进（同毫秒内比较会骗人）
+    await s.conversations.touch(mine.id);
+    assert.notEqual((await s.conversations.get(mine.id)).updatedAt, before, 'touch 只推进 updated_at');
+  });
+
+  test(T('消息：最近 N 条（倒序、可按角色筛）+ 计数（可按角色）'), async () => {
+    const { storage: s } = make();
+    for (const [role, content] of [['user', 'u1'], ['assistant', 'a1'], ['user', 'u2'], ['tool', 't1'], ['assistant', 'a2']]) {
+      await s.messages.append({ conversationId: 7, role, content });
+    }
+    await s.messages.append({ conversationId: 8, role: 'user', content: '别的会话' });
+
+    const recent = await s.messages.recent(7, { limit: 3 });
+    assert.deepEqual(recent.map((r) => r.content), ['a2', 't1', 'u2'], '最近 3 条、最新在前（与调用点的 ORDER BY id DESC 同向）');
+    const clean = await s.messages.recent(7, { limit: 2, roles: ['user', 'assistant'] });
+    assert.deepEqual(clean.map((r) => r.content), ['a2', 'u2'], 'roles 过滤：tool 那条不进"干净历史"');
+    assert.equal((await s.messages.recent(7, {})).length, 5, '不给 limit＝全量（默认值属于调用方）');
+    assert.deepEqual((await s.messages.recent(999, {})), [], '没有消息＝空数组');
+
+    assert.equal(await s.messages.count(7), 5, '整会话条数');
+    assert.equal(await s.messages.count(7, { role: 'user' }), 2, '按角色计数（轮次就是这么数的）');
+    assert.equal(await s.messages.count(999), 0, '空会话＝0（COUNT 恒有行，不许是 null/undefined）');
+  });
+
+  test(T('设置：全量读 + 按键批量读（缺的键不补 null）'), async () => {
+    const { storage: s } = make();
+    await s.settings.set('guard_a', 1);
+    await s.settings.set('guard_b', { nested: true });
+    const all = await s.settings.all();
+    assert.equal(all.guard_a, 1);
+    assert.deepEqual(all.guard_b, { nested: true }, '值按 JSON 解析回来（不是字符串）');
+    const many = await s.settings.getMany(['guard_a', '没有这个键']);
+    assert.deepEqual(many, { guard_a: 1 }, '只回存在的键（调用方按"没这个键"兜默认值）');
+    assert.deepEqual(await s.settings.getMany([]), {}, '空集合不查库，也不许炸');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {
@@ -457,6 +610,22 @@ test('[jsonfile] 换一个实例读同一个文件：数据还在（重启不掉
   await createJsonFileStorage({ file }).messages.append({ conversationId: 1, role: 'user', content: '重启前' });
   const second = createJsonFileStorage({ file });
   assert.deepEqual((await second.messages.list(1, 10)).map((r) => r.content), ['重启前']);
+});
+
+test('[jsonfile] 落盘后重启：账号与会话都读得回来（"干净机器跑通一次对话"的第一步就是登录）', async () => {
+  const file = tmpFile('login-restart');
+  const first = createJsonFileStorage({ file });
+  const { id: accId } = await first.accounts.create({ username: 'Carol', passHash: 'h', role: 'admin' });
+  await first.sessions.create({ token: 'tok-restart', accountId: accId, days: 5 });
+  await first.conversations.create({ accountId: accId, title: '重启前的会话' });
+
+  const second = createJsonFileStorage({ file });   // 新实例 ＝ 重启（内存态没了，只剩文件）
+  const acc = await second.accounts.findByUsername('Carol');
+  assert.equal(acc.id, accId, '账号要从文件里读回来（否则重启后没人登得进来）');
+  assert.equal(acc.passHash, 'h', '密码散列要一并读回（登录要拿它比对）');
+  assert.deepEqual(await second.sessions.findValid('tok-restart'), { id: accId, username: 'Carol', role: 'admin' },
+    '没到期的会话重启后仍然有效（否则每次重启都要重新登录）');
+  assert.deepEqual((await second.conversations.listByAccount(accId)).map((r) => r.title), ['重启前的会话']);
 });
 
 test('[jsonfile] 文件版本不认识 ⇒ 显式拒绝（不许当空库继续跑）', async () => {

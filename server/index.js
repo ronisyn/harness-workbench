@@ -43,11 +43,14 @@ import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
 import { autoTitle } from './autotitle.js';
 import { decideApproval, listPending } from './approval.js';
+import { attachCardRoutes } from './cards.js'; // 待答卡片的路由事实（属于哪个会话、在哪一端等回答）
+import { registerTurn, releaseTurn, stopTurn } from './turns.js'; // 轮次的**唯一登记处**（GUI 与渠道同一处）
+import { replayConversation, MESSAGES_SQL } from './replay.js'; // 无 SSE 调用方的只读回放（`?events=1`）+ 消息读的唯一 SQL
 import { takeRestart, isRestartScheduled, markRestartScheduled, restartPlan } from './restart.js';
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
-import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR, RW_VERSION } from './env.js';
 import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
 import { STORAGE_UNSUPPORTED } from './storage/index.js'; // v0.3 §7.1 ⑦：存储实现"能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）
@@ -64,8 +67,9 @@ app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = 
 process.on('unhandledRejection', (reason) => console.error('[rw] unhandledRejection:', reason instanceof Error ? (reason.stack || reason.message) : reason));
 process.on('uncaughtException', (err) => console.error('[rw] uncaughtException:', err && (err.stack || err.message)));
 
-// 运行中 Agent 的中止表（前端"停止生成"→ POST /api/chat/stop 取消当前轮）
-const abortMap = new Map(); // key = accountId:conversationId → AbortController
+// 运行中 Agent 的中止表已收进 `server/turns.js`（**唯一登记处**：`/api/chat` 与渠道轮次都登记在那里，
+// 所以 `POST /api/chat/stop` 才停得了渠道会话）。这里**不再留第二份** —— 两份登记正是"渠道会话停不了"
+// 的成因（契约 §7 记的那一条）。停止一律走 `stopTurn`。
 // 每账号并发对话计数（能力"并发限制"：默认同账号最多 3 条对话同时在跑）
 const inflight = new Map(); // accountId → count
 
@@ -391,7 +395,7 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
   // 孤儿防护（终审）：先中止该会话仍在执行的 agent（SSE 断连 abort 已发、但收尾落库可能与删除并发）——
   // 中止后 agent 收尾走 stopped 路径，配合落库前会话存在校验（原子 INSERT…SELECT WHERE EXISTS），杜绝"先删后写"孤儿
-  try { const actrl = abortMap.get(req.user.id + ':' + req.params.id); if (actrl) actrl.abort('delete'); } catch { /* 忽略 */ }
+  try { stopTurn({ conversationId: req.params.id, accountId: req.user.id, reason: 'delete' }); } catch { /* 忽略 */ }
   // 先删 conversations 行再清子表：会话行消失即向并发迟到写"关门"（存在校验即刻为假），随后子表删除按 id 全清
   await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
   clearReadCache(req.params.id); // RA-35 措施②：重复读去重状态随会话一起清掉（不长期占内存）
@@ -405,12 +409,21 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// RA-37 G5 续订（无 SSE 的那一端）：`?events=1` 时**追加**返回事件账本（只读回放，重建现场用）。
+// 渠道（飞书/微信）没有长连接，`/stream` 那条路对它们不存在；而"按会话读事件"的归属判据与消息那条**同一条**
+// （本人 或 渠道共享会话），所以挂在既有端点上，不另开一条（判据抄第二遍就是第二个出处）。
+// 默认响应**逐字节不变**（不带 `events` 字段）：老调用方看不见新东西。`afterId` 是增量游标（账本行 id）。
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   // P0 归属校验：本人 或 渠道共享会话(account_id NULL 且非 web)——与会话列表口径一致，防枚举他人会话读消息
   const own = (await db.query('SELECT id FROM conversations WHERE id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))', [req.params.id, req.user.id]))[0];
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
-  const rows = await db.query('SELECT id, role, content, reasoning, model, provider, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
-  res.json({ ok: true, messages: rows });
+  const withEvents = String(req.query.events ?? '') !== '' && String(req.query.events ?? '') !== '0';
+  if (!withEvents) {
+    const rows = await db.query(MESSAGES_SQL, [req.params.id]);
+    return res.json({ ok: true, messages: rows });
+  }
+  const scene = await replayConversation(req.params.id, { afterId: req.query.afterId, db });
+  res.json({ ok: true, messages: scene.messages, events: scene.events });
 });
 
 // 对话导出（P26 机器可读导出：messages+tool_calls 逐行 JSONL，可回放/审计/迁移）
@@ -1135,9 +1148,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 以 id>teleBase 的新增 usage_stats 行为本执行真实消耗；无消耗（护栏前置拦截）不落空行；
   // 会话已删（并发删除）时 EXISTS 守卫 → 不插孤儿。异常路径也调用（原先仅成功分支落表 → execs/成本口径不一致）。
   let recordTelemetry = null;
-  const akey = req.user.id + ':' + conversationId;
   const actrl = new AbortController();
-  abortMap.set(akey, actrl);
+  // 轮次登记：与渠道轮次（`server/channels/run-turn.js`）**同一处**（`server/turns.js`）——
+  // 这是"`POST /api/chat/stop` 能停任意一端"的前提；`channel:'web'` 让归属判据分得清 GUI 与渠道。
+  registerTurn({ conversationId, controller: actrl, accountId: req.user.id, channel: 'web', kind: 'chat' });
   // SSE 断连即中止：客户端关页/断网 → Agent 停止继续（避免无人监听的循环烧 token/改动服务器）
   // 2026-09 中断原因区分：abort(reason) 传 'user'(点停止按钮) / 'disconnect'(断连)，收尾时据此标记 run 与占位消息
   const onDisconnect = () => actrl.abort('disconnect');
@@ -1311,7 +1325,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         } catch { /* 忽略 */ }
       }
       if (runOutcome.stopped) {
-        // 用户点击停止：不落 assistant/统计，但不再提前 return（避免泄漏 inflight/abortMap）
+        // 用户点击停止：不落 assistant/统计，但不再提前 return（避免泄漏 inflight/轮次登记）
         send({ type: 'stopped' });
         skipStore = true;
       }
@@ -1439,7 +1453,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
   }
-  if (abortMap.get(akey) === actrl) abortMap.delete(akey);
+  releaseTurn(conversationId, actrl); // 注销本轮登记（只在还是自己那一轮时清理，见 server/turns.js）
   // 释放并发槽位
   inflight.set(req.user.id, Math.max(0, (inflight.get(req.user.id) || 1) - 1));
   clearActivity(conversationId); // 本轮事件环收尾（正常/异常/停止统一清理）
@@ -1676,9 +1690,12 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
 });
 
 // ---------- 结构化问询裁决（ask_user 卡片） ----------
+// 列表带上"属于哪个会话、在哪一端等回答"（跨端一致：渠道里发起的问询，人在渠道里也答得上）。
+// `POST /api/asks/:id` 这一条**不动**：渠道侧的回答走的就是它调的同一个 `decideAsk`（见 server/cards.js），
+// 不另造问答 API。
 app.get('/api/asks', requireAuth, async (req, res) => {
   const { listPendingAsks } = await import('./asks.js');
-  res.json({ ok: true, pending: listPendingAsks() });
+  res.json({ ok: true, pending: await attachCardRoutes(listPendingAsks()) });
 });
 app.post('/api/asks/:id', requireAuth, async (req, res) => {
   const { option } = req.body || {};
@@ -1692,15 +1709,18 @@ app.post('/api/asks/:id', requireAuth, async (req, res) => {
 });
 
 // ---------- 停止生成（服务端取消运行中的 Agent 轮） ----------
+// 唯一停止入口：GUI 与渠道（飞书/微信）的轮次都登记在 `server/turns.js` 的同一张表里，所以这里
+// **停得了渠道会话**（改前它读的是本文件的私有 abortMap，键含账号 ⇒ 渠道会话 account_id 为 NULL 时查不到）。
+// `stopped` 是"本次调用真的中止了一个在跑的轮次"：没在跑/已结束/不属于你/已经在停 ⇒ false（不假装停成功）。
 app.post('/api/chat/stop', requireAuth, (req, res) => {
   const { conversationId } = req.body || {};
-  const c = conversationId ? abortMap.get(req.user.id + ':' + conversationId) : null;
-  if (c) c.abort('user'); // 2026-09：区分用户主动停止(user) 与 SSE 断连(disconnect)
-  res.json({ ok: true, stopped: Boolean(c) });
+  const stopped = conversationId ? stopTurn({ conversationId, accountId: req.user.id, reason: 'user' }) : false;
+  res.json({ ok: true, stopped });
 });
 
 // ---------- 审批（F20：guard 会话高风险工具需用户确认） ----------
-app.get('/api/approvals', requireAuth, (req, res) => res.json({ ok: true, pending: listPending() }));
+// 与 `/api/asks` 同款：带上会话与渠道标识（裁决入口仍是下面那条 `POST /api/approvals/:id`，只有一条）。
+app.get('/api/approvals', requireAuth, async (req, res) => res.json({ ok: true, pending: await attachCardRoutes(listPending()) }));
 app.post('/api/approvals/:id', requireAuth, async (req, res) => {
   const { decision } = req.body || {};
   if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ ok: false, message: 'decision=approve|reject' });
@@ -2075,8 +2095,10 @@ app.get('/api/evo/summary', requireAuth, async (req, res) => {
 });
 
 // ---------- 健康检查（Agent 自开发演示产物，RW 自我开发闭环验证） ----------
+// version 来自 package.json 的**唯一出处**（server/env.js 的 RW_VERSION）：v0.3 §4.1「有版本号与变更说明」要求
+// 版本号在对外面上可见——健康检查是运维最先打的那个口，缺了它排障时只能去翻代码。
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, service: 'rw', ts: Date.now() });
+  res.json({ ok: true, service: 'rw', version: RW_VERSION, ts: Date.now() });
 });
 
 // ---------- 任务契约（外部驱动器）API ----------
@@ -2961,7 +2983,7 @@ async function main() {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);
     // 一行环境事实：客户机上排障最常见的问题是"它到底在看哪个目录/用哪个 shell/听哪个端口"——
     // 这些都由 env.js 推导，把它们打出来，比让人去反推要快得多（也顺带证明推导结果与预期一致）。
-    console.log(`[RW] 环境: os=${RW_OS_CN} shell=${SHELL_CN} 平台=${RW_PLATFORM_DIR} 工作区=${RW_WORKSPACE} 任务日志=${RW_JOBS_DIR} 重启方式=${restartPlan().how}`);
+    console.log(`[RW] 环境: 版本=${RW_VERSION} os=${RW_OS_CN} shell=${SHELL_CN} 平台=${RW_PLATFORM_DIR} 工作区=${RW_WORKSPACE} 任务日志=${RW_JOBS_DIR} 重启方式=${restartPlan().how}`);
   });
   // 统一兜底 async 处理器的 rejection（必须在**所有路由注册之后**做，否则后面注册的路由包不上）
   console.log('[RW] async 处理器兜底已装配：' + wrapAsyncHandlers(app) + ' 个处理器（出错走 500，不再挂住请求）');

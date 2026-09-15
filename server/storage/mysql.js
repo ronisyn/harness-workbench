@@ -19,9 +19,13 @@ const IMPL = 'mysql';
 
 /** 中性字段名 → 列名。表名也在这里（接口层因此完全不含表/列名）。 */
 const COLS = {
+  // 登录链（2026-09-16 扩）：列名与 `server/auth.js` 那几条查询逐字对应
+  accounts: { username: 'username', passHash: 'pass_hash', role: 'role' },
+  sessions: { token: 'token', accountId: 'account_id', expiresAt: 'expires_at' },
   conversations: {
     accountId: 'account_id', channel: 'channel', permission: 'permission', preset: 'preset', mode: 'mode',
     project: 'project', title: 'title', provider: 'provider', model: 'model', shellId: 'shell_id',
+    faceFull: 'face_full',
   },
   messages: {
     conversationId: 'conversation_id', role: 'role', content: 'content', reasoning: 'reasoning',
@@ -45,7 +49,7 @@ const COLS = {
 };
 const TABLES = {
   conversations: 'conversations', messages: 'messages', toolCalls: 'tool_calls', settings: 'settings',
-  agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries',
+  agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries', accounts: 'accounts', sessions: 'sessions',
 };
 /** JSON 列：写时 stringify、读时 parse（MySQL 的 JSON 列在新旧驱动下有时给对象、有时给字符串）。 */
 const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 'svalue']);
@@ -58,7 +62,9 @@ const dec = (col, v) => (v === null || v === undefined ? v : (JSON_COLS.has(col)
 /** 行 → 中性记录（只映射契约里声明过的字段；调用方不该认识列名）。 */
 function toRecord(entity, row, { at = false } = {}) {
   if (!row) return null;
-  const out = { id: row.id };
+  const out = {};
+  // `sessions` 的主键是 token（没有 id 列）—— 所以 id 只在这一列真的存在时才带上
+  if (Object.prototype.hasOwnProperty.call(row, 'id')) out.id = row.id;
   for (const [key, col] of Object.entries(COLS[entity])) {
     if (Object.prototype.hasOwnProperty.call(row, col)) out[key] = dec(col, row[col]);
   }
@@ -156,6 +162,33 @@ function makeApi(r) {
         const { sql, params } = patchOf('conversations', patch);
         await r.exec(`UPDATE conversations SET ${sql} WHERE id=?`, [...params, id]);
       },
+      /** 按 id **且按账号**取（`server/index.js:762` 那条：会话归属是边界，不是过滤偏好）。 */
+      async findOwned(id, accountId) {
+        return toRecord('conversations', await r.one('SELECT * FROM conversations WHERE id=? AND account_id=? LIMIT 1', [id, accountId]));
+      },
+      /**
+       * 会话列表：`server/index.js:321` 那条，逐字保留它的条件 ——
+       * "我的会话" ∪ "渠道侧无主会话（`channel != 'web' AND account_id IS NULL`，飞书/微信那些共享会话）"。
+       * 注意：原查询还 `LEFT JOIN shells` 取 shell_key/shell_name（列表页的展示字段）；`shells` 不在本次
+       * 接口范围内，这里不含它 —— 阶段 2 接线时那两个字段要么单独补读，要么把 shells 也纳入接口。
+       */
+      async listByAccount(accountId) {
+        const rows = await r.many(
+          'SELECT * FROM conversations WHERE account_id=? OR (channel != "web" AND account_id IS NULL) ORDER BY updated_at DESC',
+          [accountId]);
+        return rows.map((row) => toRecord('conversations', row));
+      },
+      /** 账号范围内的更新（`server/index.js:373`/`autotitle.js:44` 都是 `WHERE id=? AND account_id=?`）。 */
+      async updateOwned(id, accountId, patch) {
+        assertFields('conversations', patch, { partial: true });
+        if (!Object.keys(patch).length) return;
+        const { sql, params } = patchOf('conversations', patch);
+        await r.exec(`UPDATE conversations SET ${sql} WHERE id=? AND account_id=?`, [...params, id, accountId]);
+      },
+      /** 只推进 updated_at（`server/index.js:889` 那条：落了一条消息之后"这个会话刚动过"）。 */
+      async touch(id) {
+        await r.exec('UPDATE conversations SET updated_at=NOW() WHERE id=?', [id]);
+      },
     },
 
     messages: {
@@ -167,6 +200,27 @@ function makeApi(r) {
       async list(conversationId, limit) {
         const rows = await r.many(`SELECT * FROM messages WHERE conversation_id=? ORDER BY id${limitClause(limit)}`, [conversationId]);
         return rows.map((row) => toRecord('messages', row));
+      },
+      /**
+       * 最近 N 条（**倒序**，与调用点的 SQL 一致）：`autotitle.js:11`（只要 user/assistant，12 条）、
+       * `server/tools/index.js:1327`（不过滤角色，300 条）。`roles` 给了就下推成 `role IN (...)`。
+       */
+      async recent(conversationId, { limit, roles = null } = {}) {
+        const params = [conversationId];
+        let where = 'conversation_id=?';
+        if (Array.isArray(roles) && roles.length) {
+          where += ` AND role IN (${roles.map(() => '?').join(',')})`;
+          params.push(...roles);
+        }
+        const rows = await r.many(`SELECT * FROM messages WHERE ${where} ORDER BY id DESC${limitClause(limit)}`, params);
+        return rows.map((row) => toRecord('messages', row));
+      },
+      /** 条数（`server/index.js:1460` 数用户轮次、`server/tools/index.js:1329` 数整会话）。role 可选。 */
+      async count(conversationId, { role = null } = {}) {
+        const where = role ? 'conversation_id=? AND role=?' : 'conversation_id=?';
+        const params = role ? [conversationId, role] : [conversationId];
+        const row = await r.one(`SELECT COUNT(*) c FROM messages WHERE ${where}`, params);
+        return Number((row && row.c) || 0);
       },
     },
 
@@ -189,6 +243,64 @@ function makeApi(r) {
           'INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()',
           [key, JSON.stringify(value)],
         );
+      },
+      /** 全量设置（`server/index.js:1745` 的设置页读取）→ `{skey: value}`（值按 JSON 解析回来）。 */
+      async all() {
+        const rows = await r.many('SELECT skey, svalue FROM settings');
+        return Object.fromEntries(rows.map((row) => [row.skey, dec('svalue', row.svalue)]));
+      },
+      /**
+       * 按键批量读（`server/agent.js:173` 一次取 17 个护栏键、`server/tools/hooks.js:465` 取策略键）
+       * —— 存在的键才出现在返回对象里，缺的**不补 null**（调用方本来就按"没这个键"兜默认值）。
+       * 空数组＝不查（`IN ()` 是非法 SQL；也不需要为了空集合跑一趟）。
+       */
+      async getMany(keys) {
+        const list = Array.isArray(keys) ? keys.filter((k) => k !== undefined && k !== null) : [];
+        if (!list.length) return {};
+        const rows = await r.many(`SELECT skey, svalue FROM settings WHERE skey IN (${list.map(() => '?').join(',')})`, list);
+        return Object.fromEntries(rows.map((row) => [row.skey, dec('svalue', row.svalue)]));
+      },
+    },
+
+    // ── 登录链：账号（`server/auth.js:15/17/23/57/59` 五条查询）──────────────────────────────────
+    accounts: {
+      /** `SELECT … FROM accounts WHERE username=?`：login / ensureAdmin / 注册查重都用它（username 有唯一键）。 */
+      async findByUsername(username) {
+        return toRecord('accounts', await r.one('SELECT * FROM accounts WHERE username=? LIMIT 1', [username]));
+      },
+      /** 建账号（`auth.js:17` 管理员、`auth.js:59` 普通账号）：username 唯一键冲突即抛（照 MySQL 的形状）。 */
+      async create(fields) {
+        assertFields('accounts', fields);
+        // role 显式补默认值（与建表那句 `role VARCHAR(16) DEFAULT 'user'` 同值）：不靠库默认值，
+        // 两个实现才可能逐字一致（jsonfile 没有"表默认值"这种东西）
+        const { sql, params } = insertOf('accounts', { role: 'user', ...fields });
+        return { id: (await r.exec(sql, params)).insertId };
+      },
+    },
+
+    // ── 登录链：会话（`server/auth.js:29/38/45` 三条查询）────────────────────────────────────────
+    sessions: {
+      /**
+       * 建会话（与 `auth.js:29` 逐字同形）：**到期时间由介质算** —— MySQL 用库的 `NOW()`（应用与库的时钟
+       * 可能不一致，这一点是本仓既有取舍，见 eventlog 归档那条"阈值用库的 NOW() 比较"）。
+       */
+      async create({ token, accountId, days }) {
+        await r.exec('INSERT INTO sessions (token, account_id, created_at, expires_at) VALUES (?,?,NOW(),DATE_ADD(NOW(), INTERVAL ? DAY))',
+          [token, accountId, days]);
+      },
+      /**
+       * 校验并取回账号（`auth.js:38` 那条 JOIN，逐字同形）：**过期条件在 SQL 里**（`expires_at > NOW()`），
+       * 所以"过期"这个判据只有一处、且用的是库的时钟。查不到/已过期都返回 null（调用方据此回 401 TOKEN_EXPIRED）。
+       */
+      async findValid(token) {
+        const row = await r.one(
+          'SELECT a.id, a.username, a.role FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=? AND s.expires_at > NOW() LIMIT 1',
+          [token]);
+        return row ? { id: row.id, username: row.username, role: row.role } : null;
+      },
+      /** 退出登录（`auth.js:45`）。幂等：token 不存在＝什么都不做（DELETE 影响 0 行）。 */
+      async remove(token) {
+        await r.exec('DELETE FROM sessions WHERE token=?', [token]);
       },
     },
 

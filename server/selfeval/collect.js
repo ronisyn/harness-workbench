@@ -248,7 +248,12 @@ export async function collectCanary({ dbc = db, checks = null } = {}) {
   }
   // canary:run 最近一次账本行（`server/canary.js` 的调用方落 audit_log）
   const last = await sel(dbc, "SELECT created_at at, detail FROM audit_log WHERE action='canary:run' ORDER BY id DESC LIMIT 1");
-  return { available: true, shells: out, goldenSets: goldenSetIdentities(shells), lastRun: failed(last) ? null : (last[0] || null) };
+  // 金标集身份**从逐壳读数出**（`out` 的各项带 `ref`），不是从上面的 DB 行出：
+  // DB 行的字段名是 `eval_ref`，而 `goldenSetIdentities` 读的是 `s.ref` —— 传错字段会让这 65 条读数
+  // 全部落进 `{ref: undefined, exists:false, count:0}`，于是同一份报告里 `metrics.canary.goldenSets`
+  // 恒报"金标不存在"，而顶层 `golden`（同一批壳、同一套金标）报 `code@<sha>(9条)` —— 自相矛盾。
+  // 两处形状对齐的依据在 `scripts/metrics-report.mjs`：那边也是 `shells.map(s => ({ ref: s.ref }))`。
+  return { available: true, shells: out, goldenSets: goldenSetIdentities(out.map((s) => ({ ref: s.ref }))), lastRun: failed(last) ? null : (last[0] || null) };
 }
 
 /**

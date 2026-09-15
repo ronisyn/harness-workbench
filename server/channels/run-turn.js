@@ -33,6 +33,7 @@ import { db as realDb } from '../db.js';
 import { persistEvent as realPersistEvent } from '../eventlog.js';
 import { beginDelivery, finishDelivery } from '../deliveries.js';
 import { ensureRun, markRun, resumeHint } from '../runtrack.js';
+import { registerTurn, releaseTurn, activeTurns, stopTurn } from '../turns.js';
 import { config } from '../config.js';
 import { findProvider, PROVIDERS } from '../llm/providers.js';
 import { fail } from '../failures.js';
@@ -43,28 +44,30 @@ import { RW_WORKSPACE } from '../env.js';
 const PLATFORM_FALLBACK_PROVIDER = 'deepseek';
 const PLATFORM_FALLBACK_MODEL = (PROVIDERS.find((p) => p.id === PLATFORM_FALLBACK_PROVIDER) || {}).defaultModel || 'deepseek-v4-flash';
 
-// ── 「可停」的最小实现（进程内，与 DSH 的 fire-and-forget 同寿命）──────────────────────────────
-// 一个渠道轮次 = 一个 AbortController；abort 的原因走 signal.reason，与 /api/chat 的 'user' 同一口径。
-// 边界如实写在契约文档里：**进程重启即失去中止能力**（activeTurns 是内存 Map），且本轮**没有**
-// HTTP 停止入口——`POST /api/chat/stop` 读的是 `server/index.js` 的私有 abortMap（键 = `accountId:conversationId`，
-// 渠道会话的 account_id 为 NULL），本文件按"外科手术式改动"的约束不去改它，故渠道会话的
-// "点停止"入口留待接线（见契约文档「已知限制」）。
-const activeTurns = new Map(); // conversationId → { controller, channel, startedAt }
+// ── 「可停」：登记收进共享登记表（2026-09-16 收口）───────────────────────────────────────────────
+// 改前这里有一份**私有**的 `activeTurns` Map（键 conversationId），与 `server/index.js` 的私有 `abortMap`
+// （键 `accountId:conversationId`）互相看不见 ⇒ 渠道会话在 HTTP 面**停不了**（`POST /api/chat/stop` 只认后者，
+// 而渠道会话的 account_id 是 NULL，含账号的键永远查不到）。现在两处都登记在 `server/turns.js`：
+// **一个轮次只有一个登记处**，`stopTurn` 是唯一的中止入口，渠道会话因此停得下来。
+// 下面两个导出保持原样（`test/channel-turn.test.mjs` 锁着它们的返回形状与 true/false 语义），
+// 它们现在是共享登记表的**渠道视图**。
 
 /** 运行中的渠道轮次（诊断/自检用；只读快照） */
 export function activeChannelTurns() {
-  return [...activeTurns.entries()].map(([conversationId, t]) => ({ conversationId, channel: t.channel, startedAt: t.startedAt }));
+  return activeTurns()
+    .filter((t) => t.channel && t.channel !== 'web')
+    .map((t) => ({ conversationId: t.conversationId, channel: t.channel, startedAt: t.startedAt }));
 }
 
 /**
- * 中止指定会话正在跑的那一轮（渠道会话"停止"的**进程内**入口）。
- * @returns {boolean} 是否真的找到并中止了一个在跑的轮次（没找到不算错——轮次可能刚好跑完）。
+ * 中止指定会话正在跑的那一轮（渠道会话"停止"的**进程内**入口；HTTP 面走 `POST /api/chat/stop` → `stopTurn`，
+ * 两者现在是同一张表、同一个中止动作）。
+ * @returns {boolean} 是否真的找到并中止了一个在跑的渠道轮次（没找到不算错——轮次可能刚好跑完）
  */
 export function abortChannelTurn(conversationId, reason = 'user') {
-  const t = activeTurns.get(conversationId);
+  const t = activeChannelTurns().find((x) => String(x.conversationId) === String(conversationId));
   if (!t) return false;
-  t.controller.abort(reason);
-  return true;
+  return stopTurn({ conversationId, reason });
 }
 
 // ── 模型解析：渠道**不硬编码模型** ────────────────────────────────────────────────────────────
@@ -112,6 +115,7 @@ export async function runChannelTurn({ channel, conversationId, text, permission
     keys = config.keys, RW_WORKSPACE: workspace = RW_WORKSPACE,
     beginDelivery: begin = beginDelivery, finishDelivery: finish = finishDelivery,
     ensureRun: ensure = ensureRun, markRun: mark = markRun, resumeHint: hintOf = resumeHint,
+    onCard = null,
     now = () => Date.now(),
   } = deps;
   const t0 = now();
@@ -141,7 +145,20 @@ export async function runChannelTurn({ channel, conversationId, text, permission
     console.warn('[channel-turn] 投递记录建行失败（不影响本轮执行）：' + ((e && e.message) || e));
   }
 
-  const ev = (obj) => { try { persistEvent(conversationId, obj); } catch { /* 账本异常不影响对话（与 /api/chat 的 send 同口径） */ } };
+  const ev = (obj) => {
+    try { persistEvent(conversationId, obj); } catch { /* 账本异常不影响对话（与 /api/chat 的 send 同口径） */ }
+    // 卡片（审批/问询）必须**发到人所在的端**：渠道没有 SSE，只落账本的话人在渠道里根本看不到它，
+    // 也就无从回答。出口由适配器给（只有它知道往哪个会话 id 发），这里只负责把事件转过去；
+    // 发失败如实出声、不影响本轮（与"落账失败不阻断"同一条纪律）。刻意不 await：emit 是同步契约。
+    if (onCard && obj && (obj.type === 'ask' || obj.type === 'approval')) {
+      try {
+        const r = onCard(obj);
+        if (r && typeof r.catch === 'function') r.catch((e) => console.warn('[channel-turn] 卡片投递失败（' + channel + ' conv=' + conversationId + '）：' + String((e && e.message) || e)));
+      } catch (e) {
+        console.warn('[channel-turn] 卡片投递失败（' + channel + ' conv=' + conversationId + '）：' + String((e && e.message) || e));
+      }
+    }
+  };
   // 用户消息先落库：与 /api/chat 同序（"用户说了什么"必须在账上，哪怕引擎随后就挂）
   await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', String(text)]);
   // 历史：**只追加、不滑窗**（v0.3 §4.4.1 规则1）——2026-09-16 核对报告 §3.5③ 已把 /api/chat 的滑窗删掉；
@@ -172,7 +189,9 @@ export async function runChannelTurn({ channel, conversationId, text, permission
   ev({ type: 'run_start', v: 1, conversationId, runId, channel, provider, model, permission: perm });
 
   const controller = new AbortController();
-  activeTurns.set(conversationId, { controller, channel, startedAt: t0 });
+  // 登记进**共享**轮次表（`server/turns.js`）：HTTP 的 `POST /api/chat/stop` 与进程内 `abortChannelTurn`
+  // 从此是同一张表上的同一个动作。`accountId` 如实取会话行的值（渠道会话是 NULL —— 键不依赖它）。
+  registerTurn({ conversationId, controller, accountId: conv.account_id ?? null, channel, kind: 'channel', startedAt: t0 });
   const ctx = {
     permission: perm, accountId: conv.account_id ?? null, conversationId, root: workspace,
     __signal: controller.signal, __runId: runId, __light: false,
@@ -255,9 +274,8 @@ export async function runChannelTurn({ channel, conversationId, text, permission
     await finish(deliveryId, { state: 'failed', runId, error: message, errorCode: 'INTERNAL' });
     return buildResult({ ok: false, status: 'error', channel, conversationId, runId, messageId: null, content: '', provider, model, usage: {}, outcome: null, error: fail('INTERNAL', message), durationMs: now() - t0 });
   } finally {
-    // 只在"还是自己那一轮"时清理（同一会话并发两轮时，不该互相把对方的现场抹掉）
-    const cur = activeTurns.get(conversationId);
-    if (cur && cur.controller === controller) activeTurns.delete(conversationId);
+    // 注销本轮登记（`releaseTurn` 内部只在"还是自己那一轮"时清理：同会话并发两轮时不互相抹现场）
+    releaseTurn(conversationId, controller);
   }
 }
 

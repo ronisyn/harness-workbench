@@ -20,8 +20,13 @@
 // 工具面只放三个：跑一轮对话 / 查一次状态 / 导出会话。**不把平台内部 90+ 个模型工具搬出去**——
 // 那是我们自己的 agent 的工具（含写盘、执行命令），不是给外部调用方的接口；对外只暴露"平台能力"这一层。
 import { PROTOCOL_VERSION as CLIENT_PROTOCOL } from './mcp-version.js';
+import { RW_VERSION } from './env.js';
 
-export const SERVER_INFO = { name: 'rw-platform', version: '1' };
+// serverInfo.version = **平台版本**（v0.3 §4.1 运行面"有版本号"）。
+// 为什么不是原来那个字面量 '1'：那是 MCP 协议版本的意思，可这一格是"我是哪一版平台"，
+// 客户端（含官方 Inspector）据此判断对面是不是它以为的那个 build——写死一个与 package.json 无关的
+// 常量，等于握手时说了个没人维护的号（`/api/health` 就一直没报版本）。此处转引 env.js 的单一出处。
+export const SERVER_INFO = { name: 'rw-platform', version: RW_VERSION };
 // 与客户端握手用的版本保持一致（server/mcp.js:97 发的就是它）——服务端"回声"客户端版本是规范允许的做法
 export const PROTOCOL_VERSION = CLIENT_PROTOCOL;
 

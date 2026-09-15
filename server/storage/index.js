@@ -29,6 +29,13 @@
 // 外加本轮做示范迁移的 `deliveries`（它**不是**引擎必需 ⇒ `jsonfile.js` 对它显式抛"不支持"，
 // 这就是那个"禁止静默降级"的活样本）。其余实体（市场/计量/进化集/壳……）**暂不进接口**：
 // 没有第二个实现要用它们，先加进来就是预造 ORM（不做的范围见 v0.3 §0.6）。
+//
+// 2026-09-16 扩到**登录链**（`accounts`/`sessions` + 会话/消息/设置的按账号读法）：M1 出口是
+// "干净机器 + 一份配置 → 跑通一次对话 + 一次工具调用"，而在此之前**登录本身**就要 `accounts`/`sessions`
+// 两张表 ⇒ 一台没有 MySQL 的机器连门都进不去，`RW_STORAGE` 这个开关等于形同虚设。
+// 这次加的方法**全部**来自"调用方真的在用的查询"（`server/auth.js` 的 6 条 + `server/index.js` 的会话/消息/设置
+// 那几条，逐条写在方法注释里），不是照着"一张表该有什么动词"想出来的；也**没有**改动任何既有方法的签名
+// （`events`/`deliveries`/`conversations.get` 等一字未动，新动词一律新名字）。
 import { RW_STORAGE } from '../env.js';
 import { createMysqlStorage } from './mysql.js';
 import { createJsonFileStorage } from './jsonfile.js';
@@ -60,12 +67,18 @@ export const CONTRACT = {
   verbs: ['one', 'run', 'query', 'tx'],
   entities: {
     // 引擎必需（v0.3 符合性核对 §2.1 第 2 条点名的六类）
-    conversations: ['create', 'get', 'update'],
-    messages: ['append', 'list'],
+    // conversations/messages/settings 上带 Owned/ByAccount 后缀的那几个是**按账号收口**的读法：
+    // 它们对应 `server/index.js` 里本来就带 `account_id=?` 的查询（:321/:373/:762），不是新发明的边界
+    // —— 接口上不留"不带账号"的读法，就不会有人把 D3/OP-01 那条边界漏掉（上一轮的 `/api/deliveries` 就是这么漏的）。
+    conversations: ['create', 'get', 'update', 'findOwned', 'listByAccount', 'updateOwned', 'touch'],
+    messages: ['append', 'list', 'recent', 'count'],
     toolCalls: ['append'],
-    settings: ['get', 'set'],
+    settings: ['get', 'set', 'all', 'getMany'],
     agentRuns: ['create', 'getLatest', 'update'],
     events: ['append', 'read'],
+    // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
+    accounts: ['findByUsername', 'create'],
+    sessions: ['create', 'findValid', 'remove'],
     // 非必需：本轮示范迁移的第七个实体（`jsonfile.js` 对它显式抛"不支持"）
     // `list` 另接受**可选**的 `accountId` 过滤（`{state?, limit?, accountId?}`）：路由按调用者账号收口时用它，
     // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
@@ -80,11 +93,17 @@ export const CONTRACT = {
  * 这也是两个实现的共同语言：`mysql.js` 自己把中性名映射到列名，`jsonfile.js` 直接按它存。
  */
 export const FIELDS = {
-  conversations: ['accountId', 'channel', 'permission', 'preset', 'mode', 'project', 'title', 'provider', 'model', 'shellId'],
+  conversations: ['accountId', 'channel', 'permission', 'preset', 'mode', 'project', 'title', 'provider', 'model', 'shellId', 'faceFull'],
   messages: ['conversationId', 'role', 'content', 'reasoning', 'model', 'provider', 'tokensIn', 'tokensOut'],
   toolCalls: ['conversationId', 'messageId', 'toolName', 'args', 'resultSummary', 'resultBytes', 'durationMs', 'status', 'errorCode', 'shellId'],
   agentRuns: ['conversationId', 'accountId', 'goal', 'status', 'reason', 'rounds', 'lastStep', 'toolCounts'],
   events: ['conversationId', 'seq', 'type', 'payload'],
+  // accounts.create 收具名字段（用 assertFields 校验）；这里同时是**记录形状**（findByUsername 回来的那几列）
+  accounts: ['username', 'passHash', 'role'],
+  // sessions 的方法也收具名参数（`create({token, accountId, days})`），这里列的是**记录形状**
+  // （`days` 是 TTL、不是记录字段：绝对到期时间由介质自己算 —— MySQL 用库的 NOW()、JSON 用进程时钟，
+  //  这一点两边不同，已在 `jsonfile.js` 里写明；契约里放 TTL 而不是绝对时间，是为了别把时钟源也搬到应用层）。
+  sessions: ['token', 'accountId', 'expiresAt'],
   // deliveries 的方法收的是具名参数（不是整条记录），这里列的是它的**记录形状**：
   // `finish(id, patch)` 的 patch 按它校验，`findByKey`/`list` 回来的记录也按它映射。
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
@@ -105,6 +124,7 @@ export function contractMethods() {
  * 判据写两份必然长歪，而"一个实现拒绝、另一个默默收下"正是最难查的一类不一致。
  */
 export const REQUIRED = {
+  accounts: ['username', 'passHash'],
   conversations: ['accountId'],
   messages: ['conversationId', 'role'],
   toolCalls: ['toolName'],
@@ -130,7 +150,10 @@ export function assertFields(entity, obj, { partial = false } = {}) {
     }
   }
   if (!partial) {
-    const missing = (REQUIRED[entity] || []).filter((k) => (obj || {})[k] === undefined || obj[k] === null);
+    // 必需字段＝**必须出现在调用里**（`undefined` 视为没给）。`null` 是"显式给了个空值"（例如渠道会话的
+    // `accountId: null` —— 那正是 `channel != 'web' AND account_id IS NULL` 那类共享会话的形态），
+    // 收不收它由**介质**说话：NOT NULL 的列会当场报错（MySQL 侧），这正是我们要的"出声"。
+    const missing = (REQUIRED[entity] || []).filter((k) => !Object.prototype.hasOwnProperty.call(obj || {}, k) || obj[k] === undefined);
     if (missing.length) {
       const e = new Error(`写入 ${entity} 缺必需字段：${missing.join(', ')}`);
       e.code = STORAGE_INVALID_FIELD;

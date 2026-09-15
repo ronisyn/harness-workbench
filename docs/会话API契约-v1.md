@@ -10,7 +10,10 @@
 >
 > **2026-09-16 补（核对报告 §3.4/§3.5⑧ 的交互契约漏项）**：溢出提示（§4.1）、逐轮成本事件（§4.2）、
 > **可回滚**及其边界（§4.3）、跨端一致的真实状态（§7）。按 v0.3 §4.7 的四要素（可观测/可控制/可信/跨端一致）
-> 逐项对齐：**可观测 ✓、可控制 ✓、可信=部分（回滚有边界，见 §4.3）、跨端一致 ✗（未成立，见 §7）**。
+> 逐项对齐：**可观测 ✓、可控制 ✓、可信=部分（回滚有边界，见 §4.3）、跨端一致=部分成立（见 §7）**。
+> **2026-09-16 二次补（跨端一致的收口）**：§7 当时逐条列出的四项里，前三项已落地并有机检夹具
+> （停止入口统一 `server/turns.js`、卡片按会话带路由 `server/cards.js`、无 SSE 的账本回放 `server/replay.js`），
+> **真机收发仍未验证**；逐条实情与仍未做的部分一律写在 §7，不在这行里下结论。
 
 ---
 
@@ -74,6 +77,15 @@
 ### 3.3 `POST /api/chat/stop`
 
 体 `{conversationId}` → `{ok:true, stopped:<boolean>}`（`:1564-1569`）。没有对应运行中的轮次时 `stopped:false`，仍是 200。**没有 4xx，也没有 `code`**。
+**它停的是哪一轮（2026-09-16 收口）**：GUI（`/api/chat`）与渠道（`server/channels/run-turn.js`）的轮次
+现在登记在**同一张**内存表 `server/turns.js`（`registerTurn`/`releaseTurn`），本端点调 `stopTurn(...)` 停
+**任意一端**——**渠道会话也停得下来**（改前它读的是 `server/index.js` 的私有 `abortMap`，键含账号，
+而渠道会话的 `account_id` 是 NULL ⇒ 永远查不到）。符号锚点（`server/index.js` 里那三处，行号会漂）：
+`/api/chat/stop` 的 `stopTurn(`、`/api/chat` 的 `registerTurn({ ... channel: 'web' ... })` 与收尾的 `releaseTurn(`。
+`stopped:false` 的四种情形（都如实，不假装）：① 没有这一轮（没在跑/已结束）；② 不属于你；
+③ 已经在停（断连/删会话/上一次停止已生效）；④ `conversationId` 没传。归属判据与 `GET .../messages` **同一条**
+（本人，或渠道共享会话 `account_id IS NULL` 且非 web）——即"渠道会话任何已登录账号都停得下来"，
+这是既有口径的直接推论，如实登记在 §7。
 
 ### 3.4 `GET /api/conversations/:id/stream`（续订）
 
@@ -87,6 +99,13 @@
 成功：`200 {ok:true, messages:[{id, role, content, reasoning, model, provider, created_at}]}`，按 `id` 升序（`:404-405`）。**没有 `runId`、没有 `seq`**——无法从返回里判断某条消息属于哪一次执行。
 错误：会话不存在或无权查看 → **404**，**无 `code`**（`:403`）。
 归属口径：本端点认"本人 **或** 渠道共享会话（`account_id IS NULL` 且非 `web`）"（`:402`），与会话列表口径一致。
+**`?events=1`：无 SSE 调用方的只读回放（2026-09-16 加，v0.3 §4.7「续订」那一半）**：
+带它时响应**追加**一个 `events` 数组（`{id, seq, type, at, payload}`，账本行升序；实现 `server/replay.js` 的
+`replayConversation`，读的就是 `server/eventlog.js` 的 `readEvents`——它此前只有 CLI 脚本在用）。
+`?afterId=<账本行 id>` 是增量游标（只取 `id > afterId` 的事件），**不带 `events=1` 时响应逐字节不变**（老调用方看不见新字段）。
+为什么挂在**这条**端点上、不新开一条：渠道（飞书/微信）没有长连接，`/stream` 那条路对它们不存在；
+而"按会话读事件"的归属判据与消息**同一条**（本人或渠道共享会话），新开端点就得把那条件抄第二遍。
+**只读，绝不触发执行**（与 §3.4 同一条纪律）。
 
 ### 3.6 两种导出 + 导入（并存，`/export` 冻结不动）
 
@@ -96,9 +115,15 @@
 
 ### 3.7 审批 / 问询 / 活动（都是只读或很薄的一层）
 
-- `GET /api/approvals` → `{ok:true, pending:[{id, desc, createdAt}]}`（`:1572`，实现 `server/approval.js:37-39`）。**项里没有 `conversationId`**，多会话同时待批时无法直接分辨归属。
-- `GET /api/asks` → `{ok:true, pending:[{id, question, options, createdAt}]}`（`:1548-1551`，`server/asks.js:38-40`）。
+- `GET /api/approvals` → `{ok:true, pending:[{id, desc, createdAt, conversationId, channel, channelName, externalId, channelAnswerable}]}`（`:1572`，实现 `server/approval.js` 的 `listPending` + `server/cards.js` 的 `attachCardRoutes`）。
+  **2026-09-16 起每项带上"属于哪个会话、在哪一端等回答"**（改前只有 `{id, desc, createdAt}`，多会话同时待批时分不出归属，渠道里发起的卡也没人知道该回哪儿）。
+- `GET /api/asks` → `{ok:true, pending:[{id, question, options, createdAt, conversationId, channel, channelName, externalId, channelAnswerable}]}`（实现 `server/asks.js` 的 `listPendingAsks` + 同一个 `attachCardRoutes`）。
+  `channel`/`externalId` 取自会话行**既有**的 `channel`/`external_id` 两列（不新造列/表）；读不到会话行时 `channel:null` 且**不阻断列表**（如实"查不到"，不编一个渠道出来）。
+  `channelAnswerable` = 该端有没有回答通道（唯一出处 `server/cards.js` 的 `CHANNEL_ANSWER_SUPPORT`：`web`/`feishu`/`wechat` 为 true，**未登记的渠道一律 false**——拿不准就说"该渠道暂不支持回答"）。
 - 裁决：`POST /api/approvals/:id` 体 `{decision:'approve'|'reject'}`；`POST /api/asks/:id` 体 `{option}` → `{ok:true, decided:<boolean>}`；参数不合法 → **400**（`:1573-1583`、`:1552-1561`）。`decided:false` 表示该 id 已不在队列（超时/已答），不是错误。四个端点**都没有 `code`**。
+  **这两条就是"回答"的唯二入口**（跨端一致的要求）：渠道侧的回答**不另造 API** —— 适配器按会话找到卡片后调
+  `server/cards.js` 的 `answerCard`，而它内部调的就是本端点调的那两个函数（`decideAsk`/`decideApproval`），
+  所以"回答后那一轮接着跑"在三条路上是同一个动作（夹具 `test/cross-end.test.mjs` 锁住"渠道不碰待答队列"）。
 - `GET /api/conversations/:id/activity?after=<seq>` → `{ok:true, items:[...], seq}`（`:564-572`，实现 `server/agent.js:103-108`）。SSE 之外的第二条投影；错误：会话不属于本人 → **404**，抛异常 → **400**，**都无 `code`**（`:567`、`:571`）。
 
 ### 3.8 `GET /api/deliveries`（死信落点）
@@ -229,22 +254,55 @@
 - **无路径版本**（§1）；**无出站回调**：`POST /api/chat` 是流式同步返回，"活干完通知你"**目前不存在**。要做是一件新能力（回调地址 + 重试语义 + 签名），不是给现有响应加个字段；**触发条件**：出现第二个真实第三方调用方且它无法保持长连接时再立项。
 - **死信不自动重试**：`deliveries` 只记 `state=failed` + `attempts`，**没有重试引擎**，没人看列表就不会有人重放（§3.8、§5.1）。
 - **审批/问询队列在内存里**：`server/approval.js:4`、`server/asks.js:4` 都是进程内 `Map`——**进程重启即全部丢失**；超时分别 5 分钟（`server/approval.js:17`）与 10 分钟（`server/asks.js:17`）。两个列表端点**不按账号过滤**，任何已登录账号都能看到全部待批项。
-- **`events` 账本只写不读**：`server/eventlog.js:57` 的 `readEvents` **零调用方**（全仓 grep 只命中定义）；对外也没有读事件的端点。
+- **`events` 账本现在有读的入口了（2026-09-16 修正）**：本行原写"`readEvents` **零调用方**（全仓 grep 只命中定义）"
+  ——**那句话当时就是错的**：`scripts/replay-events.mjs`、`scripts/projection-replay.mjs` 早在用它（当时只 grep 了 `server/`）。
+  现在的调用方：那两个 CLI 脚本 + `test/storage.test.mjs` + **`server/replay.js`**（对外只读回放，
+  挂在 `GET /api/conversations/:id/messages?events=1`，见 §3.5）。**仍未做**：账本没有"逐帧推送"——
+  要事件只能按会话拉（渠道没有 SSE，这是设计选择，不是缺口）。
 - **续订的物理边界**：事件环 300 条 / 结束 60s 回收 / `seq` 进程内存值 / 跟播上限 10 分钟（§4）。注释里写的 `stream_gap` 帧**未实现**——续订只按 `seq > after` 补发，客户端拿不到"你接丢了一段"的信号。
 - **`GET .../messages` 不带执行归属**：没有 `runId`/`seq`（§3.5）；**`code` 只覆盖部分路径**（§5.3）；429 **故意不给 `Retry-After`**（§5.2）。
 - **`GET /api/deliveries` 没有分页游标**：只有 `limit`（≤100）与 `state` 过滤（`server/deliveries.js:98-102`），行数涨上去后翻不动。
-- **跨端一致**❌ **仍未成立**（v0.3 §4.7 的第四要素；2026-09-16 核对报告 §3.5① 当初是用代码反证的）。
-  飞书与微信**不走本契约**：各自是 `POST /api/feishu/webhook`（webhook）与 iLink 长轮询（`client.on('message')`），
-  没有 SSE 通道，所以 §4 的帧与续订语义**在渠道上不存在**。**2026-09-16 已改（这一条按改动后的实情写）**：
-  两个渠道改走共享入口 `server/channels/run-turn.js`（`runChannelTurn`），与 `/api/chat` **语义对齐**的部分：
-  ① **可观测**：事件落 `events` 账本（`run_start` = 含 `channel`/provider/model/permission → 引擎侧 emit 逐条 → 终结事件 `run_end`/`stopped`/`error`），形状与 `/api/chat` 的对应帧同字段；`events.seq` 为 **0**（`seq` 是 `server/agent.js` 内存事件环的计数器，渠道不走那条环，不是"漏写"）。
-  ② **可信**：投递记录照记（`beginDelivery`/`finishDelivery`，`account_id=NULL`）——成功 `succeeded` 并存接受结果，失败 `failed` + `code`（`STOPPED_BY_USER`/`ABORTED`/`INTERNAL`，取自 `server/failures.js`）；渠道**没有幂等键**，所以 §5.1 的回放/重发语义**对渠道不成立**，投递记录在这里只是留证。
-  ③ **可控制（一半）**：每轮登记 `agent_runs` 现场（`ensureRun`/`markRun`），"可续"的前提有了；停止只有**进程内**入口 `abortChannelTurn()`（`run-turn.js`），**HTTP 面没有接线**——`POST /api/chat/stop` 读的是 `server/index.js` 的私有 `abortMap`（键 `accountId:conversationId`；渠道会话的 `account_id` 是 NULL），本轮按"不改 `/api/chat` 那条链"的约束**没有动它**。
-  ④ **仍未做（逐条如实）**：**运行中打断 = 无入口**（只有进程内函数）；**`/api/chat/stop` 停不了渠道会话**；**续订 = 无**（渠道没有 SSE 与事件环，要事件只能读 `events` 表，而 `readEvents` 至今零调用方，见上一条）；**审批/问询 = 只有一半**——卡片事件现在会落账本，但 `GET /api/approvals`、`GET /api/asks` 与 `POST /api/asks/:id`（§3.7）**都没有按渠道路由**，所以渠道里发起的 `ask` 既不在渠道里回答、也没有一个"这个问询属于飞书会话"的入口；人在渠道里**无法**回答 agent 的提问（要登录 GUI 才看得到、答得上）。
-  三端现在共用的仍是**内核 + 这一层语义**；契约面与端上 UX（谁发事件、谁来答问询）仍未收敛到一处。
-  **收口方向**（未做）：渠道改走 `POST /api/chat` 拿事件流，或按 v0.3 §4.7 的对外形态（headless → MCP → JSON-RPC）做同一个适配器面。
-  在收口完成之前，**"端到端语义完全一致"这个结论仍然是错的**；本契约的帧序、停止、幂等三节只覆盖 `/api/chat` 这一条链。
-  **本轮改了哪一半**：两侧行为由夹具 `test/channel-turn.test.mjs` 锁住（事件入账本 / 投递随成败 / 失败码 / 模型取自会话不再硬编码 / 中止与后续轮次）；**渠道真机收发消息本轮没有条件验证**——夹具只证明"语义这一层"，不证明飞书/微信的线上链路。
+- **跨端一致（GUI/飞书/微信/API 同一套语义）**=**部分成立**（v0.3 §4.7 的第四要素；2026-09-16 核对报告 §3.5①
+  当初是用代码反证的）。飞书与微信**不走本契约的传输层**：各自是 `POST /api/feishu/webhook`（webhook）与
+  iLink 长轮询（`client.on('message')`），**没有 SSE 通道**，所以 §4 的帧与"按 `seq` 跟播"**在渠道上不存在**
+  （这不是待修的洞：渠道是请求-响应，给它做长连接是另一件能力，本任务明确不做）。
+  它们与本契约**共用同一套语义**，逐条与证据（符号锚点为准，行号会漂）：
+
+  | 要素 | 状态 | 事实与出处 |
+  |---|---|---|
+  | **可观测** | ✓ | 两个渠道都走 `server/channels/run-turn.js` 的 `runChannelTurn`：`run_start`（含 `channel`）→ 引擎 emit 逐条落 `events` 账本 → 终结事件 `run_end`/`stopped`/`error`，字段与 `/api/chat` 的对应帧同形。`events.seq` 恒为 **0**（`seq` 是 `server/agent.js` 内存事件环的计数器，渠道不走那条环，不是漏写）。夹具 `test/channel-turn.test.mjs` |
+  | **可信** | ✓（渠道无幂等键） | 投递记录照记（`beginDelivery`/`finishDelivery`，`account_id=NULL`）：成功 `succeeded` + 接受结果，失败 `failed` + `code`（`STOPPED_BY_USER`/`ABORTED`/`INTERNAL`，取自 `server/failures.js`）。渠道**没有幂等键**，所以 §5.1 的回放/重发语义**对渠道不成立**，这里的投递记录只是留证 |
+  | **可控制·停止** | ✓（2026-09-16 收口） | **一个轮次只有一个登记处**：`server/turns.js` 的 `registerTurn`/`releaseTurn`/`stopTurn`，GUI（`server/index.js` 的 `/api/chat` 那三处）与渠道（`run-turn.js:194`/`:278`）**都登记在同一张内存表**里，键**只是 `conversationId`**（渠道会话 `account_id` 为 NULL，任何含账号的键都盖不住它）。`POST /api/chat/stop` → `stopTurn(...)` ⇒ **渠道会话停得下来**（改前不行：它读的是 `server/index.js` 的私有 `abortMap`）。没在跑/已结束/不属于你/已经在停 ⇒ `stopped:false`（`turns.js` 的 `stopTurn` 注释里四条都写了；夹具 `test/cross-end.test.mjs` ①②⑤） |
+  | **可控制·续订** | ✓（拉，不是推） | 渠道没有 SSE 也没有事件环，"重连不丢现场"= **按会话回放账本**：`server/replay.js` 的 `replayConversation`（读 `server/eventlog.js` 的 `readEvents` + 落库消息），对外挂在 `GET /api/conversations/:id/messages?events=1`（§3.5，**只读端点**、`afterId` 增量游标、默认响应不变）。显式**不做**渠道 SSE/长连接 |
+  | **审批/问询** | ✓（文本协议，无交互卡片） | 卡片带**归属**（`createAsk`/`createApproval` 的 `{conversationId}`，接线在 `server/tools/index.js` 两处）⇒ ① 列表端点带出 `conversationId`/`channel`/`channelName`/`externalId`/`channelAnswerable`（`server/cards.js` 的 `attachCardRoutes`；`channel`/`externalId` 取自会话行既有两列，**不新造列/表**）；② 渠道轮次里 `run-turn.js` 的 `onCard` 把卡片**发到人所在的端**（飞书 `feishu-webhook.js:144`、微信 `wechat.js:68`，文案唯一出处 `cards.js` 的 `cardText`）；③ 人在渠道里的回答对回**同一个入口**：`cards.js` 的 `answerCard` → `decideAsk`/`decideApproval`（就是 `POST /api/asks/:id`、`POST /api/approvals/:id` 调的那两个函数），裁决一落，工具里 `await` 着的那一轮接着跑完——**没有第二套问答 API**（夹具 `test/cross-end.test.mjs` ③用**真工具** `ask_user` + **真飞书路由** + **真微信处理函数**证明到"那一轮跑完并落账"） |
+
+  **仍未做（逐条如实，不许读成"已经一致"）**：
+  1. **渠道真机收发消息本轮没有验证**（真机读数，2026-09-16）：测试服务器上飞书 webhook **已注册**
+     （`.env` 的 `RW_FEISHU_WEBHOOK=1` + 启动日志 `[feishu] webhook 已注册`）、微信渠道**已启动**
+     （`/root/.dsh/wechat-bridge/state.json` 在位 + 日志 `[wechat] 微信渠道已启动`），
+     而服务器上跑的仍是**改动前**的版本（`git log -1` = `5d4f349`，本轮**没有部署**）；
+     线上也**从来没有真实渠道流量**（`conversations` 的 `channel` 只有 `web` 128 / `task` 3，渠道会话 **0 个**；
+     `deliveries` 里 `account_id IS NULL` 的行 **0 条**）。所以新语义在真机上**未验证**——夹具只证明语义这一层。
+  2. **微信侧的回答只有代码路径 + 夹具，没有真机**：`wechat.js` 的 `handleWechatMessage` 与飞书同构
+     （收 → `answerCard` → 跑/续），但 iLink 客户端在夹具里是假的；线上是否真按这个形状回调，未验证。
+  3. **渠道的"续订"是拉取，不是推送**：没有 `stream_gap` 那类"你接丢了一段"的信号（§4 那条仍未实现），
+     调用方要自己拿 `afterId` 游标对齐账本行 id。
+  4. **渠道卡片是纯文本词表，没有交互式卡片**：问询认"编号 / 选项 label / 选项 value"，审批认
+     `approve|批准|同意|yes|y` 与 `reject|拒绝|no|n`（`cards.js` 的 `parseAnswer`）；飞书的
+     card action 回调、按钮、超时刷新**都没做**。认不出来的文本**不会被吞**（当普通消息继续跑一轮，卡片留在队列里）。
+  5. **归属判据的既有口径原样保留**：`stopTurn` 用的是 `GET .../messages` 那一条——"渠道共享会话
+     （`account_id IS NULL` 且非 web）任何已登录账号都能停/能答"。这是既有口径的直接推论，**本轮没有收紧也没有放宽**；
+     要做"渠道会话必须绑定某个账号"是另一件事（要动会话归属模型）。
+  6. **队列仍在内存**（见上一条）：卡片、轮次登记都在进程内，**进程重启即丢**；重启后没有"补投未答卡片"的机制。
+  7. **端上 UX 仍是两套**：GUI 用 SSE + 卡片按钮，渠道用文本 + 回信——v0.3 §4.7 要的是**事件语义一致**（已成立），
+     不是 UI 实现统一；"谁发事件、谁来答问询"在渠道侧仍由**适配器**决定（薄适配器是设计，不是遗留）。
+  8. **收口方向仍未采纳**：渠道改走 `POST /api/chat` 拿事件流、或按 v0.3 §4.7 的对外形态（headless → MCP → JSON-RPC）
+     统一适配器面——**本轮没做**，现在的形态是"一个内核（`runChannelTurn`/`server/turns.js`/`server/cards.js`）+ 两个薄适配器"。
+
+  **因此**：本契约的**帧序与幂等两节仍然只覆盖 `/api/chat` 这一条链**（渠道没有帧序、没有幂等键）；
+  停止、事件账本、审批/问询、回放这四件事已经是**跨端同一套语义**。夹具在哪里：
+  `test/channel-turn.test.mjs`（渠道语义）、`test/feishu-webhook.test.mjs`（来源校验）、
+  `test/cross-end.test.mjs`（本轮四条 + 如实 false 的反向钉子）。
 - **能力清单的诚实性字段只在两条出口**：`promptInjection` / `dataEgress` 走 `/api/agent/capabilities` 与 `run_end.capabilities`（给人看），
   **不进模型上下文**（`server/capabilities.js:30-31`、`:50`）——所以别拿它当"模型也知道自己受什么约束"的证据。
 

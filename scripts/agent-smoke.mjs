@@ -22,6 +22,9 @@ import path from 'node:path';
 import { db } from '../server/db.js';
 // 探针要让 Agent 写/读的路径必须跟着工作区走：写死 /srv/rw-workspace 在客户机（Windows Server）上不存在。
 import { RW_WORKSPACE } from '../server/env.js';
+// 冒烟会话的标题走**统一声明**（`__probe__ …`）：原先的 `__smoke_agent__` 本来就命中探针族，这里改成
+// 同一个出处，免得"每个脚本各写一份族字面量"（判据唯一实现在 server/cohort.js，见它导出的 probeTitle）。
+import { probeTitle } from './cohort.mjs';
 
 const argv = process.argv.slice(2);
 const BASE = argv[0] || 'http://127.0.0.1:880';
@@ -45,7 +48,7 @@ step('登录', Boolean(lg.token), lg.token ? '' : JSON.stringify(lg).slice(0, 12
 if (!lg.token) { console.log('\n=== ' + ok.length + ' passed, ' + fail.length + ' failed ==='); process.exit(1); }
 const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + lg.token };
 
-const c = await (await fetch(BASE + '/api/conversations', { method: 'POST', headers: H, body: JSON.stringify({ title: '__smoke_agent__' }) })).json();
+const c = await (await fetch(BASE + '/api/conversations', { method: 'POST', headers: H, body: JSON.stringify({ title: probeTitle('smoke_agent') }) })).json();
 step('建探针会话（标题命中探针族，不进任何口径）', Boolean(c.id), 'conv=' + c.id);
 if (!c.id) { console.log('\n=== ' + ok.length + ' passed, ' + fail.length + ' failed ==='); process.exit(1); }
 await db.query("UPDATE conversations SET permission='full' WHERE id=?", [c.id]);

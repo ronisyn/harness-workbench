@@ -8,6 +8,9 @@ import { getToken as getFeishuToken } from '../tools/feishu.js';
 // 渠道「跑一轮并落账」的共享入口（v0.3 §4.7 G5「跨端一致」）：飞书/微信走同一套语义
 // （事件账本、投递记录、可停/可续、失败码），本文件只留平台协议这一层（验签/解密/收发消息）。
 import { runChannelTurn, makeChannelTurnDeps } from './run-turn.js';
+// 待答卡片（审批/问询）的按会话路由与文案：卡片发得出去、人在渠道里的回答回得到同一个入口
+// （`answerCard` 内部调的就是 `POST /api/asks/:id`、`POST /api/approvals/:id` 调的那两个裁决函数）。
+import { answerCard, answerAckText, cardText } from '../cards.js';
 
 const FEISHU_API = 'https://open.feishu.cn/open-apis';
 
@@ -60,18 +63,26 @@ async function sendFeishuText(receiveId, receiveIdType, text) {
   return j;
 }
 
-async function findOrCreateConv(chatId) {
-  let conv = (await db.query('SELECT id, permission FROM conversations WHERE channel="feishu" AND external_id=?', [chatId]))[0];
+async function findOrCreateConv(chatId, dbc = db) {
+  let conv = (await dbc.query('SELECT id, permission FROM conversations WHERE channel="feishu" AND external_id=?', [chatId]))[0];
   if (!conv) {
-    const r = await db.query('INSERT INTO conversations (account_id, channel, external_id, permission, title) VALUES (NULL,"feishu",?,?,?)',
+    const r = await dbc.query('INSERT INTO conversations (account_id, channel, external_id, permission, title) VALUES (NULL,"feishu",?,?,?)',
       [chatId, process.env.RW_CHANNEL_PERMISSION || 'read', '飞书对话']);
     conv = { id: r.insertId, permission: process.env.RW_CHANNEL_PERMISSION || 'read' };
   }
   return conv;
 }
 
-export function registerFeishuWebhook(app) {
+/**
+ * @param {import('express').Express} app
+ * @param {object} [opts] 夹具缝（与 `runChannelTurn` 的 deps 同款：给了就不碰真库/真模型/真飞书）
+ *   · `opts.deps`：渠道轮次依赖（`makeChannelTurnDeps()` 的形状），夹具传假的；
+ *   · `opts.sendText`：发文本到飞书的实现（默认真调开放平台接口）。
+ *   为什么要缝：卡片要能真的发出去、回答要能对回来，这两件事必须有可断言的路径（本轮无真机条件）。
+ */
+export function registerFeishuWebhook(app, opts = {}) {
   const router = express.Router();
+  const sendText = opts.sendText || sendFeishuText;
 
   router.post('/webhook', async (req, res) => {
     const body = req.body || {};
@@ -113,23 +124,31 @@ export function registerFeishuWebhook(app) {
       if (!chatId || !sender) return;
       const msg = parseMessageContent(ev.message?.content);
       if (msg.type !== 'text' || !msg.text) {
-        await sendFeishuText(chatId, 'chat_id', '暂只支持文本消息（图片/文件/语音支持开发中）');
+        await sendText(chatId, 'chat_id', '暂只支持文本消息（图片/文件/语音支持开发中）');
         return;
       }
       console.log(`[feishu] 收到 ${chatId}: ${msg.text.slice(0, 60)}`);
-      const conv = await findOrCreateConv(chatId);
+      const d = opts.deps || await makeChannelTurnDeps();  // 夹具缝：给了假依赖就不碰真库/真模型
+      const conv = await findOrCreateConv(chatId, d.db);
+      // 一条消息两种可能：**在回答一张待答卡片**（问询/审批），或是一句新指令。
+      // 回答走 `server/cards.js` 的 `answerCard` —— 它内部调 `decideAsk`/`decideApproval`，
+      // 与 `POST /api/asks/:id`、`POST /api/approvals/:id` 是**同一批裁决函数**（渠道不另造问答 API）：
+      // 裁决一落，被挂住的那一轮（工具里的 await）就接着往下跑，与 GUI 里点一下完全同一条路。
+      const answered = answerCard(conv.id, msg.text);
       // 跑一轮：历史组装、runAgent（带 emit）、事件账本、投递记录、现场登记全在共享入口里 ——
       // 改前这里是"自己拼历史 + 直调 runAgent 不传 emit + 硬编码 deepseek/deepseek-v4-flash"，
       // 于是飞书会话不可观测/不可停/不可续、失败无处落账（核对报告 §3.5 缺陷①）。对外行为不变：照样回一条文本。
-      const turn = await runChannelTurn({
-        channel: 'feishu', conversationId: conv.id, text: msg.text, deps: await makeChannelTurnDeps(),
+      // `onCard`：卡片（审批/问询）事件一到就发到聊天里——渠道没有 SSE，不发出去人在渠道里就看不到它。
+      const turn = answered.answered ? null : await runChannelTurn({
+        channel: 'feishu', conversationId: conv.id, text: msg.text,
+        deps: { ...d, onCard: (card) => sendText(chatId, 'chat_id', cardText(card)) },
       });
-      const reply = turn.content || '（无回复）';
-      await sendFeishuText(chatId, 'chat_id', reply);
+      const reply = answered.answered ? answerAckText(answered) : (turn.content || '（无回复）');
+      await sendText(chatId, 'chat_id', reply);
       // 注：user 消息与 assistant 回复的落库都已在共享入口内完成（顺序与 /api/chat 一致），这里不再重复写。
     } catch (e) {
       console.error('[feishu] 消息处理失败:', e.message);
-      try { await sendFeishuText(ev.message?.chat_id, 'chat_id', '处理出错：' + e.message.slice(0, 100)); } catch { /* ignore */ }
+      try { await sendText(ev.message?.chat_id, 'chat_id', '处理出错：' + e.message.slice(0, 100)); } catch { /* ignore */ }
     }
   });
 

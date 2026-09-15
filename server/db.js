@@ -360,6 +360,10 @@ const SCHEMA = [
     UNIQUE KEY uq_conv_skill (conversation_id, skill_name)
   )`,
   // ---- 知识库（F19/④：scope=global 全部会话可见 / scope=shell 仅所属壳会话可见（§4 壳私有+全局共享）/ scope=conv 仅本会话；标题索引入提示，正文按需 kb_search） ----
+  // 2026-09-16（v0.3 §4.3「记忆」行「全文检索（FTS5）打底…向量留接口位置后补」）：检索真打底＝MySQL FULLTEXT，
+  // 不是改造前的 `title LIKE ? OR body LIKE ?`（无索引、无相关度）。中文必须 `WITH PARSER ngram`——默认解析器
+  // 按空白/标点切词，中文整段成一个 token，等于搜不到。检索实现在 `server/kbsearch/`（接口+选择点+实现），
+  // 索引不可用时如实回落 LIKE 并标明 mode（见 kbsearch/fts.js）。
   `CREATE TABLE IF NOT EXISTS knowledge (
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_id INT NOT NULL,
@@ -373,7 +377,8 @@ const SCHEMA = [
     related_component VARCHAR(120),
     created_at DATETIME DEFAULT NOW(),
     KEY idx_kb_scope (account_id, scope),
-    KEY idx_kb_shell (shell_id)
+    KEY idx_kb_shell (shell_id),
+    FULLTEXT KEY ft_kb_text (title, body) WITH PARSER ngram
   )`,
   // ---- 长务务现场（断点恢复：每会话一条；running→completed|interrupted|paused） ----
   `CREATE TABLE IF NOT EXISTS agent_runs (

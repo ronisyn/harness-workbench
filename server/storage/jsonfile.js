@@ -14,10 +14,19 @@
 //   带 `Idempotency-Key` 的 `POST /api/chat` 会走 `beginDelivery` ⇒ 缺了它这一轮直接 500（原文见交付说明）。
 //   "⑦ 存储后端可替换"的判据是**换上去跑得通**，而不是"接口在、能力缺一半"，所以这里补上，且**语义与
 //   mysql 实现逐条对齐**（唯一键冲突、失败可抢重发、收尾、死信列表）—— 不许为跑通另造一条语义不同的旁路。
+//   ＋**登录链**（2026-09-16 再扩）：`accounts`/`sessions` 原本不在清单里，但"干净机器跑通一次对话"的**第一步
+//   就是登录**，而登录要这两张表 ⇒ 不补它们，`RW_STORAGE=jsonfile` 仍然进不了门。同批补上会话/消息/设置
+//   那几条**按账号**的读法（`findOwned`/`listByAccount`/`updateOwned`/`recent`/`count`/`all`/`getMany`）。
 // 仍然**显式抛"该实现不支持"**的：三个原生 SQL 动词（`query`/`one`/`run`）以及走它们的**事件归档**
 //   （`events_archive` 表 + `NOW() - INTERVAL` 是 MySQL 侧的保留策略）—— 缺能力必须报错，不许静默返回空
 //   （v0.3 §4.6 同一精神）。将来往 CONTRACT 里加实体，落点就在这里：要么实现、要么显式抛；
 //   漏了会被 test/storage.test.mjs 的方法面用例当场判红。
+//
+// 与 MySQL 实现**已知的两处介质差异**（如实写在这里，不假装一模一样）：
+//   ① **时钟源**：会话到期时间由介质算 —— MySQL 用库的 `NOW()`，这里用进程时钟（`new Date()`）。
+//      两边机器时钟不一致时，"同一个 token 什么时候过期"会有偏差 —— 这是介质属性，不是接口能抹平的。
+//   ② **用户名匹配**：MySQL 的 `username=?` 走库的排序规则（本仓 utf8mb4 默认**不区分大小写**），
+//      这里按 `toLowerCase()` 比较来对齐这个可判定子集；重音/全角等更细的排序规则差异不在覆盖范围。
 //
 // 这个实现**不是**给生产负载用的，如实写在前面（免得读代码的人误判它的定位）：
 //   · 每次写都整文件落盘（含 `persistEvent` 这种每帧一次的调用）⇒ 量一大就慢；落盘已**串行化**（见 createJsonFileStorage）
@@ -33,7 +42,7 @@ const IMPL = 'jsonfile';
 const FORMAT = 'rw-store-json';   // 文件格式的身份（v0.3 §4.9：存储格式带版本号与迁移链）
 const VERSION = 1;
 /** 本实现**支持的表**；不在这张表里的实体一律显式抛错（"加实体"的落点见文件头注释）。 */
-const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries'];
+const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions'];
 
 // 默认落点：工作区下的 storage/（与 spill/、.rw-checkpoints/ 同属"运行期产物"，不进仓库）。
 // 要挪位置得在 server/env.js 加一个 RW_STORAGE_FILE（env.js 是环境事实的唯一出处，本轮由协调方维护，
@@ -144,6 +153,40 @@ function makeApi(holder, save, { persist }) {
         Object.assign(rec, patch, { updatedAt: nowIso() });
         await commit();
       },
+      /** 按 id **且按账号**取（对应 `server/index.js:762` 那条带 `account_id=?` 的查询）。 */
+      async findOwned(id, accountId) {
+        const rec = byId('conversations', id);
+        return snap(rec && (rec.accountId ?? null) === (accountId ?? null) ? rec : null);
+      },
+      /**
+       * 会话列表：条件是 `server/index.js:321` 那一条的逐字翻译 ——
+       * "我的会话" ∪ "渠道侧无主会话（`channel != 'web' AND account_id IS NULL`）"。
+       * 注意 `channel != 'web'` 在 MySQL 里遇到 NULL 是 **NULL（不成立）**，所以这里必须显式排除
+       * channel 为空的行，不能图省事写 `r.channel !== 'web'`（那样会把"渠道未知"的行也带出来）。
+       * 排序：`updated_at DESC`（时间在 JSON 里是 ISO 字符串，字典序＝时间序）。
+       */
+      async listByAccount(accountId) {
+        const rows = rowsOf('conversations').filter((r) => (r.accountId ?? null) === (accountId ?? null)
+          // `channel != 'web'`：字符串比较照 MySQL 默认排序规则（不区分大小写），且 NULL 不成立
+          || (r.channel !== null && r.channel !== undefined && String(r.channel).toLowerCase() !== 'web' && (r.accountId ?? null) === null));
+        rows.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+        return snap(rows);
+      },
+      /** 账号范围内的更新（对应 `server/index.js:373` / `autotitle.js:44`）。改不到＝什么都不做。 */
+      async updateOwned(id, accountId, patch) {
+        assertFields('conversations', patch, { partial: true });
+        const rec = byId('conversations', id);
+        if (!rec || (rec.accountId ?? null) !== (accountId ?? null)) return;
+        Object.assign(rec, patch, { updatedAt: nowIso() });
+        await commit();
+      },
+      /** 只推进 updatedAt（对应 `server/index.js:889`：落了一条消息之后"这个会话刚动过"）。 */
+      async touch(id) {
+        const rec = byId('conversations', id);
+        if (!rec) return;
+        rec.updatedAt = nowIso();
+        await commit();
+      },
     },
 
     messages: {
@@ -160,6 +203,22 @@ function makeApi(holder, save, { persist }) {
       async list(conversationId, limit) {
         const rows = rowsOf('messages').filter((r) => Number(r.conversationId) === Number(conversationId));
         return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
+      },
+      /**
+       * 最近 N 条：**倒序**（对应 `autotitle.js:11` 与 `server/tools/index.js:1327` 的 `ORDER BY id DESC`）。
+       * `roles` 给了就只算这些角色（调用点用它取"只要 user/assistant"的干净历史）。
+       */
+      async recent(conversationId, { limit, roles = null } = {}) {
+        let rows = rowsOf('messages').filter((r) => Number(r.conversationId) === Number(conversationId));
+        if (Array.isArray(roles) && roles.length) rows = rows.filter((r) => roles.includes(r.role));
+        rows = rows.slice().reverse();          // rowsOf 是升序 ⇒ 反过来就是"最新在前"
+        return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
+      },
+      /** 条数（对应 `server/index.js:1460` 与 `server/tools/index.js:1329`）；`role` 给了就只数这个角色。 */
+      async count(conversationId, { role = null } = {}) {
+        return rowsOf('messages')
+          .filter((r) => Number(r.conversationId) === Number(conversationId) && (role ? r.role === role : true))
+          .length;
       },
     },
 
@@ -182,6 +241,86 @@ function makeApi(holder, save, { persist }) {
         const at = nowIso();
         const prev = holder.doc.tables.settings[String(key)];
         holder.doc.tables.settings[String(key)] = { id: String(key), value: clone(value), updatedAt: at, createdAt: (prev && prev.createdAt) || at };
+        await commit();
+      },
+      /** 全量设置（对应 `server/index.js:1745`）→ `{skey: value}`。 */
+      async all() {
+        return Object.fromEntries(Object.entries(holder.doc.tables.settings).map(([k, rec]) => [k, clone(rec.value)]));
+      },
+      /** 按键批量读（对应 `server/agent.js:173` / `server/tools/hooks.js:465`）：存在的键才在返回对象里。 */
+      async getMany(keys) {
+        const out = {};
+        for (const k of Array.isArray(keys) ? keys : []) {
+          const rec = holder.doc.tables.settings[String(k)];
+          if (rec) out[k] = clone(rec.value);
+        }
+        return out;
+      },
+    },
+
+    // ── 登录链：账号（对应 `server/auth.js:15/17/23/57/59`）─────────────────────────────────────
+    accounts: {
+      /**
+       * 按用户名查（login / ensureAdmin / 注册查重共用；MySQL 侧 username 有唯一键 ⇒ 至多一条）。
+       * 大小写：按 `toLowerCase()` 比较，对齐 MySQL utf8mb4 默认排序规则的"不区分大小写"这一档
+       * （见文件头"已知的两处介质差异"②）。
+       */
+      async findByUsername(username) {
+        if (username === undefined || username === null) return null;
+        const want = String(username).toLowerCase();
+        const hit = rowsOf('accounts').find((r) => String(r.username || '').toLowerCase() === want) || null;
+        return snap(hit);
+      },
+      /** 建账号：username 唯一键冲突即抛（形状照 MySQL 的 ER_DUP_ENTRY，调用方才能用同一套判据）。 */
+      async create(fields) {
+        assertFields('accounts', fields);
+        const exists = rowsOf('accounts').some((r) => String(r.username || '').toLowerCase() === String(fields.username).toLowerCase());
+        if (exists) {
+          const e = new Error(`Duplicate entry '${fields.username}' for key 'username'`);
+          e.code = 'ER_DUP_ENTRY';
+          throw e;
+        }
+        const rec = { id: nextId('accounts'), username: fields.username, passHash: fields.passHash, role: fields.role || 'user', createdAt: nowIso() };
+        put('accounts', rec);
+        await commit();
+        return { id: rec.id };
+      },
+    },
+
+    // ── 登录链：会话（对应 `server/auth.js:29/38/45`）──────────────────────────────────────────
+    sessions: {
+      /**
+       * 建会话：**到期时间由介质算**（这里＝进程时钟 + days 天；MySQL 用库的 `NOW()`，见文件头差异①）。
+       * token 是主键 ⇒ 重复即抛（照 MySQL 的 ER_DUP_ENTRY）。
+       */
+      async create({ token, accountId, days }) {
+        if (rowsOf('sessions').some((r) => r.token === token)) {
+          const e = new Error(`Duplicate entry '${token}' for key 'PRIMARY'`);
+          e.code = 'ER_DUP_ENTRY';
+          throw e;
+        }
+        const now = Date.now();
+        // 主键是 token（不是自增 id，所以不走 put：put 是按 rec.id 存的）
+        holder.doc.tables.sessions[String(token)] = {
+          token, accountId,
+          createdAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + Number(days) * 86400000).toISOString(),
+        };
+        await commit();
+      },
+      /** 校验 token 并取回账号（对应 `auth.js:38` 的 JOIN + `expires_at > NOW()`）：查不到/过期都返回 null。 */
+      async findValid(token) {
+        const s = rowsOf('sessions').find((r) => r.token === token) || null;
+        if (!s) return null;
+        if (!(new Date(s.expiresAt).getTime() > Date.now())) return null;   // 过期判据（MySQL 侧在 SQL 里比）
+        const acc = byId('accounts', s.accountId);
+        return acc ? { id: acc.id, username: acc.username, role: acc.role } : null;
+      },
+      /** 退出登录（`auth.js:45`）。幂等：token 不存在＝什么都不做。 */
+      async remove(token) {
+        const key = String(token);
+        if (!holder.doc.tables.sessions[key]) return;
+        delete holder.doc.tables.sessions[key];
         await commit();
       },
     },

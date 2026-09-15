@@ -231,4 +231,18 @@ test('按行预览后再走 spill：不应被二次截断（两者是接力，�
   assert.equal(after, payload, '已在 cap 内 ⇒ spill 必须原样放行');
 });
 
+// ── 溢出文件的**权限位**（v0.3 §4.4「溢出文件的权限与保留期」；符合性核对点名的那半条）──────────
+// 旧状态：`writeSpill` 的 writeFileSync **没给 mode** ⇒ 文件按进程 umask 落盘（常见 0644，同机人人可读）。
+// 目录归属（上面那条）只保证"别的**会话**取不回"，挡不住同机另一个账户直接 cat 那个文件。
+// 口径与 `server/credentials.js` 一致：权限在**创建时**就给 0600，不做平台分支。
+// Windows 上没有 POSIX 模式（statSync().mode 恒为 0666 掩码），按仓库既有跳过口径如实 skip
+// （同 test/credentials.test.mjs 的"明文写出后文件本人可读"那条）。
+test('溢出明细落盘权限=0600（POSIX；Windows 无 POSIX 模式，跳过这项检查）', { skip: process.platform === 'win32' }, () => {
+  CLEAN();
+  const text = JSON.stringify({ text: 'P'.repeat(9000), secret: 'sk-should-not-be-world-readable' });
+  const out = spillToolResult(text, 4000, { tool: 'repo_map', conversationId: 7, callId: 'mode-1' });
+  const file = /全文已存 ([^（]+)（/.exec(out)[1];
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, '溢出明细必须 0600 落盘（同机其它账户不得直接读）');
+});
+
 process.on('exit', CLEAN);

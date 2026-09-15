@@ -225,6 +225,40 @@ test('C1e 金标跑不起来：连原因一起带出来（不许吞成一句"未
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
+// 金标集**身份**的一致性（2026-09-16 修的读数自相矛盾；v0.3 §0.4 准入前置 / §7.1 ㉔ 门禁要能认出"同一套金标"）
+//
+// 病灶（改前实测）：`collectCanary` 把 DB 行（字段名 `eval_ref`）直接喂给读 `s.ref` 的
+// `goldenSetIdentities()` ⇒ 快照里 `metrics.canary.goldenSets` 恒为 `[{exists:false,count:0,sha1_12:null}]`，
+// 而同一份报告顶层的 `golden`（`buildGoldenSection`，走 `goldenIdentityOf`）报 `code@7a7cc14e7251(9条)`——
+// 两块读数指向同一批壳、同一套金标，却一个说"不存在"、一个说"9 条"：**自相矛盾**，门禁据此判"集合变了"。
+test('金标集身份：快照 metrics.canary.goldenSets 与顶层 golden 指向同一套金标（ref/count/sha1 逐项一致）', async () => {
+  const { collectCanary, buildSnapshot: BS, goldenSetIdentities } = await import('../server/selfeval/collect.js');
+  const { goldenIdentityOf } = await import('../scripts/golden-report.mjs');
+  const D = makeFakeDb((sql) => (/FROM shells WHERE eval_ref/.test(sql) ? [{ id: 1, skey: 'code', name: 'code', eval_ref: 'code' }] : []));
+  const canary = await collectCanary({ dbc: D, checks: async () => ({ skipped: false, total: 9, passed: 9 }) });
+  const snap = BS({ at: new Date('2026-09-16T04:00:00Z'), days: 7, canary });
+
+  const sets = snap.metrics.canary.goldenSets || [];
+  assert.equal(sets.length, 1, '配了 eval_ref 的壳 ⇒ 必须给出金标集身份（不是空数组）');
+  const g = sets[0];
+  assert.equal(g.ref, 'code', '身份里的 ref 必须是壳声明的金标集名（不是 undefined —— 那正是改前的病灶）');
+  // 顶层 golden 那一块用的身份＝golden-report 的 goldenIdentityOf（同一实现、同一 eval/ 文件）：
+  // 两边必须逐字段相同，否则"快照说 0 条、报告说 9 条"这种自相矛盾会再次出现。
+  const top = goldenIdentityOf('code');
+  assert.deepEqual({ ref: g.ref, exists: g.exists, count: g.count, sha1_12: g.sha1_12 },
+    { ref: top.ref, exists: top.exists, count: top.count, sha1_12: top.sha1_12 },
+    '快照里的金标集身份与顶层 golden 的身份必须是同一套（同 ref / 同 exists / 同 count / 同 sha1）');
+  assert.equal(g.exists, true, 'eval/code.json 真实存在 ⇒ exists 必须为 true');
+  assert.equal(g.count, 9, '当前金标集是 9 条（集合大小，不是成绩）');
+  assert.match(String(g.sha1_12), /^[0-9a-f]{12}$/, '身份必须是条目集合的 sha1_12');
+
+  // 反向锁：**传错字段**（把 DB 行原样传进去）就是这个 bug 的读数——夹具必须把它认成坏输入
+  const wrong = goldenSetIdentities([{ id: 1, skey: 'code', eval_ref: 'code' }]);
+  assert.deepEqual(wrong, [{ ref: undefined, exists: false, count: 0, sha1_12: null }],
+    '这就是改前的读数（恒"金标不存在"）；改回错字段 ⇒ 上面那条断言必红');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
 test('C2 提案字段完整性：缺"验证方式"必拒；缺任何必填字段都不许落库', () => {
   const base = {
     id: 'x', source: 'selfeval', title: 't', basis: 'b', action: 'a',

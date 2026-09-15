@@ -7,6 +7,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../server/config.js';
+// 自检建的会话是我们自己发起的 ⇒ 标题走**统一声明**（`__probe__ …`），不进"真实流量"（v0.3 §0.3.1）。
+// 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
+import { probeTitle } from './cohort.mjs';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:880';
 let user = process.argv[3] || config.admin.user || '';
@@ -48,7 +51,7 @@ for (const p of ['/api/models', '/api/providers', '/api/toolset', '/api/settings
 }
 
 // 4. 会话增删
-const c1 = await json(await jreq('/api/conversations', { method: 'POST', body: JSON.stringify({ title: '__selfcheck__' }) }, token));
+const c1 = await json(await jreq('/api/conversations', { method: 'POST', body: JSON.stringify({ title: probeTitle('selfcheck') }) }, token));
 step('create conversation', Boolean(c1.id));
 
 // 5. 普通对话 SSE（真实 LLM，需模型可达）
@@ -91,7 +94,7 @@ step('plain chat SSE streaming', deltaCount > 0 && doneFlag, errMsg || ('deltas=
 // 这条检查把"权限档位"这一轴纳入部署后自检——同一件事在别的档位上是不是也成立，不能靠"默认档位能跑"推断。
 let permErr = '';
 try {
-  const cp = await json(await jreq('/api/conversations', { method: 'POST', body: JSON.stringify({ title: '__selfcheck_write__', permission: 'write' }) }, token));
+  const cp = await json(await jreq('/api/conversations', { method: 'POST', body: JSON.stringify({ title: probeTitle('selfcheck_write'), permission: 'write' }) }, token));
   let sawDone = false, sawRunEnd = null, sawErr = '';
   const res = await fetch(BASE + '/api/chat', {
     method: 'POST',

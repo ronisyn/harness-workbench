@@ -1,17 +1,21 @@
-// server/tools/manifest.js - 工具能力清单（**唯一的声明式权威**）：改名/改档/改提示/上下线，只改这里
+// server/tools/manifest.js - 工具能力清单（**唯一的声明式权威**）：改名/改档/改权限/改提示/上下线，只改这里
 // 定位（架构 §4.1/§4.3 工具三层分离 + 声明式装载）：
 //   · 契约面（name/description/params）与实现**同处**在 tools/index.js 的处理器里——它们必须同步演进，拆开只会漂移；
-//     `permission` 同理留在实现上（第 4 个字段由 execTool 的 checkPerm 直接用）；
+//   · **权限（permission）2026-09-16 起也进本清单**（见文件末尾的 `TOOL_PERMISSIONS`）：v0.3 §7.1 ⑤ 要求
+//     审批/权限/并行/超时四类**都**声明化，此前只有权限还写在实现上（`execTool` 的 `checkPerm` 直接读它）。
+//     实现里那份副本已删；装配期由 `tools/registry.js` 的 `validatePermissions` 与实现**交叉核对**，不一致当场抛错；
 //   · 本清单拥有**策略与生命周期**：档位(tier)/中文名/选择提示(when·not·ex)/默认启用(defaultOn)/平台豁免(exempt)/轻量集(light)/上下线(enabled)，
-//     以及 v0.3 §7.1 ⑤ 要求的四类声明：**审批(approval) · 超时(timeoutMs) · 缓存影响(cacheImpact) · 执行后端(execBackend)**，
-//     外加 v0.3 §2.4/架构 v1.1 §4.4 的**并行安全(parallelSafe)**；
+//     以及 v0.3 §7.1 ⑤ 要求的四类声明：**审批(approval) · 权限(TOOL_PERMISSIONS) · 并行(parallelSafe) · 超时(timeoutMs)**，
+//     外加**缓存影响(cacheImpact)** 与 **执行后端(execBackend)**（② 的落地位）；
 //   · 装载器 tools/registry.js 一次性装配并校验：清单自身字段非法、清单与实现不一致（含"声明不进前缀却装载了"、
-//     "timeoutMs 两处声明"）**一律当场报错**，不再靠人记。
+//     "timeoutMs 两处声明"、"permission 与实现不符"）**一律当场报错**，不再靠人记。
 // 上下线一个工具（零代码改动）：
 //   · 删掉这一行 → 工具从"模型可见面(toolDefs)"与"可执行面(execTool)"同时消失（默认拒绝）；
 //   · 或写 enabled: false → 保留声明与理由，同样不装载（推荐：留痕式下线）。
 // 字段缺省与取值域（非法值/缺字段在装配期抛错，见 registry.js 的 validateManifest）：
 //   · tier 必填（core|pro|expert）；when/not/ex 选填；defaultOn/exempt/light 缺省 false；enabled 缺省 true；
+//   · permission **必填**且只写在文件末尾的 TOOL_PERMISSIONS（read|write|full|global）；实现里不许再写一份
+//     （"清单说一套、实现说另一套"是 ⑤ 要治的病：装出来的权限与声明必须同源，交叉核对见 registry.js）。
 //   · light 进的是**轻量工具面**（轻量集里的工具必须自成闭环）：所以 fetch_spill 在 light 面——
 //     light 面里已有会溢出的工具（read_file/grep_search/db_query…），没有取回手段的轻量会话会拿到
 //     "截断但取不回"的结果，那正是 v0.3 §6.1 禁止的静默丢弃（2026-09-16 裁决，见 C-38 缺陷⑤）。
@@ -101,3 +105,90 @@ export const TOOL_MANIFEST = {
 
 // 档位中文名（后台展示用）
 export const TOOL_TIER_CN = { core: '基础', pro: '专业', expert: '高危' };
+
+/**
+ * 逐条工具的**权限档**（name → read|write|full|global）——v0.3 §7.1 ⑤"审批/权限/并行/超时声明化"
+ * 里的"权限"那一格的**唯一出处**。
+ *
+ * 为什么单独一张表、而不是加进上面 TOOL_MANIFEST 的每一条（2026-09-16 裁决）：
+ *   · ⑤ 要的是"四类都进声明面"，而权限是实现里最烫的一格（每加一个工具都要问"它算哪档"），
+ *     摊成一屏、可逐行对照——比散在 65 行策略里的某一格更容易审；
+ *   · `TOOL_MANIFEST` 的字段校验要求每条都写全（tier/cn/cacheImpact/execBackend/parallelSafe），
+ *     把 permission 混进去就得给每条都补一格（改动面 = 65 行 × 多变），而这张表是 65 行 × 1 变。
+ * 装配关系（`tools/registry.js` 的 `validatePermissions`）：**清单声明 × 实现事实**必须逐条一致，
+ *   不一致**当场抛错**（与"cacheImpact 声明不进前缀却装载了"同款做法）——这张表不是复述，是判据。
+ * 值域（与 checkPerm 的 order 表同域）：read < write < full；global = 不受会话权限限制（只对 db_query/db_write
+ *   ——它们在 execTool 里另有 read 会话的单独闸门，见该文件"四层权限无逃逸"那段）。
+ * ⚠️ 改这里的任何一档 = 改行为（read 会话能不能用这个工具），不是改文案：必须同时改 `test/manifest-fields.test.mjs`
+ *   的权限断言并说明理由；快照 `test/fixtures/tools-snapshot.json` 里存着 65 条的值，漂移会被 `test/manifest.test.mjs` 抓住。
+ */
+export const TOOL_PERMISSIONS = {
+  // ===== core(25) =====
+  append_file: 'write',
+  ask_user: 'read',
+  copy_move: 'write',
+  edit_file: 'write',
+  fetch_spill: 'read',
+  fetch_url: 'read',
+  find_file: 'read',
+  finish_task: 'read',
+  get_goal: 'read',
+  grep_search: 'read',
+  hooks_list: 'read',
+  list_dir: 'read',
+  mkdir: 'write',
+  plan_done: 'read',
+  plan_tasks: 'read',
+  read_file: 'read',
+  read_file_range: 'read',
+  repo_map: 'read',
+  run_test: 'write',
+  set_goal: 'read',
+  syntax_check: 'read',
+  undo_checkpoint: 'write',
+  update_goal: 'read',
+  web_search: 'read',
+  write_file: 'write',
+  // ===== pro(33) =====
+  conv_summarize: 'read',
+  create_contract: 'write',
+  db_query: 'global',
+  extract_docx: 'read',
+  extract_pdf: 'read',
+  extract_pptx: 'read',
+  extract_xlsx: 'read',
+  feishu_bitable_read: 'read',
+  feishu_doc_read: 'read',
+  feishu_sheet_read: 'read',
+  git_branch: 'write',
+  git_commit: 'write',
+  git_status: 'read',
+  intake_submit: 'write',
+  job_list: 'full',
+  job_output: 'full',
+  kb_add: 'read',
+  kb_del: 'write',
+  kb_search: 'read',
+  ocr_image: 'read',
+  ralph: 'read',
+  run_long_task: 'full',
+  skill_load: 'read',
+  skill_save: 'write',
+  skills_list: 'read',
+  subagent: 'read',
+  subagent_fanout: 'read',
+  subagent_fork: 'read',
+  subagent_join: 'read',
+  subagent_list: 'read',
+  subagent_output: 'read',
+  subagent_report: 'read',
+  view_image: 'read',
+  // ===== expert(7) =====
+  db_write: 'global',
+  delete_file: 'full',
+  git_pull_push: 'write',
+  kill_process: 'full',
+  reload_platform: 'full',
+  run_command: 'full',
+  set_limits: 'write',
+};

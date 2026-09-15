@@ -9,7 +9,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart, restartPlan } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, APPROVAL_REQUIRED, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, APPROVAL_REQUIRED, TOOL_POLICY, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
 import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepServed, grepRepeatNotice, markWritten } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
@@ -18,6 +18,8 @@ import { armDeadline, toolTimeoutResult } from './deadline.js';
 import { fail, classifyToolThrow, inputError } from '../failures.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
+// 知识检索走后端层（v0.3 §4.3「记忆」行「全文检索打底…向量留接口位置后补」）：全仓**唯一**一份"知识怎么搜"的口径。
+import { searchKnowledge } from '../kbsearch/index.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT } from '../env.js';
 import { execArgv, execShell, killTree, spawnShell } from '../exec/index.js';
 import { readSpill, lineAlignedPreview, detailSummary, READ_INLINE_CHARS } from './spill.js';
@@ -286,7 +288,7 @@ function numberedView(text) {
 const RAW_TOOLS = [
 
 // ---------- B1-B10 文件 ----------
-  { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true', permission: 'read',
+  { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true', 
     params: { path: { type: 'string', required: true, desc: '文件绝对路径' }, numbered: { type: 'boolean', desc: 'true=输出带行号前缀' }, force: { type: 'boolean', desc: 'true=即使本会话已读过也重新给全文' } },
     run: async (a, ctx) => {
       // RA-35 措施②：同会话重复读去重（实测 read 类里 41.7% 是重复读同一文件、且每次区间略有不同）
@@ -315,13 +317,13 @@ const RAW_TOOLS = [
       if (!pv2.full) { out2.omittedLines = [pv2.omittedFromLine, pv2.omittedToLine]; out2.truncated = true; }
       return out2;
     } },
-  { name: 'write_file', description: '写入文件（创建/覆盖）', permission: 'write',
+  { name: 'write_file', description: '写入文件（创建/覆盖）', 
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('write_file', a.content); fs.mkdirSync(path.dirname(a.path), { recursive: true }); fs.writeFileSync(a.path, a.content, 'utf8'); return { saved: true, bytes: a.content.length }; } },
-  { name: 'append_file', description: '追加内容到文件', permission: 'write',
+  { name: 'append_file', description: '追加内容到文件', 
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); rejectPh('append_file', a.content); fs.appendFileSync(a.path, a.content, 'utf8'); return { saved: true }; } },
-  { name: 'edit_file', description: '精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）', permission: 'write',
+  { name: 'edit_file', description: '精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）', 
     params: { path: { type: 'string', required: true, desc: '文件路径' }, old: { type: 'string', required: true, desc: '要替换的原文（必须完全匹配文件内容）' }, new: { type: 'string', desc: '新内容（默认删除 old）' } },
     run: async (a, ctx) => {
       if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区');
@@ -332,22 +334,22 @@ const RAW_TOOLS = [
       fs.writeFileSync(a.path, updated, 'utf8');
       return { edited: true, diff: '- ' + String(a.old).slice(0, 500) + '\n+ ' + String(a.new ?? '').slice(0, 500) };
     } },
-  { name: 'list_dir', description: '列出目录内容。小目录直接给条目；条目多时给"目录/文件数 + 按扩展名汇总 + 前若干条（目录优先）"，并用 hint 说明省略了多少', permission: 'read',
+  { name: 'list_dir', description: '列出目录内容。小目录直接给条目；条目多时给"目录/文件数 + 按扩展名汇总 + 前若干条（目录优先）"，并用 hint 说明省略了多少', 
     params: { path: { type: 'string', required: false, desc: '默认工作区' } },
     run: async (a, ctx) => {
       const p = a.path || ctx.root;
       return listShape(fs.readdirSync(p, { withFileTypes: true }).map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' })), p);
     } },
-  { name: 'mkdir', description: '创建目录', permission: 'write',
+  { name: 'mkdir', description: '创建目录', 
     params: { path: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.mkdirSync(a.path, { recursive: true }); return { created: true }; } },
-  { name: 'copy_move', description: '复制或移动文件/目录（mode: copy|move）', permission: 'write',
+  { name: 'copy_move', description: '复制或移动文件/目录（mode: copy|move）', 
     params: { src: { type: 'string', required: true }, dst: { type: 'string', required: true }, mode: { type: 'string', enum: ['copy', 'move'], desc: 'copy=复制 | move=移动' } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dst, ctx.root)) throw new Error('目标超出工作区'); if (a.mode === 'move') fs.renameSync(a.src, a.dst); else fs.copyFileSync(a.src, a.dst); return { ok: true }; } },
-  { name: 'delete_file', description: '删除文件（高危，留痕）', permission: 'full',
+  { name: 'delete_file', description: '删除文件（高危，留痕）', 
     params: { path: { type: 'string', required: true } },
     run: async (a) => { fs.rmSync(a.path, { recursive: true, force: true }); return { deleted: true }; } },
-  { name: 'find_file', description: '按文件名子串查找文件（name 无需通配符，如找 index.html 传 "index.html" 或 "html" 即可；不支持 * 通配）', permission: 'read',
+  { name: 'find_file', description: '按文件名子串查找文件（name 无需通配符，如找 index.html 传 "index.html" 或 "html" 即可；不支持 * 通配）', 
     params: { path: { type: 'string', required: false }, name: { type: 'string', required: true } },
     run: async (a, ctx) => {
       const root = a.path || ctx.root; const out = [];
@@ -355,7 +357,7 @@ const RAW_TOOLS = [
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else if (it.name.includes(a.name)) out.push(f); } };
       walk(root); return { matches: out.slice(0, 100) };
     } },
-  { name: 'grep_search', description: '在路径(目录或单文件)中按正则搜索文件内容。返回：命中文件清单 files（含每文件命中数 counts，定位首选）+ 前若干条命中行 matches（默认每文件最多 3 条、总计最多 30 条）+ 如实说明还有多少没列出。要上下文用 read_file_range {fromLine,toLine}。同一会话内重复搜同一路径同一正则会返回极短回执（结果已在上文；本会话有写操作即自动作废）；确需重搜传 force=true', permission: 'read',
+  { name: 'grep_search', description: '在路径(目录或单文件)中按正则搜索文件内容。返回：命中文件清单 files（含每文件命中数 counts，定位首选）+ 前若干条命中行 matches（默认每文件最多 3 条、总计最多 30 条）+ 如实说明还有多少没列出。要上下文用 read_file_range {fromLine,toLine}。同一会话内重复搜同一路径同一正则会返回极短回执（结果已在上文；本会话有写操作即自动作废）；确需重搜传 force=true', 
     params: { path: { type: 'string', required: true, desc: '目录或单个文件路径' }, pattern: { type: 'string', required: true, desc: '正则表达式' }, force: { type: 'boolean', desc: 'true=即使本会话已搜过也重新给出' }, maxPerFile: { type: 'number', desc: '每个文件最多列几条命中行（默认 3）' }, maxMatches: { type: 'number', desc: '总计最多列几条命中行（默认 30）' } },
     run: async (a, ctx) => {
       const root = a.path || ctx.root;
@@ -399,7 +401,7 @@ const RAW_TOOLS = [
       if (cap2 < totalCap && matches.length > cap2) matches.length = cap2;
       return finish(matches, counts, totalHits, cap2);
     } },
-  { name: 'read_file_range', description: '分段读取文件。两种定位方式：**按行** fromLine/toLine（推荐——grep_search 给的就是行号，read_file 截断提示里给的也是行号），或按字符 offset/length。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true', permission: 'read',
+  { name: 'read_file_range', description: '分段读取文件。两种定位方式：**按行** fromLine/toLine（推荐——grep_search 给的就是行号，read_file 截断提示里给的也是行号），或按字符 offset/length。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true', 
     params: {
       path: { type: 'string', required: true },
       fromLine: { type: 'number', desc: '起始行号（1 起，含）；与 toLine 配对使用，优先于 offset/length' },
@@ -441,7 +443,10 @@ const RAW_TOOLS = [
         }
         noteServed({ cid: ctx && ctx.conversationId, absPath: abs, mt: st.mtimeMs, size: st.size, spans: plan.gaps });
         // 只输出"未覆盖"的部分；被覆盖的部分不再重复给（这是省 token 的关键）
-        const body = plan.gaps.map(([s, e]) => `…[已跳过上文给出过的 ${s > off ? s - off : 0} 字符]…\n` + c.slice(s, e)).join('\n');
+        // 占位只在**真的跳过内容**时才写（`s > off`）：未覆盖段起点就等于本次请求起点时，前面没有任何东西被跳过，
+        // 写一句"已跳过 0 字符"只是噪声（实测 audit #11935/#11941/#11952 里 #11935 正是这种；
+        // 判据只有这一处，夹具 test/readfile-gap-placeholder.test.mjs 两向钉住）。
+        const body = plan.gaps.map(([s, e]) => (s > off ? `…[已跳过上文给出过的 ${s - off} 字符]…\n` : '') + c.slice(s, e)).join('\n');
         const prefix = plan.coveredChars > 0 ? partialNotice('read_file_range', abs, { span: [off, end], coveredChars: plan.coveredChars }) : '';
         const out = { content: prefix + body, offset: off, length: len, total: c.length, totalLines: c.split('\n').length, servedChars: plan.gaps.reduce((x, [s, e]) => x + (e - s), 0) };
         if (lineFrom != null) { out.fromLine = lineFrom; out.toLine = lineTo; }
@@ -454,7 +459,7 @@ const RAW_TOOLS = [
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
   // 界限（timeoutMs: 90000）声明在 tools/manifest.js，这里不再写字面量（一个界限只留一个出处）。
-  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
+  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', 
     params: { path: { type: 'string', required: true, desc: '图片文件路径或 URL' } },
     run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
@@ -485,7 +490,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full',
+  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）', 
     params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, cwd: { type: 'string', desc: '工作目录；相对路径按工作区根解析（换目录用它，不要在命令里 cd）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
@@ -557,7 +562,7 @@ const RAW_TOOLS = [
       if (readLike) out.hint = (out.hint ? out.hint + ' ' : '') + '这条命令有专门工具，输出更省且带行号可导航：读文件 read_file / read_file_range、列目录 list_dir、搜内容 grep_search、找文件 find_file。本次已照常执行。';
       return out;
     } },
-  { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
+  { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', 
     params: { cmd: { type: 'string', required: true } },
     run: async (a, ctx) => {
       pruneJobs();
@@ -574,7 +579,7 @@ const RAW_TOOLS = [
       child.on('exit', (code) => { const j = jobs.get(String(child.pid)); if (j) { j.status = 'exited'; j.code = code; } jobDbSetStatus(String(child.pid), 'exited', code); });
       return { jobId: String(child.pid), cmd: a.cmd, log: logFile };
     } },
-  { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
+  { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', 
     params: { pid: { type: 'number', required: true } },
     run: async (a) => {
       // "收掉这个进程树"由执行后端的 killTree 动词承担（v0.3 §5：平台事实只许落在执行后端）：
@@ -587,7 +592,7 @@ const RAW_TOOLS = [
       jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
       return { killed: true };
     } },
-  { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
+  { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', 
     params: {},
     run: async () => {
       const mem = [...jobs.entries()].map(([id, j]) => ({ jobId: id, cmd: j.cmd, status: j.status, code: j.code ?? null, started: new Date(j.started).toISOString(), log: j.log }));
@@ -596,7 +601,7 @@ const RAW_TOOLS = [
       const dbJobs = dbRows.filter((d) => !jobs.has(String(d.job_id))).map((d) => ({ jobId: String(d.job_id), cmd: d.cmd, status: d.status, code: d.code ?? null, started: d.started_at ? new Date(d.started_at).toISOString() : null, log: d.log_file, persisted: true }));
       return { jobs: [...mem, ...dbJobs] };
     } },
-  { name: 'job_output', description: '查看后台任务输出日志（最近 8000 字符）', permission: 'full',
+  { name: 'job_output', description: '查看后台任务输出日志（最近 8000 字符）', 
     params: { jobId: { type: 'string', required: true } },
     run: async (a) => {
       const j = jobs.get(String(a.jobId));
@@ -615,7 +620,7 @@ const RAW_TOOLS = [
 
   // ---------- B14 联网搜索（SearXNG） ----------
   // 界限（timeoutMs: 15000）声明在 tools/manifest.js，这里不再写字面量。
-  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read',
+  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', 
     params: { query: { type: 'string', required: true }, limit: { type: 'number' } },
     run: async (a, ctx) => {
       const base = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
@@ -628,7 +633,7 @@ const RAW_TOOLS = [
 
   // ---------- B15 读网页 ----------
   // 界限（timeoutMs: 20000）声明在 tools/manifest.js，这里不再写字面量（一个界限只留一个出处）。
-  { name: 'fetch_url', description: '读取网页正文（简易提取）', permission: 'read',
+  { name: 'fetch_url', description: '读取网页正文（简易提取）', 
     params: { url: { type: 'string', required: true } },
     run: async (a, ctx) => {
       const r = await fetch(a.url, { signal: ctx.__signal, headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -657,16 +662,16 @@ const RAW_TOOLS = [
   // 旧写法 `(await extractXxx(a.path)).slice(0, 20000)` 是 §6.1 点名的那条毛病：工具层先切一刀，上下文层再切一刀，
   // **中间数据丢了、token 照烧**，且被切掉的部分既无定位符也无处可查。现在四件同族走 extractToolResult（唯一出口）：
   // 明细全文落盘 ⇒ 返回值只有摘要/量/头部预览/溢出路径，明细用 fetch_spill 按范围二次取数。
-  { name: 'extract_pdf', description: '提取 PDF 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pdf', await extractPdf(a.path), ctx) },
-  { name: 'extract_docx', description: '提取 Word 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('docx', await extractDocx(a.path), ctx) },
-  { name: 'extract_xlsx', description: '提取 Excel 内容。**不会把整表灌进上下文**：返回 结构摘要（sheets：每表行数/列数）+ 行列信息（各表在溢出文件里的 offset/length 与 fromLine/toLine）+ 溢出文件路径 + 头部预览。需要明细时按范围二次取数：fetch_spill {path, offset, length}（offset/length 用某个表的区间即可只取那张表）', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('xlsx', await extractXlsx(a.path), ctx) },
-  { name: 'extract_pptx', description: '提取 PPT 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pptx', await extractPptx(a.path), ctx) },
+  { name: 'extract_pdf', description: '提取 PDF 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回',  params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pdf', await extractPdf(a.path), ctx) },
+  { name: 'extract_docx', description: '提取 Word 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回',  params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('docx', await extractDocx(a.path), ctx) },
+  { name: 'extract_xlsx', description: '提取 Excel 内容。**不会把整表灌进上下文**：返回 结构摘要（sheets：每表行数/列数）+ 行列信息（各表在溢出文件里的 offset/length 与 fromLine/toLine）+ 溢出文件路径 + 头部预览。需要明细时按范围二次取数：fetch_spill {path, offset, length}（offset/length 用某个表的区间即可只取那张表）',  params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('xlsx', await extractXlsx(a.path), ctx) },
+  { name: 'extract_pptx', description: '提取 PPT 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回',  params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pptx', await extractPptx(a.path), ctx) },
 
   // ---------- B21/B22 数据库（全局权限） ----------
   // 界限口径（有意**不**声明 timeoutMs）：慢查询不是错误，砍它只会掩盖问题（该看的是慢查询日志）；
   // 这里要解决的是"对端已经没了而我们还以为它在跑"——两条结构手段：连接级 keepAlive 死连接检测
   // （见 db.js）+ 把用户"停止"接进查询（ctx.__signal → 连接销毁）。两者都不需要编一个业务阈值。
-  { name: 'db_query', description: '数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。', permission: 'global',
+  { name: 'db_query', description: '数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。', 
     params: { sql: { type: 'string', required: true } },
     run: async (a, ctx) => {
       if (!/^\s*select\b/i.test(a.sql)) {
@@ -689,14 +694,14 @@ const RAW_TOOLS = [
       }
       return out;
     } },
-  { name: 'db_write', description: '数据库写入（高危，留痕）', permission: 'global',
+  { name: 'db_write', description: '数据库写入（高危，留痕）', 
     params: { sql: { type: 'string', required: true } },
     run: async (a, ctx) => { const r = await db.run(a.sql, undefined, { signal: ctx.__signal }); return { affected: r.affectedRows, insertId: r.insertId }; } },
 
   // ---------- B23-B26 Git ----------
-  { name: 'git_status', description: '查看 git 状态', permission: 'read', params: { dir: { type: 'string', required: true } },
+  { name: 'git_status', description: '查看 git 状态',  params: { dir: { type: 'string', required: true } },
     run: async (a, ctx) => { const r = await runCmd('git', ['-C', a.dir, 'status', '--short'], sandboxOf(ctx)); return { status: r.out, ok: r.ok }; } },
-  { name: 'git_commit', description: 'git 提交（自动推送 origin/main——防"只提交未推送被部署覆盖"孤儿，2026-09-09 机制修复）', permission: 'write', params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
+  { name: 'git_commit', description: 'git 提交（自动推送 origin/main——防"只提交未推送被部署覆盖"孤儿，2026-09-09 机制修复）',  params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
     run: async (a, ctx) => {
       await runCmd('git', ['-C', a.dir, 'add', '-A'], sandboxOf(ctx));
       const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message], sandboxOf(ctx));
@@ -709,24 +714,24 @@ const RAW_TOOLS = [
       const pushed = push && push.ok;
       return { ok: true, out: r.out + (pushed ? `\n[已推送 origin/${branch}]` : `\n[⚠️ 提交成功但未推送 origin/${branch}（${String(push?.err || push?.out || '未知原因').slice(0, 300)}）——部署前请先解决未推送提交]`) };
     } },
-  { name: 'git_branch', description: 'git 分支操作（list|create|checkout）', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string', enum: ['list', 'create', 'checkout'] }, branch: { type: 'string' } },
+  { name: 'git_branch', description: 'git 分支操作（list|create|checkout）',  params: { dir: { type: 'string', required: true }, action: { type: 'string', enum: ['list', 'create', 'checkout'] }, branch: { type: 'string' } },
     run: async (a, ctx) => {
       if (a.action === 'create') { const r = await runCmd('git', ['-C', a.dir, 'branch', a.branch], sandboxOf(ctx)); return { ok: r.ok }; }
       if (a.action === 'checkout') { const r = await runCmd('git', ['-C', a.dir, 'checkout', a.branch], sandboxOf(ctx)); return { ok: r.ok }; }
       const r = await runCmd('git', ['-C', a.dir, 'branch', '-a'], sandboxOf(ctx)); return { branches: r.out };
     } },
-  { name: 'git_pull_push', description: 'git 拉取/推送', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string' } },
+  { name: 'git_pull_push', description: 'git 拉取/推送',  params: { dir: { type: 'string', required: true }, action: { type: 'string' } },
     run: async (a, ctx) => { const r = await runCmd('git', ['-C', a.dir, a.action === 'push' ? 'push' : 'pull'], sandboxOf(ctx)); return { ok: r.ok, out: r.out }; } },
 
   // ---------- B27/B28 代码检查 ----------
-  { name: 'syntax_check', description: 'JS 语法检查（node --check）', permission: 'read', params: { path: { type: 'string', required: true } },
+  { name: 'syntax_check', description: 'JS 语法检查（node --check）',  params: { path: { type: 'string', required: true } },
     // node --check 的路径来自模型 ⇒ 与 hooks.js 的语法检查钩子同一条口径：进沙箱
     run: async (a, ctx) => { const r = await runCmd('node', ['--check', a.path], sandboxOf(ctx)); return { ok: r.ok, err: r.err }; } },
-  { name: 'run_test', description: '运行测试（write 级仅工作区内）', permission: 'write', params: { dir: { type: 'string', required: true } },
+  { name: 'run_test', description: '运行测试（write 级仅工作区内）',  params: { dir: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await execShell('npm test', { cwd: a.dir, ...sandboxOf(ctx) }); return { ok: r.ok, out: r.out, err: r.err }; } },
 
   // ---------- F9 动态任务清单（多步任务规划与进度展示） ----------
-  { name: 'plan_tasks', description: '为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）', permission: 'read',
+  { name: 'plan_tasks', description: '为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）', 
     params: { tasks: { type: 'string', required: true, desc: '任务步骤列表，用换行或分号分隔' } },
     run: async (a, ctx) => {
       const steps = String(a.tasks || '').split(/[\n;；]+/).map((s) => s.trim()).filter(Boolean).map((text) => ({ text: text.slice(0, 120), done: false }));
@@ -735,7 +740,7 @@ const RAW_TOOLS = [
       plan.steps = steps; plan.done = 0;
       return { plan: plan.steps.map((s) => s.text), total: steps.length };
     } },
-  { name: 'plan_done', description: '标记任务清单中第 N 步已完成（从 1 开始）', permission: 'read',
+  { name: 'plan_done', description: '标记任务清单中第 N 步已完成（从 1 开始）', 
     params: { index: { type: 'number', required: true, desc: '步骤序号（从 1 开始）' } },
     run: async (a, ctx) => {
       const plan = planOf(ctx);
@@ -746,7 +751,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- F10 目标系统（跨轮持续推进的长期目标） ----------
-  { name: 'set_goal', description: '设定本会话的长期目标（用户要求持续推进一件大事时用；目标会跨轮持续注入提醒，直到完成/放弃）', permission: 'read',
+  { name: 'set_goal', description: '设定本会话的长期目标（用户要求持续推进一件大事时用；目标会跨轮持续注入提醒，直到完成/放弃）', 
     params: { objective: { type: 'string', required: true, desc: '目标描述' } },
     run: async (a, ctx) => {
       const cid = ctx.conversationId;
@@ -757,7 +762,7 @@ const RAW_TOOLS = [
       else await db.query('INSERT INTO goals (conversation_id, account_id, objective, status) VALUES (?,?,?,"active")', [cid, ctx.accountId || null, obj]);
       return { goal: obj, status: 'active' };
     } },
-  { name: 'update_goal', description: '更新当前活动目标的进度或状态（progress=进展说明；status=done 完成 / abandoned 放弃）', permission: 'read',
+  { name: 'update_goal', description: '更新当前活动目标的进度或状态（progress=进展说明；status=done 完成 / abandoned 放弃）', 
     params: { progress: { type: 'string' }, status: { type: 'string', desc: 'active|done|abandoned' } },
     run: async (a, ctx) => {
       const cid = ctx.conversationId;
@@ -768,7 +773,7 @@ const RAW_TOOLS = [
       const row = (await db.query('SELECT objective, progress, status FROM goals WHERE id=?', [g.id]))[0];
       return row;
     } },
-  { name: 'get_goal', description: '查看当前会话的活动目标与进度', permission: 'read',
+  { name: 'get_goal', description: '查看当前会话的活动目标与进度', 
     params: {},
     run: async (a, ctx) => {
       const cid = ctx.conversationId;
@@ -779,7 +784,7 @@ const RAW_TOOLS = [
 
   // ---------- 图片理解（视觉模型分析图片） ----------
   // 界限（timeoutMs: 60000）声明在 tools/manifest.js，这里不再写字面量。
-  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',
+  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', 
     params: { path: { type: 'string', required: true, desc: '本地图片路径或 URL' } },
     run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
@@ -809,7 +814,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 子代理（F16/F17：主代理派生独立代理执行任务，复用完整 Agent 循环） ----------
-  { name: 'subagent', description: '启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（"子:"前缀）并留痕。可用 tools 把它的工具清单收窄到只有几个（如查库存的子代理只给 db_query），用 budgetYuan 给它切一块额度（只烧这块，没花完会回收）。', permission: 'read',
+  { name: 'subagent', description: '启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（"子:"前缀）并留痕。可用 tools 把它的工具清单收窄到只有几个（如查库存的子代理只给 db_query），用 budgetYuan 给它切一块额度（只烧这块，没花完会回收）。', 
     params: {
       prompt: { type: 'string', required: true, desc: '给子代理的完整任务指令（自包含，含目标与验收标准）' },
       name: { type: 'string', desc: '子代理名称（用于展示，默认 子代理）' },
@@ -836,7 +841,7 @@ const RAW_TOOLS = [
       const rec = await waitSub(id);
       return subagentOutcome(rec); // RA-13：失败/挂起也照出（含部分正文、已完成步骤与"该块未取得"标注），不再抛异常
     } },
-  { name: 'subagent_output', description: '查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果，error=失败（会连失败原因、已花额度与已完成步骤一起给出，不要据此丢弃已完成的部分）。未完成就继续查询/等一会。', permission: 'read',
+  { name: 'subagent_output', description: '查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果，error=失败（会连失败原因、已花额度与已完成步骤一起给出，不要据此丢弃已完成的部分）。未完成就继续查询/等一会。', 
     params: { id: { type: 'string', required: true, desc: 'sub_id（subagent async 返回）' } },
     run: async (a) => {
       const { subs: subMap, subagentOutcome } = await import('../subagent.js');
@@ -845,7 +850,7 @@ const RAW_TOOLS = [
       if (rec.status === 'running') return { sub_id: rec.id, status: 'running', tip: '仍在执行，稍后重试' };
       return subagentOutcome(rec);
     } },
-  { name: 'subagent_report', description: '调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论、额度收支），用于复盘与审计', permission: 'read',
+  { name: 'subagent_report', description: '调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论、额度收支），用于复盘与审计', 
     params: { id: { type: 'string', required: true, desc: 'sub_id' } },
     run: async (a) => {
       const { subs: subMap, subagentOutcome } = await import('../subagent.js');
@@ -856,7 +861,7 @@ const RAW_TOOLS = [
       const steps = (rec.toolLog || []).map((t) => ({ name: t.name, status: t.status, durationMs: t.durationMs, args: t.args, result: String(t.result || '').slice(0, 400) }));
       return { ...o, task: rec.prompt, steps, result: String(rec.result || '').slice(0, 8000) };
     } },
-  { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）。失败的那些也会照出失败原因与已完成步骤。', permission: 'read',
+  { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）。失败的那些也会照出失败原因与已完成步骤。', 
     params: { ids: { type: 'string', required: true, desc: '逗号分隔的 sub_id 列表' } },
     run: async (a) => {
       const { subs: subMap, waitSub, subagentOutcome } = await import('../subagent.js');
@@ -869,7 +874,7 @@ const RAW_TOOLS = [
       }
       return { joined: out, note: out.some((o) => o.degraded) ? '有子代理未成功：交付物里请照常给出这些块并标注"未取得"，不要静默省略。' : undefined };
     } },
-  { name: 'subagent_list', description: '列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时/额度），用于编排与排查', permission: 'read',
+  { name: 'subagent_list', description: '列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时/额度），用于编排与排查', 
     params: {},
     run: async () => {
       const { subs: subMap } = await import('../subagent.js');
@@ -881,7 +886,7 @@ const RAW_TOOLS = [
       }));
       return { total: subMap.size, subs: arr };
     } },
-  { name: 'subagent_fork', description: '派生一个"延续本会话上下文"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）；tools/budgetYuan 同 subagent。', permission: 'read',
+  { name: 'subagent_fork', description: '派生一个"延续本会话上下文"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）；tools/budgetYuan 同 subagent。', 
     params: {
       prompt: { type: 'string', required: true, desc: '给子代理的独立任务（它会同时看到本会话最近对话）' },
       name: { type: 'string' },
@@ -913,7 +918,7 @@ const RAW_TOOLS = [
       const rec = await waitSub(id);
       return subagentOutcome(rec);
     } },
-  { name: 'subagent_fanout', description: '批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要', permission: 'read',
+  { name: 'subagent_fanout', description: '批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要', 
     params: {
       template: { type: 'string', required: true, desc: '子代理任务模板，其中 {{item}} 会被替换为具体条目' },
       items: { type: 'string', required: true, desc: '条目数组的 JSON，如 ["a.txt","b.txt"]（或逗号分隔字符串）' },
@@ -959,7 +964,7 @@ const RAW_TOOLS = [
   // ---------- 知识库（④：global 全会话可见 / shell 仅所属壳会话可见(§4) / conv 仅本会话；正文大段用 kb_search 取） ----------
   // 2026-09-09 文档型升级：kb_add 可选 kind（默认 fact=运行事实；progress 进化进度/guide 平台规范/skill 技能/lesson 错题本）——
   // 仅分类表达，检索/可见语义不变（kb_search/F19 不按 kind 过滤）
-  { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', permission: 'read',
+  { name: 'kb_add', description: '写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代"记住/以后都按…"时用', 
     params: { title: { type: 'string', required: true }, body: { type: 'string' }, scope: { type: 'string', enum: ['global', 'shell', 'conv'], desc: 'global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)' }, kind: { type: 'string', enum: ['fact', 'progress', 'guide', 'skill', 'lesson'], desc: '分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索' }, overwrite: { type: 'boolean', desc: '同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
@@ -1004,19 +1009,21 @@ const RAW_TOOLS = [
       const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, kind, title, body, 'active']);
       return { saved: true, id: r.insertId, updated: false, scope, kind, title, source: writeSource(ctx) };
     } },
-  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里', permission: 'read',
+  { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里', 
     params: { q: { type: 'string', required: true, desc: '关键词' } },
     run: async (a, ctx) => {
       if (!ctx.accountId) return { items: [] };
       // ④ 会话可见：global + 本会话所属真实壳私有(shell) + 本会话 conv；default 壳(中性)=无壳私有语义（统一出口 kbVisibleWhere，§9.3④ A6 生产化）
       const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
       const v = kbVisibleWhere({ accountId: ctx.accountId, shellId, conversationId: ctx.conversationId || null });
-      const like = '%' + String(a.q).split(/\s+/).filter(Boolean).join('%') + '%';
-      const rows = await db.query(`SELECT id, scope, title, body, created_at FROM knowledge WHERE ${v.where} AND (title LIKE ? OR body LIKE ?) ORDER BY id DESC LIMIT 8`,
-        [...v.params, like, like]);
-      return { items: rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title, body: String(r.body || '').slice(0, 1200), createdAt: r.created_at })) };
+      // 2026-09-16（v0.3 §4.3「记忆」行「全文检索（FTS5）打底…向量留接口位置后补」）：检索**不再**在这里现写。
+      // 这一段（以及全仓唯一那份"知识怎么搜"的口径）搬进 `server/kbsearch/`：接口 + 唯一选择点 + 实现（fts=MySQL
+      // FULLTEXT+ngram）。本处只把**可见范围**（kbVisibleWhere 统一出口）与关键词交给它——可见性口径仍只有一份。
+      // 返回值 `mode` 如实标明这次走的是 fts（真全文）还是 like（索引不可用时的兜底），不静默假装是全文检索。
+      const r = await searchKnowledge(a.q, { db, where: v.where, params: v.params, limit: 8, snippet: 1200 });
+      return { items: r.items, mode: r.mode, backend: r.backend };
     } },
-  { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）', permission: 'write',
+  { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）', 
     params: { id: { type: 'number', required: true } },
     run: async (a, ctx) => {
       // ④ 可见范围删除保护：仅能删自己账号且当前会话可见范围的条目（防误删他壳/他会话私有记忆；统一出口 kbVisibleWhere A6 生产化）
@@ -1027,7 +1034,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 任务契约（外部驱动器：讨论达成共识后立项 → 无人值守执行） ----------
-  { name: 'create_contract', description: '创建任务契约并立项（讨论达成共识后使用；驱动器会在 run_at 到点后无人值守执行，直到验收通过并等待用户复测）。goal=目标（完整）；acceptance=验收清单 JSON 字符串数组（驱动器逐条跑 shell 命令核验，如 ["grep -q X /path"]）；boundaries=边界约束；runAt=可空 ISO 时间（空=立即排队）。', permission: 'write',
+  { name: 'create_contract', description: '创建任务契约并立项（讨论达成共识后使用；驱动器会在 run_at 到点后无人值守执行，直到验收通过并等待用户复测）。goal=目标（完整）；acceptance=验收清单 JSON 字符串数组（驱动器逐条跑 shell 命令核验，如 ["grep -q X /path"]）；boundaries=边界约束；runAt=可空 ISO 时间（空=立即排队）。', 
     params: {
       goal: { type: 'string', required: true, desc: '任务目标（完整、含交付物）' },
       title: { type: 'string', desc: '简短标题' },
@@ -1047,7 +1054,7 @@ const RAW_TOOLS = [
         [ctx.accountId ?? null, String(a.title || goal.slice(0, 40)).slice(0, 200), goal, JSON.stringify(acc.slice(0, 10)), String(a.boundaries || '').slice(0, 1000), runAt]);
       return { contract_id: r.insertId, status: 'queued', note: (runAt ? ('将于 ' + runAt.toISOString() + ' 执行') : '已排队，驱动器将尽快无人值守执行') + '；完成后会生成你的复测任务等待确认。' };
     } },
-  { name: 'finish_task', description: '任务完成自检提交：把任务标记为"已完成候选"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入"待用户复测"。若工作区是 git 仓库且非平台代码目录，将自动提交未提交改动（P5 auto-commit 业务区）。', permission: 'read',
+  { name: 'finish_task', description: '任务完成自检提交：把任务标记为"已完成候选"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入"待用户复测"。若工作区是 git 仓库且非平台代码目录，将自动提交未提交改动（P5 auto-commit 业务区）。', 
     params: {
       summary: { type: 'string', required: true, desc: '完成总结（做了什么、结果如何）' },
       selfCheck: { type: 'string', desc: '对照验收标准的自检说明' },
@@ -1092,7 +1099,7 @@ const RAW_TOOLS = [
   // 保留 plan_tasks/plan_done（意图挡位内的任务清单载体，行为准则 1.4 使用）。
 
   // ---------- ralph 循环（多轮全新 Agent 共享工作区记忆推进同一目标，至完成/阻塞/达轮次上限） ----------
-  { name: 'ralph', description: '对同一目标运行多轮"全新视角"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。', permission: 'read',
+  { name: 'ralph', description: '对同一目标运行多轮"全新视角"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。', 
     params: {
       objective: { type: 'string', required: true, desc: '不可变的目标' },
       rounds: { type: 'number', desc: '轮次上限（默认 5，最大 10）' },
@@ -1143,7 +1150,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 结构化问询（ask_user：需要用户做选择时发选项卡片，等用户点选后继续） ----------
-  { name: 'ask_user', description: '向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。', permission: 'read',
+  { name: 'ask_user', description: '向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。', 
     params: {
       question: { type: 'string', required: true, desc: '要问用户的问题' },
       options: { type: 'string', required: true, desc: '选项：JSON 数组字符串，如 [{"label":"方案A","value":"a"},{"label":"方案B","value":"b"}]；value 会作为返回值' },
@@ -1163,7 +1170,9 @@ const RAW_TOOLS = [
         if (ctx.__needInput) await ctx.__needInput(payload);
         throw new Error('【无人值守】需要用户决策，问题已排队（' + q.slice(0, 60) + '…）。请停止当前任务并输出阶段性总结。');
       }
-      const ap = createAsk(q, normalized);
+      // `{conversationId}` 是**归属**（跨端一致要"按会话找得到这张卡"：渠道侧据此把卡发到人所在的端、
+      // 也据此把人在渠道里的回答对回这张卡）——见 server/cards.js。
+      const ap = createAsk(q, normalized, { conversationId: ctx && ctx.conversationId });
       if (ctx.__emit) ctx.__emit({ type: 'ask', id: ap.id, question: q, options: normalized });
       // RA-26 四面②：等待用户答复同样是独立状态（进出各一次事件，等待时长不计入执行用时）
       const waitT0 = Date.now();
@@ -1188,7 +1197,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 运行护栏（set_limits）与平台自重启（reload_platform） ----------
-  { name: 'set_limits', description: '调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）；parallel=同一步内并行工具数（0=串行，默认10）。用户要求"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务"时用它，并汇报调整后的值。', permission: 'write',
+  { name: 'set_limits', description: '调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）；parallel=同一步内并行工具数（0=串行，默认10）。用户要求"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务"时用它，并汇报调整后的值。', 
     params: {
       minutes: { type: 'number', desc: '时间预算(分钟)，0=不限' },
       rounds: { type: 'number', desc: '轮次上限，0=不限' },
@@ -1208,7 +1217,7 @@ const RAW_TOOLS = [
       await bumpPolicyRev(); // 政策版本自增（WS2：护栏变化须让运行中模型看到）
       return { applied: Object.fromEntries(ups), note: '已写入 settings 并自增政策版本；进行中任务每轮读取最新护栏（最快 5s 生效）。0=不限/串行。默认参考值：120分钟/2000轮/连续6次/并行10。' };
     } },
-  { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要自己手动重启服务（会中断你自己的执行）；仅改配置/数据时无需调用。', permission: 'full',
+  { name: 'reload_platform', description: '让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要自己手动重启服务（会中断你自己的执行）；仅改配置/数据时无需调用。', 
     params: { note: { type: 'string', desc: '改动说明（改了什么，便于审计回看）' } },
     run: async (a, ctx) => {
       // F2 reload 防撞（2026-09 批2）：重启会打断服务器上一切进行中会话（agent_runs running 会被标 interrupted）。
@@ -1238,7 +1247,7 @@ const RAW_TOOLS = [
 
   // ---------- A5 开发需求采集（单一 intake 收口，§8.8 收敛与分层①）：intake 技能采集齐字段后 → intake_submit 落 extension_demands(待审)。
   // 硬闸门（§8.6）：必须流程技能（plugin-dev-intake/app-dev-intake/shell-intake）未载入时本工具拒绝——见 hooks.js intake_skill_guard。
-  { name: 'intake_submit', description: '提交开发需求（单一 intake 收口）：四字段齐备后落 extension_demands 待审，供进化集审批台审。必须先在本会话 skill_load 载入对应的 intake 技能（plugin-dev-intake→插件 / app-dev-intake→应用），未载入会被硬闸拒绝。', permission: 'write',
+  { name: 'intake_submit', description: '提交开发需求（单一 intake 收口）：四字段齐备后落 extension_demands 待审，供进化集审批台审。必须先在本会话 skill_load 载入对应的 intake 技能（plugin-dev-intake→插件 / app-dev-intake→应用），未载入会被硬闸拒绝。', 
     params: {
       assetType: { type: 'string', required: true, enum: ['plugin', 'app', 'shell'], desc: '资产类型：plugin 插件 / app 应用 / shell 壳' },
       assetKey: { type: 'string', required: false, desc: '关联扩展资产 key（升级既有资产时填；新资产留空=新立项）' },
@@ -1259,7 +1268,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 技能系统（F15：机制=挂载 SKILL.md；内容由用户/服务器自定，平台不预设） ----------
-  { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', permission: 'read',
+  { name: 'skills_list', description: '列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到"技能/skill/按照某方法做"时先查这里', 
     params: {},
     run: async () => {
       if (!fs.existsSync(SKILLS_ROOT)) return { skills: [], root: SKILLS_ROOT };
@@ -1274,7 +1283,7 @@ const RAW_TOOLS = [
       }
       return { skills: out, root: SKILLS_ROOT };
     } },
-  { name: 'skill_load', description: '载入技能：该技能 SKILL.md 全文进入系统提示，本会话后续轮次持续生效（跨轮记忆）；重复载入即更新', permission: 'read',
+  { name: 'skill_load', description: '载入技能：该技能 SKILL.md 全文进入系统提示，本会话后续轮次持续生效（跨轮记忆）；重复载入即更新', 
     params: { name: { type: 'string', required: true, desc: '技能目录名（skills_list 查得）' } },
     run: async (a, ctx) => {
       const name = String(a.name).trim();
@@ -1291,7 +1300,7 @@ const RAW_TOOLS = [
       }
       return { loaded: name, description: meta.description || '', bodyLength: body.length, head: body.slice(0, 800) };
     } },
-  { name: 'skill_save', description: '创建/更新技能：写入 skills/<名称>/SKILL.md（frontmatter: name/description/version，正文为执行指令），之后可用 skill_load 载入', permission: 'write',
+  { name: 'skill_save', description: '创建/更新技能：写入 skills/<名称>/SKILL.md（frontmatter: name/description/version，正文为执行指令），之后可用 skill_load 载入', 
     params: { name: { type: 'string', required: true }, description: { type: 'string', desc: '一句话说明何时用该技能' }, content: { type: 'string', required: true, desc: 'SKILL.md 正文指令' } },
     run: async (a, ctx) => {
       const name = String(a.name).trim();
@@ -1307,15 +1316,15 @@ const RAW_TOOLS = [
   // ---------- 飞书文档（F7/F9/F10/F11，v2.0 渠道一期） ----------
   // 界限口径（timeoutMs: 55000 声明在 tools/manifest.js）：一次调用最多 1 次取 token + 2 次 API GET，
   // 沿用原有数值 15000 + 2×20000 = 55000（不新造数），但只写在清单一处。
-  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
+  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）',  params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuDoc(a.url, ctx.__signal) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容', permission: 'read', params: { url: { type: 'string', required: true }, range: { type: 'string' } },
+  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容',  params: { url: { type: 'string', required: true }, range: { type: 'string' } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuSheet(a.url, a.range, ctx.__signal) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
+  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录',  params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuBitable(a.appToken, a.tableId, ctx.__signal) : { error: '未配置飞书凭证' } },
 
   // ---------- 会话归档（WS5e：conv_summarize → conv_summaries；v2=语义摘要（LLM），失败/关闭时回退结构化 v1） ----------
-  { name: 'conv_summarize', description: '归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求"总结这个对话"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）', permission: 'read',
+  { name: 'conv_summarize', description: '归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求"总结这个对话"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）', 
     params: { conversationId: { type: 'number', desc: '目标会话 id，缺省=当前会话' }, semantic: { type: 'boolean', desc: 'true=强制 LLM 语义摘要；缺省自动（>80 条消息时）' } },
     run: async (a, ctx) => summarizeConversation(a.conversationId || ctx.conversationId, { semantic: a.semantic, provider: ctx.__provider, model: ctx.__model, keys: ctx.__keys }) },
 ];
@@ -1369,10 +1378,21 @@ export function findTool(name) {
 }
 
 // 权限检查：工具所需权限 <= 会话权限（global 不受限）
+// **权限的唯一出处是清单**（v0.3 §7.1 ⑤"审批/权限/并行/超时声明化"）：`TOOL_POLICY[name].permission` 由
+// `tools/manifest.js` 的 `TOOL_PERMISSIONS` 装配而来，装配期还会与实现交叉核对（不一致当场抛错）。
+// 静态工具**不再**在自己身上声明权限——实现里那份副本已删（两处声明早晚漂移，正是 ⑤ 要治的病）。
+// 动态来源（MCP）不在静态清单里，它们的权限由装载方在条目上声明（见 syncMcpTools）⇒ 只在那种情况下回落到工具自己那一格。
+export function permOf(tool) {
+  if (!tool) return undefined;
+  const declared = tool.name ? TOOL_POLICY[tool.name] : null;   // 清单里的静态声明优先
+  return (declared && declared.permission) || tool.permission;
+}
+
 export function checkPerm(tool, sessionPerm) {
-  if (tool.permission === 'global') return true;
+  const perm = permOf(tool);
+  if (perm === 'global') return true;
   const order = { read: 1, write: 2, full: 3, guard: 3 }; // guard=full 级别操作能力，但受控工具须经审批门禁
-  return order[tool.permission] <= order[sessionPerm || 'full'];
+  return order[perm] <= order[sessionPerm || 'full'];
 }
 
 // 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行；
@@ -1665,10 +1685,11 @@ export async function execTool(name, args, ctx) {
     }
     if (tool && !blocked && !checkPerm(tool, ctx.permission)) {
       blockedCode = 'TOOL_PERMISSION_DENIED';
-      blocked = `工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）。本轮请改用本会话权限允许的工具，或请用户提权后重试。`;
+      // 提示里报的档位也从**清单**读（permOf）——不然"清单说 read、提示说 write"又是一处自相矛盾
+      blocked = `工具 ${name} 需要 ${permOf(tool)} 权限（当前 ${ctx.permission}）。本轮请改用本会话权限允许的工具，或请用户提权后重试。`;
     }
     // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
-    if (tool && !blocked && ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
+    if (tool && !blocked && ctx.permission === 'read' && permOf(tool) === 'global' && name === 'db_write') {
       blockedCode = 'TOOL_PERMISSION_DENIED';
       blocked = '工具 db_write 需要 write 级及以上权限（当前 read 会话为只读）。';
     }
@@ -1683,7 +1704,7 @@ export async function execTool(name, args, ctx) {
         blocked = '工具 ' + name + ' 参数疑似含截断/裁剪/归档占位符（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加后重试，勿把历史中的占位符文本复制进写参数。';
       }
       // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
-      if (!blocked && eff.limitPath && tool.permission === 'read') {
+      if (!blocked && eff.limitPath && permOf(tool) === 'read') {
       const key = ['path', 'file', 'dir', 'base', 'src'].find((k) => args[k] !== undefined);
       const cand = key ? args[key] : undefined;
       if (cand) {
@@ -1732,7 +1753,7 @@ export async function execTool(name, args, ctx) {
         // + 批准一次后同类不再问。工具**结果**的形状一个字段都不动（形状不变是硬约束，见 exec-callsites 接线(b)）。
         const argsDesc = JSON.stringify(args).slice(0, 300);
         const sandboxNote = judge.kind === 'sandbox' ? '\n' + judge.why : '';
-        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}${sandboxNote}`);
+        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}${sandboxNote}`, { conversationId: eff.conversationId });
         if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}${preview}${sandboxNote}` });
         // RA-26 四面②：等待人工确认是一个**独立状态**（不是"还在跑"）——进出各发一次事件，
         // 并把这段等待时长从"执行用时"里扣掉（见 agent.js 的 __onWait；时间预算不该为等待买单）。
@@ -1849,7 +1870,6 @@ export async function execTool(name, args, ctx) {
 RAW_TOOLS.push({
   name: 'undo_checkpoint',
   description: '回滚一次自动文件快照：写类工具(write_file/append_file/edit_file/delete_file)执行前系统已自动快照原内容。{list:true} 查看最近快照；{n:1} 回滚最近第 n 次（1=最新）。改坏了代码/文件时用它回到操作前一刻',
-  permission: 'write',
   params: {
     list: { type: 'boolean', required: false, desc: 'true=只列快照不回滚' },
     n: { type: 'number', required: false, desc: '回滚第 n 新的快照（默认 1=最近一次）' },
@@ -1866,7 +1886,6 @@ RAW_TOOLS.push({
 RAW_TOOLS.push({
   name: 'hooks_list',
   description: '列出当前已注册的 hooks 事件钩子（before/after、目标工具、名称、是否内置）。当工具执行返回"已被 hook 拦截"时，用它查看是哪个纪律钩子拦的、为什么',
-  permission: 'read',
   params: {},
   run: async () => {
     const hooks = listHooks();
@@ -1880,7 +1899,6 @@ RAW_TOOLS.push({
 RAW_TOOLS.push({
   name: 'repo_map',
   description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要。地图较大时不会整份灌进上下文——只回 summary（文件/目录数）+ 头部预览 + 溢出文件路径，明细用 fetch_spill {path, offset, length} 按范围取回；较小时直接给 text。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
-  permission: 'read',
   params: { dir: { type: 'string', required: false, desc: '目标目录，缺省=当前工作区' } },
   run: async (a, ctx) => {
     const dir = a.dir || ctx.root || RW_WORKSPACE;
@@ -1914,7 +1932,6 @@ RAW_TOOLS.push({
 RAW_TOOLS.push({
   name: 'fetch_spill',
   description: '取回被溢出（spill）的工具结果全文。上下文里出现"已省略 N 字节…全文已存 <路径>"时，用它按范围分段读回',
-  permission: 'read',
   params: {
     path: { type: 'string', required: true, desc: '溢出文件路径（上下文提示里的定位符，"全文已存 …"后面的路径）' },
     offset: { type: 'number', desc: '起始字符偏移（默认 0）' },

@@ -190,6 +190,20 @@ export const VERSIONS = [
       'ALTER TABLE contract_events ADD UNIQUE KEY uk_ce_event (event_id)',
     ],
   },
+  {
+    id: '0007_kb_fulltext_ngram', note: '知识全文检索打底：knowledge(title, body) 建 MySQL FULLTEXT（ngram 分词）',
+    // 2026-09-16（v0.3 §4.3「记忆」行「**全文检索（FTS5）打底** + 分层召回 + 受限自动沉淀；向量留接口位置后补」）：
+    // 改造前的检索是 `title LIKE ? OR body LIKE ?`（`server/tools/index.js` 的 kb_search）——没有索引、
+    // 没有相关度、也没有"检索后端"这一层。这一条把**介质**那一半补上：MySQL 8 的 FULLTEXT + `WITH PARSER ngram`。
+    // 为什么必须是 ngram：默认全文解析器按空白/标点切词，中文整段会变成一个 token ⇒ 中文关键词搜不到
+    // （本机实测 MySQL 8.0.46、ngram 插件 ACTIVE、ngram_token_size=2；`WITH PARSER ngram` 建表成功）。
+    // 索引名 `ft_kb_text` 与 `server/kbsearch/fts.js` 的 INDEX_NAME、以及 db.js 建表语句**必须是同一个**
+    // （改名＝三处一起改；本条与 db.js 的一致性由 test/schema-sync.test.mjs 的建表语句抠取覆盖）。
+    // 只增不删：存量库加索引、不动任何数据（建索引期间 MySQL 会对该表加锁，条目量大时有秒级阻塞——
+    // 这是本迁移唯一的运维代价，如实记在这里）。
+    // 新库路径由 db.js 的 SCHEMA 建到最终形状（含本索引），两条路径一起改。
+    statements: [`CREATE FULLTEXT INDEX ft_kb_text ON knowledge (title, body) WITH PARSER ngram`],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (

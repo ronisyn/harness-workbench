@@ -106,7 +106,13 @@ export function writeSpill(text, meta = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, spillFileName(meta.tool, meta.callId));
   const body = typeof meta.redact === 'function' ? meta.redact(s) : s; // 与落库同口径脱敏（密钥不入盘）
-  fs.writeFileSync(file, body, 'utf8');
+  // 权限：**创建时就给 0600**（v0.3 §4.4"溢出文件的权限与保留期"），与 `server/credentials.js` 的
+  // writeStore 同款做法——不靠事后 chmod（事后那一下中间有一个窗口是宽权限）。
+  // 溢出明细里可能有工具返回值里的密钥/业务数据，而落盘位置在工作区下（同机其它账户可读）：
+  // 目录归属只保证"别的会话取不回"（readSpill 校验），**文件本身**的读权限才是这台机器上的那道边界。
+  // Windows 上 POSIX mode 无效（NTFS 由 ACL 决定，Node 不据此设权限）——不做平台分支：给一个在 POSIX 上
+  // 真生效、在 Windows 上被忽略的 mode，比"判断平台再决定给不给"少一处会写错的判据（credentials.js 同）。
+  fs.writeFileSync(file, body, { encoding: 'utf8', mode: 0o600 });
   return { path: file, bytes: Buffer.byteLength(s, 'utf8') };
 }
 

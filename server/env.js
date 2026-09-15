@@ -2,6 +2,7 @@
 // 目的：引擎代码里不再出现平台专属字面量（路径/服务名/搜索后端/临时目录），换环境只改环境变量。
 // 口径：默认值＝由代码自身位置与操作系统推导（换机器不用改配置）；本模块**只收环境事实**，不收行为规则与业务配置。
 // 依据：《RW-Agent 架构 v1.1》§3.1（环境无关）；验收 G1 / RA-01；D2′ 客户机交付（Windows Server）。
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,24 @@ import { fileURLToPath } from 'node:url';
 // 都会拿一个不存在的路径去比，从而走错分支；而且本地开发机上也一样错。
 export const RW_PLATFORM_DIR = process.env.RW_PLATFORM_DIR
   || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// 平台版本号（v0.3 §4.1 运行面："…单进程可启动；**有版本号与变更说明**"）。
+// 唯一出处＝`package.json` 的 `version`：本模块**只收环境事实**，不在这里另写一份版本字面量
+// （同一份事实写两处，早晚漂移；变更说明的逐条依据见仓库根的 `CHANGELOG.md`）。
+// 读不到／读不成 JSON 时**如实**报 '0.0.0' 并告警——不猜、不编（与 permissions 面"拿不到不假装"同一纪律）。
+// 为什么是同步读一次而不是每处 import：它要在 MCP 握手（每次 initialize）与启动日志里即时可用，
+// 且 `package.json` 是随包发布的静态文件，进程运行期不会变（平台版本要换必须改文件+重启）。
+// `platformVersion()` 收一个路径参数是给夹具的缝：夹具要能断言"读不到时如实退回 0.0.0"，而不必真去挪 package.json。
+export function platformVersion(pkgPath = path.join(RW_PLATFORM_DIR, 'package.json')) {
+  try {
+    const v = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version;
+    return (typeof v === 'string' && v.trim()) ? v.trim() : '0.0.0';
+  } catch (e) {
+    console.warn('[env] 读不到平台版本（package.json 缺失/不是合法 JSON），按 0.0.0 上报：' + ((e && e.message) || e));
+    return '0.0.0';
+  }
+}
+export const RW_VERSION = platformVersion();
 
 // Agent 工作区＝平台目录的**兄弟目录**（现行部署 /srv/harness-workbench + /srv/rw-workspace 正是这个关系）。
 // 不写死 '/srv/rw-workspace'：客户机上没有 /srv；这条关系在任何盘符、任何安装路径下都成立。
@@ -58,6 +77,10 @@ export const RW_IDLE_MIN = Number(process.env.RW_IDLE_MIN || 60);               
 export const RW_STORAGE = process.env.RW_STORAGE || 'mysql';
 // 执行后端（v0.3 §4.2 三层分离的第三层 / §5 跨平台）：选择 server/exec/ 下的实现。
 export const RW_EXEC_BACKEND = process.env.RW_EXEC_BACKEND || 'local';
+// 知识检索后端（v0.3 §4.3「记忆」行「全文检索打底…**向量留接口位置后补**」）：选择 server/kbsearch/ 下的实现。
+// 当前唯一实现＝fts（MySQL FULLTEXT + ngram）。这一行就是"向量留位置"的入口：将来写好向量实现模块、
+// 在 server/kbsearch/index.js 的实现表加一行，然后把这台机器的 RW_KB_SEARCH 指过去即生效——调用方不改。
+export const RW_KB_SEARCH = process.env.RW_KB_SEARCH || 'fts';
 
 // ---- v0.3 §4.6 沙箱的严格语义开关 ----
 // 默认 **关**：拿不到沙箱（本机没有可用 runner）时按"显式降级"走——如实上报 enforcement:'none'、

@@ -60,6 +60,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootstrapStorage } from './rw-run-bootstrap.mjs';
+// 自造会话必须自己表明身份：标题进探针族（`__probe__ …`），否则会被算进 C1/C2 的"真实流量"（v0.3 §0.3.1）。
+// 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
+// 静态 import 是安全的：cohort.js 零依赖（不 import db/config）⇒ 不破坏下面那条"`--help`/用法错绝不碰连接池"。
+import { probeTitle } from './cohort.mjs';
 
 const PROG = 'rw-run';
 // 用法错与运行期失败的区分：用法错的码与 HTTP 面对外口径同表（server/failures.js），不另造一套。
@@ -75,7 +79,7 @@ export const USAGE = `rw-run —— 不起服务跑一次任务，stdout 一行 
   --task <文本>           任务文本（也可作为第一个位置参数给出）
                           注：取值不能以 **两个连字符** 开头（那是选项的写法）；这种文本请走位置参数：
                           rw-run -- "--no-cache 是什么意思"
-  --conversation <id>     目标会话 id；不传=新建一个会话（标题取任务前 40 字）
+  --conversation <id>     目标会话 id；不传=新建一个会话（标题＝探针族前缀 + 任务前 40 字，见 probeTitle）
   --permission <档位>     full | write | read（默认沿用会话既有档位；新建会话默认 write）
   --quiet                 不往 stderr 写进度（stdout 本来就只有那一行 JSON）
   -h, --help              打印本说明（stdout）并以 0 退出
@@ -251,9 +255,11 @@ async function resolveConversation(db, { conversationId, permission, task }) {
   // 权限默认 write：**最小可用**——它能干活，又不等于 full（无限制）。要 full 由调用方显式 --permission full。
   const perm = permission || 'write';
   const accountId = await defaultAccountId(db);
+  // 标题＝探针族（`__probe__ …`）：headless 是我们自己发起的，不属于"真实流量"（v0.3 §0.3.1 的口径）。
+  // 族前缀来自唯一出处 `probeTitle`；人读的 `rw-run: <任务>` 原样留在标题里（截断只截说明，不动族前缀）。
   const r = await db.query(
     'INSERT INTO conversations (account_id, title, permission, mode, preset, project) VALUES (?,?,?,?,?,?)',
-    [accountId, 'rw-run: ' + String(task).replace(/\s+/g, ' ').slice(0, 40), perm, 'chat', 'all', 'default']);
+    [accountId, probeTitle('rw-run: ' + String(task).replace(/\s+/g, ' ').slice(0, 40)), perm, 'chat', 'all', 'default']);
   return { id: r.insertId, created: true, permission: perm, provider: null, model: null, project: 'default' };
 }
 
