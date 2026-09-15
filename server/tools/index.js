@@ -10,7 +10,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools } from './registry.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource } from './registry.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
@@ -1286,6 +1286,9 @@ RAW_TOOLS.push({
 
 // ===== 装载（架构 §4.3「一次性声明化，不分批」）：清单 × 实现 → 运行时工具表 =====
 // 校验与默认拒绝语义见 registry.js；工具上下线只改 tools/manifest.js，不改这里。
-export const TOOLS = assembleTools(RAW_TOOLS);
+// TOOLS 是**身份稳定的数组**：热重载（RA-03）就地清空重填，所有引用方（toolDefs/execTool/API）自动看到新面。
+export const TOOLS = [];
+TOOLS.push(...assembleTools(RAW_TOOLS));
+registerToolSource(RAW_TOOLS, (next) => { TOOLS.length = 0; TOOLS.push(...next); });
 // 元数据/集合由清单派生后在此转发，保持"从 tools/index.js 一处取用"的既有引用面
 export { TOOL_META, TOOL_CN, DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, TOOL_TIER_CN } from './registry.js';

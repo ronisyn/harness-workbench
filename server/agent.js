@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
 import { diffCore, isUnexpectedBreak } from './prefix.js';
+import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { spillToolResult } from './tools/spill.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -221,6 +222,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let dispSeq = 0;        // 展示序号：全 run 唯一单调递增（子代理/并行不撞号）
   let noProgressCount = 0; // 连续"相同调用"轮数
   let loopWarned = false;  // soft 换策略提示只发一次
+  const repeatReminded = new Set(); // RA-39：第 3/5 次重复的提醒各发一次（提醒≠阻止）
   let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
   let consecutiveFail = 0; // F4 连续失败轮计数（本轮工具全失败累计；任一成功清零）
   let failWarned = false;  // F4 软提示只发一次（到 N 次后提示换策略，再 N 次才挂起）
@@ -593,11 +595,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     callHistory.push(sig);
     const loopGuardN = lim.loopGuard > 0 ? lim.loopGuard : 0;
     const softN = Math.max(1, Math.floor(loopGuardN / 2));
+    // RA-39：同一工具同参数**连续第 3/5 次**出现 → 提醒但**不阻止调用**（挂起阈值由 loop_guard 独立承担，默认 6）
+    if (loopGuardN > 0) {
+      const tip = repeatReminder(noProgressCount, repeatReminded);
+      if (tip) msgs.push({ role: 'system', content: tip });
+    }
     if (loopGuardN > 0 && noProgressCount === softN && !loopWarned) {
       loopWarned = true;
       msgs.push({ role: 'system', content: '⚠️ 已连续 ' + (softN + 1) + ' 次调用相同的工具与参数且无进展。请【改变策略】：换工具、换参数、先诊断环境或换实现思路，不要再次原样重试。' });
     }
-    if (loopGuardN > 0 && noProgressCount >= loopGuardN - 1) {
+    if (shouldPauseOnRepeat(noProgressCount, loopGuardN)) {
       return {
         content: `（任务已挂起：连续 ${loopGuardN} 次重复调用且无进展。现场已保存，回复"继续任务"可恢复，或给我新指令/新思路）`,
         toolLog, usage: res.usage, paused: true, reason: '连续重复无进展',

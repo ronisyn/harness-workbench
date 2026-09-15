@@ -26,6 +26,7 @@ import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from 
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
+import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
 import { autoTitle } from './autotitle.js';
 import { decideApproval, listPending } from './approval.js';
@@ -2329,6 +2330,8 @@ async function main() {
   if (auditArchTimer.unref) auditArchTimer.unref();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
+  // RA-03：清单热重载——工具上下线/改档位改提示，只改 tools/manifest.js，**不重启服务**即刻生效
+  try { startManifestWatch(); } catch (e) { console.error('[registry] 热重载启动失败:', e.message); }
   // A6 知识库月度巡检任务种子（§7.3 治理机制：由 RW 每月巡检冗余/重复/冲突/缺陷/过时 → 报告+修订建议 → 进化集审批后清理）
   // 幂等：按 admin 账号 + 固定 name 已存在则跳过；cron 每月 1 日 05:30（周一制内 cron 日字段独立）
   try {
