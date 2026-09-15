@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { db } from './db.js';
 import { readMcpConfig, resolveEnv, redactSecretValues } from './credentials.js';
 import { RW_OS } from './env.js';
+import { PROTOCOL_VERSION } from './mcp-version.js'; // 两个方向（客户端/服务端）说同一个协议版本，单一出处
 
 const clients = new Map(); // serverId -> { proc, reqId, pending: Map<id,{resolve,reject}>, buf, tools: [] }
 
@@ -94,7 +95,7 @@ export async function connectMcp(id, command, args = [], env = {}) {
     }
   });
   // 握手
-  const init = await rpc(cl, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'rw', version: '1' } });
+  const init = await rpc(cl, 'initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'rw', version: '1' } });
   await rpc(cl, 'notifications/initialized', {});
   const t = await listAllTools(cl);
   cl.tools = t;
