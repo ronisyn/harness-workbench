@@ -226,9 +226,11 @@ const RAW_TOOLS = [
       try { st = fs.statSync(abs); } catch { /* ignore */ }
       if (st && st.isFile()) {
         const end = Math.min(c.length, off + len);
-        const plan = planRead({ cid: ctx && ctx.conversationId, absPath: abs, mt: st.mtimeMs, size: st.size, span: [off, end], force: !!a.force });
+        // nearRatio：实测模型会**偏移几字节**地重复读同一段（offset=0/len=3745 与 offset=3/len=3745），
+        // 严格相减只补出几字节等于没省 → 未覆盖占比 <5% 时也判重复，回极短回执。
+        const plan = planRead({ cid: ctx && ctx.conversationId, absPath: abs, mt: st.mtimeMs, size: st.size, span: [off, end], force: !!a.force, nearRatio: 0.05 });
         if (plan.duplicate) {
-          return { content: repeatNotice('read_file_range', abs, { size: st.size, span: [off, end] }), deduped: true, offset: off, length: len, total: c.length };
+          return { content: repeatNotice('read_file_range', abs, { size: st.size, span: [off, end], reason: plan.reason }), deduped: true, offset: off, length: len, total: c.length };
         }
         noteServed({ cid: ctx && ctx.conversationId, absPath: abs, mt: st.mtimeMs, size: st.size, spans: plan.gaps });
         // 只输出"未覆盖"的部分；被覆盖的部分不再重复给（这是省 token 的关键）

@@ -60,7 +60,10 @@ export function subtractIntervals(target, covered) {
 /**
  * 规划一次读：返回未覆盖的区间 + 是否"完全重复"。
  * @param {object} p { cid, absPath, mt, size, span:[start,end), force }
- * @returns {{duplicate:boolean, gaps:Array<[number,number]>, coveredChars:number, seenBefore:boolean}}
+ *   p.nearRatio 可选：把"与已给区间高度重叠（未覆盖部分占比 < nearRatio）"也判为重复。
+ *   为什么需要它：实测模型会**偏移几字节**地重复读同一段（如 offset=0/len=3745 与 offset=3/len=3745），
+ *   严格区间相减只会补出几字节，等于没省。此时返回极短回执更划算（内容上文刚给过）。
+ * @returns {{duplicate:boolean, gaps:Array<[number,number]>, coveredChars:number, seenBefore:boolean, reason?:string}}
  */
 export function planRead(p) {
   const b = bucket(p.cid, p.absPath);
@@ -70,7 +73,11 @@ export function planRead(p) {
   const gaps = subtractIntervals(p.span, covered);
   const spanLen = p.span[1] - p.span[0];
   const gapLen = gaps.reduce((a, [s, e]) => a + (e - s), 0);
-  return { duplicate: gapLen === 0, gaps, coveredChars: spanLen - gapLen, seenBefore: covered.length > 0 };
+  const coveredChars = spanLen - gapLen;
+  if (gapLen === 0) return { duplicate: true, gaps: [], coveredChars, seenBefore: covered.length > 0, reason: 'fully-covered' };
+  const near = Number(p.nearRatio) > 0 && spanLen > 0 && (gapLen / spanLen) < Number(p.nearRatio);
+  if (near) return { duplicate: true, gaps: [], coveredChars, seenBefore: covered.length > 0, reason: 'near-duplicate' };
+  return { duplicate: false, gaps, coveredChars, seenBefore: covered.length > 0 };
 }
 
 /** 记录"这次确实给出去了"的区间（只记实际提供的部分） */
@@ -84,8 +91,11 @@ export function noteServed(p) {
 /** 完全重复时的极短回执：必须让模型明白"内容在上下文里"，否则它会以为读失败而反复重试 */
 export function repeatNotice(tool, absPath, info) {
   const kb = (info.size / 1024).toFixed(1);
+  const why = info.reason === 'near-duplicate'
+    ? `本次请求区间 ${info.span[0]}–${info.span[1]} 与上文已给出的内容几乎相同（仅差少量字符）`
+    : `本次请求区间 ${info.span[0]}–${info.span[1]} 已覆盖`;
   return `（${tool} 已跳过重复读取：${absPath} 的这段内容在本会话上文已给出且文件未改动`
-    + `（共 ${info.size} 字节 / ${kb}KB，本次请求区间 ${info.span[0]}–${info.span[1]} 已覆盖）。`
+    + `（共 ${info.size} 字节 / ${kb}KB，${why}）。`
     + `需要重新查看请带 force:true，或换一个区间读没看过的部分。）`;
 }
 

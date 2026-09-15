@@ -91,6 +91,23 @@ test('RA-35② 回执文案：必须含"在上文/未改动/force"三要素，�
   assert.match(p, /只补未读过的部分/);
 });
 
+test('RA-35② 近似重复（偏移几字节）：nearRatio 生效 → 判重复并给出 near-duplicate 原因', () => {
+  clearReadCache(505);
+  const F5 = { cid: 505, absPath: '/tmp/near.md', mt: 1, size: 10000 };
+  noteServed({ ...F5, spans: [[0, 3745]] });                     // 上文给过 0–3745
+  // 偏移 3 字节、长度相同：严格相减只剩 3 字节
+  const strict = planRead({ ...F5, span: [3, 3748] });
+  assert.equal(strict.duplicate, false);
+  assert.deepEqual(strict.gaps, [[3745, 3748]], '严格口径下只补 3 字节（等于没省）');
+  const near = planRead({ ...F5, span: [3, 3748], nearRatio: 0.05 });
+  assert.equal(near.duplicate, true, '未覆盖占比 3/3745 < 5% → 判近似重复');
+  assert.equal(near.reason, 'near-duplicate');
+  const notice = repeatNotice('read_file_range', F5.absPath, { size: 10000, span: [3, 3748], reason: near.reason });
+  assert.match(notice, /几乎相同/);
+  // 偏移很大时不能被 nearRatio 吞掉
+  assert.equal(planRead({ ...F5, span: [5000, 8745], nearRatio: 0.05 }).duplicate, false, '大半没读过 → 必须给内容');
+});
+
 test('RA-35② 状态清理：会话删除后不占内存', () => {
   clearReadCache(404);
   noteServed({ ...F, cid: 404, spans: [[0, 10]] });
