@@ -245,6 +245,15 @@ const SCHEMA = [
     shell_id INT NULL,
     created_at DATETIME DEFAULT NOW()
   )`,
+  `CREATE TABLE IF NOT EXISTS events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NULL,
+    seq INT NOT NULL DEFAULT 0,
+    type VARCHAR(32) NOT NULL,
+    payload JSON,
+    created_at DATETIME DEFAULT NOW(),
+    INDEX idx_events_conv (conversation_id, id)
+  )`,
   `CREATE TABLE IF NOT EXISTS price_table (
     id INT AUTO_INCREMENT PRIMARY KEY,
     provider_id INT,

@@ -114,6 +114,21 @@ export const VERSIONS = [
     // 存量行留 NULL（不回溯猜测），新增行由 execTool 落码。
     statements: ['ALTER TABLE tool_calls ADD COLUMN error_code VARCHAR(32) NULL'],
   },
+  {
+    id: '0003_event_log', note: '事件账本（append-only，可回放）',
+    // 2026-09-15：事件此前只活在内存环里（重启即忘），"确定性投影"没有可投影的源。
+    // 这张表是只追加的账本：写入点唯一（server/eventlog.js），投影/重放都读它。
+    // 新库路径由 db.js 的 SCHEMA 建到最终形状（含本表），故这里只对存量库生效。
+    statements: [`CREATE TABLE IF NOT EXISTS events (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      conversation_id INT NULL,
+      seq INT NOT NULL DEFAULT 0,
+      type VARCHAR(32) NOT NULL,
+      payload JSON,
+      created_at DATETIME DEFAULT NOW(),
+      INDEX idx_events_conv (conversation_id, id)
+    )`],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (
