@@ -779,19 +779,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
   // 【尾巴区】F10 目标 / F15 技能 / F19 知识：三类易变注入已移至 hist 之后（纪律2 前缀冻结，见下方尾巴区）
-  // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
-  // 2026-09 C1 修复：git 块原位于 hist 之前=消息前缀中部，自改场景有新 commit 时该块内容变化
-  // → 其后全部历史（含最近 30 条）前缀缓存击穿（DeepSeek miss/hit 价差 27 倍）。
-  // 改为 append 到消息末尾（hist 之后）：前缀=固定注入+增长历史稳定，git 变化仅影响尾部少量 token。
-  const buildGitBlock = async () => {
-    try {
-      const { execFileSync } = await import('node:child_process');
-      const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-      const gLines = gitLog.trim().split('\n').filter(Boolean);
-      if (gLines.length) return '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n');
-    } catch { /* git 不可用/非仓库时静默跳过 */ }
-    return null;
-  };
+  // F19b 平台自我进化·实时状态注入：最近 git 提交 —— **2026-09-15 已停用**（RA-35 缓存口径对齐，见下方移除说明）。
+  // 保留这段历史注释以留痕：原意是"事实源自动进上下文，防记忆滞后于实现"，但它的内容随 commit 变化，
+  // 无论放在前缀还是尾部，都会让**每条新会话**的前缀与上一条分叉，牺牲跨会话前缀复用（实测代价见矩阵 §五）。
+  // 需要时由 git_status / run_command 现查（结果总是新鲜的）。
   // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
   try {
     const sp = await getSetting('systemPrompt', '');
@@ -893,12 +884,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     });
   }
 
-  // F19b git 块 append 到消息末尾（C1 修复：git 内容随 commit 变化，放 hist 之前会击穿其后全部历史的前缀缓存；
-  // 放末尾则 git 变化只影响自身尾部，前缀 = 固定注入 + 增长历史保持稳定命中）
-  try {
-    const gb = await buildGitBlock();
-    if (gb) messages.push({ role: 'system', content: gb });
-  } catch { /* git 不可用/非仓库时静默跳过 */ }
+  // F19b git 块 —— **2026-09-15 移除注入**（RA-35 缓存口径对齐，见矩阵 §五 措施①）。
+  // 原来每轮把 `git log --oneline -8` 注入进消息（先在前缀中部、后挪到尾部）。挪到尾部只解决了
+  // "同一会话内击穿其后历史"的问题，**但跨会话仍每次都在变**：每次 push 新提交，下一条新会话的前缀就与
+  // 上一条分叉 → 10.5k 的公共前缀拿不到跨会话复用（实测：新执行首请求命中率仅 33.4%，
+  // 而同一执行内后续轮是 98.5%，差额就是这份前缀重建）。
+  // 裁决：**不注入**。需要"最近提交"时由 `git_status`/`run_command` 现查 —— 事实源从"注入的快照
+  // 变成"按需查询"，不会过时，也不再污染前缀。
+  // 说明：原先的注入意图是"防记忆滞后于实现"；这条纪律已在系统提示词与行为准则里，不依赖这份快照。
 
   // SSE 头
   res.writeHead(200, {
