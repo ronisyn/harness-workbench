@@ -994,6 +994,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     let answer = '';
     let usage = {};
     let thinkBuf = ''; // 本轮的思考过程（reasoning）累积，落库供历史回看
+    // Agent 执行循环的返回值必须留在**处理器作用域**：终结事件在下面那个 `{...}` 块之外发，
+    // 而块内的 `const result` 到那里已越出作用域——`send({type:'done', totals: result.usageTotals})` 正是因此
+    // 抛 ReferenceError（表现为每轮对话都在 done 之前中断、客户端只收到 error 帧）。
+    let runOutcome = null;
     {
       // Agent 执行循环（统一通道）：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
@@ -1054,7 +1058,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           }
         } catch { /* 观测落表失败不影响对话 */ }
       };
-      const result = await runAgent({
+      runOutcome = await runAgent({
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
           if (ev.type === 'agent_thinking') {
@@ -1089,18 +1093,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 收尾：按结果登记现场状态（completed/paused/interrupted+原因）
       if (run) {
         try {
-          if (result.stopped) {
+          if (runOutcome.stopped) {
             // 2026-09：区分中断来源——用户点停止(user) vs SSE 断连(disconnect)，现场都保留可恢复
             const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
             await markRun(run.id, 'interrupted', why);
           }
-          else if (result.guard === 'budget') await markRun(run.id, 'interrupted', '时间预算达到（可 set_limits 调大/关闭）');
-          else if (result.guard === 'cap') await markRun(run.id, 'interrupted', '轮次上限达到（可调大/关闭）');
-          else if (result.paused) await markRun(run.id, 'paused', result.reason || '循环无进展挂起');
+          else if (runOutcome.guard === 'budget') await markRun(run.id, 'interrupted', '时间预算达到（可 set_limits 调大/关闭）');
+          else if (runOutcome.guard === 'cap') await markRun(run.id, 'interrupted', '轮次上限达到（可调大/关闭）');
+          else if (runOutcome.paused) await markRun(run.id, 'paused', runOutcome.reason || '循环无进展挂起');
           else await markRun(run.id, 'completed', '');
         } catch { /* 忽略 */ }
       }
-      if (result.stopped) {
+      if (runOutcome.stopped) {
         // 用户点击停止：不落 assistant/统计，但不再提前 return（避免泄漏 inflight/abortMap）
         send({ type: 'stopped' });
         skipStore = true;
@@ -1110,12 +1114,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 2026-09-11 自审：抽成 recordTelemetry()，异常路径同调用——原先仅在成功分支落表，
       // 导致"执行出错/工具被壳拦截"的轮次用量在账本中有、观测表缺行（execs 与成本口径不一致）。
       if (recordTelemetry) await recordTelemetry();
-      answer = result.content || '（无输出）';
-      usage = result.usage || {};
-      if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-      // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不整段重发；
+      answer = runOutcome.content || '（无输出）';
+      usage = runOutcome.usage || {};
+      if (runOutcome.finishReason === 'length' && answer) answer += TRUNC_NOTE;
+      // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（runOutcome.streamed=true）→ 不整段重发；
       // 兜底路径（一次性 fallback / F6a 诚实说明 / guard 文案等生成型内容）仍按 8 字分块模拟
-      if (!result.streamed && answer) {
+      if (!runOutcome.streamed && answer) {
         const chunkSize = 8;
         for (let i = 0; i < answer.length; i += chunkSize) {
           if (!firstTokenMs) firstTokenMs = Date.now() - t0;
@@ -1128,7 +1132,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         // 这里只补发"还没发出去的那一段"，不整段重发（否则客户端会重复显示一遍）：
         //   · 后置追加（续写/截断提示/兜底摘要）→ 拼出的正文是落库正文的前缀 → 补发尾部；
         //   · 假完成前缀（前置加注）→ 拼出的正文是落库正文的后缀 → 先补前缀，再补尾部。
-        const sentText = String(result.streamedText || '');
+        const sentText = String(runOutcome.streamedText || '');
         let head = '', tail = '';
         if (!sentText) {
           tail = answer; // 声称流式却没记到任何流式文本（异常路径）→ 整段补发
@@ -1162,15 +1166,15 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       } catch (e) { console.warn('[chat] assistant 落库失败（已如实告知客户端）：' + ((e && e.message) || e)); }
       // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
       // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
-      send({ type: 'done', usage, messageId: savedMsgId, runId: agentRunId, totals: result.usageTotals || null });
+      send({ type: 'done', usage, messageId: savedMsgId, runId: agentRunId, totals: runOutcome.usageTotals || null });
       // RA-37：run_end 是"本次执行的账已落定"的回执——只在落库之后发，带持久化 id 与全量用量。
       // 与 done 的区别：done 是**流终结**（老客户端只看它，字段保持向后兼容）；run_end 是**一致性回执**，
       // 客户端拿它做"事件流重建结果 vs 服务端事实"的校验，也拿它做断线后"这一段是否已落定"的判定。
       send({
         type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'saved',
         messageId: savedMsgId, contentLength: answer.length,
-        finishReason: result.finishReason || '', guard: result.guard || null,
-        usage: usage, totals: result.usageTotals || null, spentYuan: result.spentYuan ?? null,
+        finishReason: runOutcome.finishReason || '', guard: runOutcome.guard || null,
+        usage: usage, totals: runOutcome.usageTotals || null, spentYuan: runOutcome.spentYuan ?? null,
       });
       // 断线/旁观客户端走 /activity 轮询时，结论由环自己的 run_end（clearActivity 追加，见 agent.js）给出，
       // 不在这里重复往环里塞（环与 SSE 是两条投影，重复塞会让"同一事实两种投影"更乱）。
@@ -1198,7 +1202,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         send({
           type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'stopped',
           reason: (actrl.signal && actrl.signal.reason === 'user') ? 'user' : 'disconnect',
-          reasonText: why, messageId: placeholderId, totals: result && result.usageTotals ? result.usageTotals : null,
+          reasonText: why, messageId: placeholderId, totals: runOutcome && runOutcome.usageTotals ? runOutcome.usageTotals : null,
         });
       } catch { /* 忽略 */ }
     }
