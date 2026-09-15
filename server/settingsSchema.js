@@ -15,6 +15,8 @@ export const SETTINGS_SCHEMA = [
   { key: 'collapse_keep_msgs', label: '折叠保留最近消息数', group: 'context', type: 'number', def: 80, min: 0, hint: '折叠时保留最近 N 条消息；0=默认80；下限 10（过小会每轮折掉工作集、会话无法收敛）' },
   { key: 'collapse_trigger_chars', label: '折叠触发字符阈值', group: 'context', type: 'number', def: 30000, min: 0, hint: '早期消息总字符超此值才折叠（防无谓 LLM 成本）；0=默认30000' },
   { key: 'collapse_input_chars', label: '折叠摘要输入截断字符', group: 'context', type: 'number', def: 18000, min: 0, hint: '送折叠 LLM 的早期文本截断上限；0=默认18000' },
+  // RA-08（2026-09 步8后）：折叠阈值绑模型窗口——换小窗口模型自动收紧（比例制），未知模型回退上面的绝对阈值
+  { key: 'collapse_window_ratio', label: '折叠窗口占比', group: 'context', type: 'number', def: 15, min: 0, max: 100, hint: '折叠触发阈值=模型窗口×该百分比（换算按 1.5 字符/token 的保守估算）；0=关闭比例制只用绝对阈值' },
   // F4 连续失败轮计数（2026-09 批1）：工具连续失败 N 次软提示换策略，仍失败挂起 paused（0=关闭）
   { key: 'consecutive_fail_guard', label: '连续失败保护次数', group: 'runtime', type: 'number', def: 3, min: 0, hint: '工具连续失败 N 次→软提示换策略一次；再失败→挂起 paused（现场保留可"继续任务"恢复）；0=关闭' },
   // P18 并发对话上限（2026-09 批2）：同账号同时在跑的对话数上限（默认 5；0=不限）；超限拒绝并提示队列位置

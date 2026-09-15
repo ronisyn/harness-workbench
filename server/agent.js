@@ -8,6 +8,7 @@ import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
 import { diffCore, isUnexpectedBreak } from './prefix.js';
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
+import { effectiveCollapseChars } from './modelwindow.js';
 import { spillToolResult } from './tools/spill.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -141,6 +142,8 @@ async function agentLimits() {
       collapseKeep: clampCollapseKeep(pick('collapse_keep_msgs', 0) || 80),
       collapseChars: pick('collapse_trigger_chars', 0) || 30000,
       collapseInput: pick('collapse_input_chars', 0) || 18000,
+      // RA-08 比例制：折叠阈值 = min(绝对阈值, 模型窗口 × 占比 × 1.5 字符/token)；0=只用绝对阈值
+      collapseWindowRatio: (pick('collapse_window_ratio', 0) || 15) / 100,
       // F4 连续失败：schema hint=0 关闭，须与"无行缺省 3"区分（0||3 会把显式 0 变 3——修复）
       // 注：原先另写一个 failPick 完成同样语义，但它引用的 rows 是 try 块内的 const（词法作用域不可见），
       // 必然抛 "rows is not defined" 并让整个护栏读取回退默认值 —— 故直接用同语义的 pick。
@@ -287,8 +290,12 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let lastCollapseRound = -99;
   const maybeCollapseEarly = async (round, lim) => {
     // F3 折叠阈值可调（2026-09 批1）：间隔/保留条数/触发字符/输入截断均可 settings 调（0=默认现值）
-    const gap = lim.collapseGap || 20, keep = lim.collapseKeep || 80, trig = lim.collapseChars || 30000, inCap = lim.collapseInput || 18000;
+    const gap = lim.collapseGap || 20, keep = lim.collapseKeep || 80, inCap = lim.collapseInput || 18000;
+    // RA-08 比例制：换小窗口模型时触发阈值自动收紧（模型窗口未知 → 回退绝对阈值，并在 debug 里说明来源）
+    const eff = effectiveCollapseChars(model, lim.collapseChars || 30000, lim.collapseWindowRatio, null);
+    const trig = eff.chars;
     const dbg = process.env.RW_PREFIX_DEBUG === '1';
+    if (dbg) console.log('[collapse-threshold] ' + eff.source + ' chars=' + trig + ' window=' + eff.windowTokens + ' note=' + eff.note);
     if (round - lastCollapseRound < gap) { if (dbg) console.log('[collapse-debug] skip gap：round=' + round + ' last=' + lastCollapseRound + ' gap=' + gap); return false; }
     const end = msgs.length - keep;
     if (end <= 2) { if (dbg) console.log('[collapse-debug] skip end：msgs=' + msgs.length + ' keep=' + keep + ' end=' + end); return false; }
