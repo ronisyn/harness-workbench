@@ -278,12 +278,13 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   const maybeCollapseEarly = async (round, lim) => {
     // F3 折叠阈值可调（2026-09 批1）：间隔/保留条数/触发字符/输入截断均可 settings 调（0=默认现值）
     const gap = lim.collapseGap || 20, keep = lim.collapseKeep || 80, trig = lim.collapseChars || 30000, inCap = lim.collapseInput || 18000;
-    if (round - lastCollapseRound < gap) return false;
+    const dbg = process.env.RW_PREFIX_DEBUG === '1';
+    if (round - lastCollapseRound < gap) { if (dbg) console.log('[collapse-debug] skip gap：round=' + round + ' last=' + lastCollapseRound + ' gap=' + gap); return false; }
     const end = msgs.length - keep;
-    if (end <= 2) return false;
+    if (end <= 2) { if (dbg) console.log('[collapse-debug] skip end：msgs=' + msgs.length + ' keep=' + keep + ' end=' + end); return false; }
     let totalChars = 0;
     for (let i = 1; i < end; i++) totalChars += String(msgs[i]?.content || '').length + 60;
-    if (totalChars < trig) return false; // 上下文尚可接受，不产生无谓 LLM 成本
+    if (totalChars < trig) { if (dbg) console.log('[collapse-debug] skip chars：total=' + totalChars + ' trig=' + trig + ' msgs=' + msgs.length + ' end=' + end); return false; } // 上下文尚可接受，不产生无谓 LLM 成本
     const head = msgs.slice(1, end);
     const text = head
       .map((m) => (m.role === 'user' ? '用户: ' : m.role === 'tool' ? '工具结果: ' : m.role === 'assistant' && m.tool_calls ? '助手(调用工具): ' : '助手: ') + String(m.content || '').replace(/\s+/g, ' ').slice(0, 500))
