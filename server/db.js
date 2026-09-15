@@ -166,6 +166,7 @@ const SCHEMA = [
     tool_name VARCHAR(64),
     args JSON,
     result_summary TEXT,
+    result_bytes INT DEFAULT 0,
     duration_ms INT DEFAULT 0,
     status VARCHAR(16),
     created_at DATETIME DEFAULT NOW()
@@ -481,6 +482,9 @@ export async function initSchema() {
     'ALTER TABLE audit_log ADD COLUMN conversation_id INT NULL',
     'ALTER TABLE audit_log_archive ADD COLUMN conversation_id INT NULL',
     'ALTER TABLE audit_log_archive ADD COLUMN shell_id INT NULL',
+    // 2026-09-15 RA-05b：工具结果原始体积遥测（字节）——spill 阈值 32768 的标定依据。
+    // 单位取**字节**，与 spill 判定同口径（§5.4 计数单位=字节）；存量行留 0，由 scripts/backfill-result-bytes.mjs 一次性回填。
+    'ALTER TABLE tool_calls ADD COLUMN result_bytes INT DEFAULT 0',
     // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
     'DROP TABLE IF EXISTS capabilities',
   ];
@@ -530,7 +534,7 @@ export async function initSchema() {
     const missing = [];
     const checks = [
       ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'],
-      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'], ['knowledge', 'kind'],
+      ['usage_stats', 'shell_id'], ['tool_calls', 'shell_id'], ['tool_calls', 'result_bytes'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'], ['knowledge', 'kind'],
     ];
     for (const [tbl, col] of checks) {
       const r = await pool.query('SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', [tbl, col]);

@@ -11,6 +11,7 @@ import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource } from './registry.js';
+import { subtoolRefusal } from '../subtools.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
@@ -36,6 +37,16 @@ function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new 
 // 不得明文落 audit_log / tool_calls（实测曾泄漏 ghp_ 完整 token 59 条）；替换为 [REDACTED] 占位
 const SECRET_RE = /\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
 export function redactSecrets(s) { return typeof s === 'string' ? s.replace(SECRET_RE, '[REDACTED]') : s; }
+
+// RA-05b 工具结果原始体积（字节）：与 spill 的 32768 字节判定**同口径同函数**（§5.4 计数单位=字节）。
+// 入参是工具返回的 result 本体（任意 JSON 值；工具约定返回对象，但不强制单键），算 `JSON.stringify(result)` 的 UTF-8 字节数
+// —— 即真正进 LLM 上下文的那份文本的体积。抽成导出的纯函数，是为了让存量回填脚本
+// （scripts/backfill-result-bytes.mjs）用同一条算式重建历史值；两处各写一遍必然漂移。
+export function resultBytesOf(result) {
+  let s;
+  try { s = JSON.stringify(result) ?? ''; } catch { s = ''; } // 循环引用等异常值不阻断主流程
+  return Buffer.byteLength(s, 'utf8');
+}
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = RW_WORKSPACE;
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -1095,6 +1106,11 @@ function validateArgs(tool, args) {
   return args;
 }
 export async function execTool(name, args, ctx) {
+  // RA-12 子代理工具面收窄的执行层同口径门禁（§14.4）：schema 层已裁（agent.js 的 toolDefs），
+  // 这里再拦一次——否则"看不见却能调"，等于没收窄。返回 {error} 而非 throw，与上面 MCP 拦截同口径
+  // （失败可见、模型可改用它法继续；throw 会逸出本函数 catch 并中断整轮）。
+  const subRefusal = ctx && ctx.__subTools ? subtoolRefusal(ctx.__subTools, name) : null;
+  if (subRefusal) return { error: subRefusal };
   // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：不再在权限/纪律检查前提前返回——
   // 合成工具元数据（permission=write 级评估），与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
   // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
@@ -1218,9 +1234,14 @@ export async function execTool(name, args, ctx) {
       // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
       const rArgs = JSON.stringify(args).slice(0, 2000);
       const rResult = JSON.stringify(result).slice(0, 2000);
+      // RA-05b 原始体积遥测：**在 2000 字符截断之前**量，单位字节（与 spill 的 32768 字节判定同口径）。
+      // 算的是 `JSON.stringify(result)` 的 UTF-8 字节数——即真正进 LLM 上下文的那份文本的体积。
+      // result_summary 只存前 2000 字符（大结果不可回查分布），此列是 spill 阈值标定的唯一数据源。
+      // 存量行可用同一条算式从"未截断的 result_summary"精确重建；被截断的行只能得下界（见 scripts/backfill-result-bytes.mjs）。
+      const rBytes = resultBytesOf(result);
       await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
-      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
+      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, result_bytes, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?,?)',
+        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), rBytes, Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
     } catch { /* 留痕失败不影响 */ }
   }
   return result;

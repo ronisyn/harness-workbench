@@ -20,6 +20,7 @@ import { SHELL_TEMPLATES } from './shelltemplates.js';
 import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skillNameOk } from './skillsmgr.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
+import { kbInjectMode, kbBlock } from './kbgate.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
@@ -844,22 +845,22 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       }
     }
   } catch { /* 技能目录不可用时静默跳过 */ }
-  // F19 知识注入（④：global 全部 + shell 仅本会话所属壳私有 + conv 本会话；§4 壳私有+全局共享）：
-  // 会话可见知识（前 5 条带 300 字正文摘要；其余仅标题），主题相关可用 kb_search 取全
-  // A6：统一出口 kbVisibleWhere（§9.3④），会话注入仅 active（superseded/obsolete=仅历史不注入）
+  // F19 知识注入（④：global 全部 + shell 仅本会话所属壳私有 + conv 本会话；§4 壳私有+全局共享）
+  // RA-09 按需注入（2026-09-15）：不用知识的轮次**一条知识都没有**。原文是"每轮都注入"（≤12 条标题 + 前 5 条 300 字正文），
+  // 与 §14.3 RA-09 直接冲突。判定与成型在 server/kbgate.js（纯函数，可夹具逐档验证，含"不注入"档）：
+  //   explicit=本轮明确在问知识/记忆 → 标题+前5条摘要 | index=本会话此前实际用过 kb_* → 只给标题 | none=不注入。
+  // 模型侧入口始终可用（kb_search 自带"何时搜"描述，不依赖注入做发现）。
   try {
-    const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
-    const v = kbVisibleWhere({ accountId: req.user.id, shellId: kbShellId, conversationId });
-    const kb = await db.query(`SELECT id, scope, title, body FROM knowledge WHERE ${v.where} ORDER BY id DESC LIMIT 12`, v.params);
-    if (kb.length) {
-      const lines = kb.map((k, i) => {
-        const tag = k.scope === 'global' ? '全局' : k.scope === 'shell' ? '壳私有' : '会话';
-        const snip = i < 5 && k.body ? '\n  ' + String(k.body).replace(/\n+/g, ' ').slice(0, 300) : '';
-        return '- [' + tag + '] ' + k.title + snip;
-      });
-      messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
+    const u = await db.query('SELECT COUNT(*) c FROM tool_calls WHERE conversation_id=? AND tool_name IN ("kb_search","kb_add","kb_del") AND created_at > NOW() - INTERVAL 7 DAY', [conversationId]);
+    const kbMode = kbInjectMode(content, Number((u[0] || {}).c || 0));
+    if (kbMode !== 'none') {
+      const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
+      const v = kbVisibleWhere({ accountId: req.user.id, shellId: kbShellId, conversationId });
+      const kb = await db.query(`SELECT id, scope, title, body FROM knowledge WHERE ${v.where} ORDER BY id DESC LIMIT 12`, v.params);
+      const block = kbBlock(kb, kbMode);
+      if (block) messages.push({ role: 'system', content: block });
     }
-  } catch { /* 知识表不可用时静默跳过 */ }
+  } catch (e) { console.warn('[kb-inject] 判定/注入失败，本轮不注入知识：' + ((e && e.message) || e)); }
   // 断点恢复：本会话存在 interrupted/paused 的长任务现场 → 注入现场信息，支持"继续任务"
   try {
     const hint = await resumeHint(conversationId);

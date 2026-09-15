@@ -2,7 +2,13 @@
 // 设计：子代理复用 runAgent 完整循环（自带工具 + 完成度判断 + 护栏）；
 //       同步模式=等结果；异步模式=立即返回 id，用 subagent_output 轮询取结果。
 //       子代理内部工具步骤实时转发给前端（事件名前缀 "子:"），并落 tool_calls 留痕。
+// RA-12（§14.4）：调用方可传 tools 只给一个子集 → 子代理工具清单里**只有这些**（其他根本不出现，执行层同口径拒绝）。
+// RA-13（§14.4）：子代理失败**不再返回光秃秃的异常**——失败原因、已花的钱、已做的工具步骤、已产出的部分正文一并回传，
+//                 由父代理"照出交付物并标注该块未取得"。
+// RA-14（§14.4）：调用方可切一块额度（budgetYuan）给子代理；子代理只烧这块（与段阈值/会话总账 min 叠加）；
+//                 未花完的部分**显式回收**（回传 budget/spent/remaining），父级始终留有汇总。
 import { runAgent } from './agent.js';
+import { parseToolWhitelist, narrowEnabled } from './subtools.js';
 
 export const subs = new Map(); // id -> { status: running|done|error, prompt, name, result, error, createdAt }
 let subSeq = 0;
@@ -48,11 +54,55 @@ function childEmit(parentEmit, subId, label, seqBase) {
   };
 }
 
-export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 0.4, depth = 0, seedMessages = [], noSubagentOverride = false, contract = null }) {
+/**
+ * RA-13：把一条子代理记录转成"父代理可消费的结果"。
+ * 失败时**不抛**，而是如实给出：失败原因 + 已花费 + 已完成的工具步骤 + 已产出的部分正文 + 取证入口。
+ * @returns {object} 足够父代理"照出交付物并标注该块未取得"的最小结构化数据
+ */
+export function subagentOutcome(rec) {
+  if (!rec) return { status: 'error', reason: '子代理记录不存在（可能已按 TTL 清理，保留 2 小时）', degraded: true };
+  const base = {
+    sub_id: rec.id,
+    name: rec.name,
+    kind: rec.kind || 'spawn',
+    status: rec.status,
+    durationMs: rec.durationMs ?? null,
+    // RA-12 回执：实际下发的工具清单（null=继承父级，未收窄）——父代理据此知道这一块能取到什么
+    tools: rec.tools || null,
+    // RA-14 回执：切给它的额度、实际花了多少、还剩多少（未花完=显式回收，父级留汇总）
+    budgetYuan: rec.budgetYuan ?? null,
+    spentYuan: rec.spentYuan ?? null,
+    refundYuan: rec.budgetYuan != null && rec.spentYuan != null ? Math.round((rec.budgetYuan - rec.spentYuan) * 1000) / 1000 : null,
+    toolSteps: (rec.toolLog || []).length,
+    lastSteps: (rec.toolLog || []).slice(-8),
+  };
+  if (rec.status === 'done') return { ...base, result: cap(rec.result, 6000) };
+  // 失败/挂起：交付物照出（部分正文 + 完成步骤），并明确标注该块未取得
+  return {
+    ...base,
+    degraded: true,
+    error: rec.error || rec.reason || '未说明的失败',
+    result: cap(rec.result, 6000),
+    note: '该块数据未取得：子代理' + (rec.status === 'error' ? '执行出错' : '被护栏挂起') + '，以上是它已产出的部分内容与已完成步骤；'
+      + '父代理应在交付物中照常给出这一块并标注"未取得"，不要静默省略、也不要伪造其结论。完整步骤用 subagent_report {id:"' + rec.id + '"} 取证。',
+  };
+}
+
+export async function spawnSubagent({ prompt, name, provider, model, permission = 'full', parentCtx = {}, keys, temperature = 0.4, depth = 0, seedMessages = [], noSubagentOverride = false, contract = null, tools = null, budgetYuan = null }) {
   pruneSubs();
   const id = makeSubId();
   const seqBase = nextSeqBase();
-  const record = { id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth, kind: (seedMessages && seedMessages.length) ? 'fork' : 'spawn' };
+  // RA-12：白名单在这里解析（纯函数，含"名字不在清单里"的当场报错）——装配期发现问题，不留到运行期
+  const whitelist = parseToolWhitelist(tools);
+  const effectiveEnabled = narrowEnabled(parentCtx.__enabledTools, whitelist);
+  // RA-14：额度切分。0/null/负数 = 不切（沿用父级段阈值语义，行为不变）
+  const quota = Number(budgetYuan) > 0 ? Number(budgetYuan) : null;
+  const record = {
+    id, status: 'running', prompt: cap(prompt, 2000), name: name || '子代理', createdAt: new Date().toISOString(), depth,
+    kind: (seedMessages && seedMessages.length) ? 'fork' : 'spawn',
+    tools: whitelist ? [...whitelist] : null,
+    budgetYuan: quota,
+  };
   subs.set(id, record);
   // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=3 或调用方强制 noSubagentOverride）
   const childCtx = {
@@ -61,6 +111,11 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
     depth: (parentCtx.depth || 0) + 1,
     skills: parentCtx.skills || {},
     noSubagent: noSubagentOverride || (parentCtx.depth || 0) + 1 >= 3,
+    // RA-12：收窄后的启用集 + 白名单本体（执行层门禁也读它）
+    __enabledTools: effectiveEnabled,
+    __subTools: whitelist,
+    // RA-14：子代理额度（agent.js 每轮与段阈值/会话总账取 min 后判定）
+    __subBudgetYuan: quota,
   };
   const t0 = Date.now();
   // P10 子代理输出契约（2026-09 批4）：默认注入结构化输出模板（调用方可传 contract 覆盖/关闭）。
@@ -83,14 +138,22 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
   const settle = async () => {
     try {
       const r = await runPromise;
-      record.status = 'done';
+      // 护栏挂起（含 RA-14 额度用尽）也走这里：runAgent 正常返回，但内容只是挂起文案，
+      // 且 toolLog 里的步骤是真实产出 —— 不能当成功，也不能丢。
+      const guarded = r && (r.guard || r.paused);
+      record.status = guarded ? 'error' : 'done';
+      record.reason = guarded ? ('guard=' + (r.guard || 'paused')) : null;
       record.durationMs = Date.now() - t0;
       record.result = r.content;
+      if (guarded) record.error = r.content;
       record.usage = r.usage || {};
+      record.spentYuan = r.spentYuan != null ? r.spentYuan : (record.usage && record.usage.cost != null ? Math.round(Number(record.usage.cost) * 1000) / 1000 : null);
       record.toolLog = (r.toolLog || []).slice(-15).map((t) => ({ name: t.name, status: t.status }));
     } catch (e) {
       record.status = 'error';
       record.error = e.message;
+      // RA-13：失败也要留住"已经做出来的东西"——异常路径下部分正文可能挂在 error 对象上（网关把已收内容带出来了）
+      if (e && e.partialContent) record.result = e.partialContent;
     }
     return record;
   };

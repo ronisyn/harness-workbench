@@ -1,7 +1,11 @@
 // scripts/baseline-cost.mjs - 成本基线只读测量（C1–C4）
 // 用法（服务器上）：node scripts/baseline-cost.mjs
 // 只做 SELECT；走应用自己的 db.js，不单独处理凭证。用于改造前后对照（《引擎改造计划》§0.3）。
+// RA-35 复测口径（2026-09-15 补）：报告里 **探针 / 真实流量 / 孤儿** 三档分开列——
+//   改造后首次实测的 C1 87.72% 全部来自探针会话；不分档就会把探针成绩当成真实流量成绩。
+//   分档判据见 scripts/cohort.mjs（含"为什么不能用关键词判探针"）。
 import { db } from '../server/db.js';
+import { COHORTS } from './cohort.mjs';
 
 const q = async (sql, p = []) => { try { return await db.query(sql, p); } catch (e) { return [{ __err: e.message }]; } };
 const fmt = (n) => (n == null ? '-' : Number(n).toLocaleString('en-US'));
@@ -10,12 +14,28 @@ const pct = (x) => (x == null || !isFinite(x) ? '-' : (x * 100).toFixed(2) + '%'
 const avail = (await q(`SELECT COUNT(*) n, COUNT(DISTINCT conversation_id) convs, COUNT(DISTINCT agent_run_id) runs,
                                MIN(created_at) mn, MAX(created_at) mx, ROUND(SUM(cost),4) cost FROM usage_stats`))[0];
 console.log('数据：' + JSON.stringify(avail));
+console.log('时区：库本地时间（@@session.time_zone=SYSTEM=UTC+8）；下列"近 N 天"按库本地时间，不是 UTC');
 
 for (const [label, where] of [['全量', '1=1'], ['近7天', 'created_at > NOW() - INTERVAL 7 DAY']]) {
   const r = (await q(`SELECT SUM(cache_hit_tokens) hit, SUM(cache_miss_tokens) miss, ROUND(SUM(cost),4) cost, COUNT(*) n
                         FROM usage_stats WHERE ${where}`))[0];
   const rate = (Number(r.hit) + Number(r.miss)) > 0 ? Number(r.hit) / (Number(r.hit) + Number(r.miss)) : null;
   console.log(`C1 ${label}：命中 ${fmt(r.hit)} / 未命中 ${fmt(r.miss)} → **${pct(rate)}**（成本 ${r.cost}，行 ${fmt(r.n)}）`);
+}
+
+// RA-35 分档：同一把尺（C1/C2/C3）分别算「真实流量 / 探针 / 孤儿」，供"探针成绩不得当真实成绩"的判定用
+console.log('\n-- C1/C2 分档（RA-35 复测口径；真实流量=排除探针与孤儿）--');
+for (const [label, mk] of COHORTS) {
+  const w = mk('u');
+  const c1 = (await q(`SELECT SUM(u.cache_hit_tokens) hit, SUM(u.cache_miss_tokens) miss, ROUND(SUM(u.cost),4) cost, COUNT(*) n,
+                              COUNT(DISTINCT u.conversation_id) convs
+                       FROM usage_stats u WHERE u.kind='round' AND ${w}`))[0];
+  const rate = (Number(c1.hit) + Number(c1.miss)) > 0 ? Number(c1.hit) / (Number(c1.hit) + Number(c1.miss)) : null;
+  const c2 = (await q(`WITH t AS (SELECT u.cache_miss_tokens m, ROW_NUMBER() OVER (ORDER BY u.cache_miss_tokens) rn, COUNT(*) OVER () c
+                                    FROM usage_stats u WHERE u.kind='round' AND u.cache_miss_tokens IS NOT NULL AND ${w})
+                       SELECT MAX(c) n, MAX(CASE WHEN rn=GREATEST(1,FLOOR(c*0.50)) THEN m END) p50,
+                              MAX(CASE WHEN rn=GREATEST(1,FLOOR(c*0.95)) THEN m END) p95 FROM t`))[0];
+  console.log(`  ${label.padEnd(6)} 轮 ${fmt(c1.n).padStart(6)} · 会话 ${fmt(c1.convs).padStart(4)} · C1 **${pct(rate)}** · C2 中位 ${fmt(c2.p50)} / P95 ${fmt(c2.p95)} · ¥${c1.cost}`);
 }
 
 for (const [label, where] of [['全量', "kind='round'"], ['近7天', "kind='round' AND created_at > NOW() - INTERVAL 7 DAY"]]) {

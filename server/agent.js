@@ -14,6 +14,7 @@ import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
 import { LIGHT_TOOLSET } from './tools/registry.js';
+import { narrowEnabled } from './subtools.js';
 
 // 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
 // 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）
@@ -231,6 +232,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let failWarned = false;  // F4 软提示只发一次（到 N 次后提示换策略，再 N 次才挂起）
   const t0 = Date.now();
   let cumTin = 0, cumTout = 0, cumCost = 0, cumHit = 0, cumMiss = 0; // WS2 本任务累计钱包；P8 cache hit 率测量（hit/(hit+miss)）
+  // RA-14：本任务"已花多少钱"的单一出口——子代理额度回收需要它（未花完的部分要能显式算出来）
+  const spentNow = () => Math.round(cumCost * 1000) / 1000;
 
   // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
   // 2026-09 token 优化（缓存友好）：快照内容每轮变化（轮次/用时/累计 token），若插在历史前（splice(1,0)）
@@ -343,7 +346,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
   const defs = ctx.__light
     ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
-    : toolDefs(ctx.preset, ctx.__enabledTools, ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）
+    : toolDefs(ctx.preset, narrowEnabled(ctx.__enabledTools, ctx.__subTools), ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）；RA-12：叠加子代理白名单（只能更窄）
   const toolsHash = createHash('sha256').update(JSON.stringify(defs)).digest('hex').slice(0, 12);
   // C5 豁免失效归因（只报数、不设 0）：运行起点分类一次 —— 首轮 / 长空闲 / 切模型。
   // 依据《RW-Agent 架构 v1.1》§5.3 纪律5（失效可数）与计划 §0.3 的 C4/C5 口径；落 audit_log（现有载体，不新造表）。
@@ -396,15 +399,25 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       if (ctx.__budgetRemain != null && ctx.__budgetRemain >= 0) v = v > 0 ? Math.min(v, ctx.__budgetRemain) : ctx.__budgetRemain;
       return v;
     })();
+    // RA-14 子代理额度切分（§14.4）：父级派发时切一块额度给子代理，**只烧这一块**；默认 0=不切（沿用父级段阈值）。
+    // 与段阈值/壳上限/会话总账是 **min 叠加**（只能更严，与 RA-17「子代理视窗只能比父级更窄」同向）。
+    const subBudgetYuan = ctx.__subBudgetYuan != null ? Number(ctx.__subBudgetYuan) : 0;
+    const effSubBudget = subBudgetYuan > 0 ? (effBudgetYuan > 0 ? Math.min(subBudgetYuan, effBudgetYuan) : subBudgetYuan) : 0;
+    if (effSubBudget > 0 && cumCost > effSubBudget) {
+      return {
+        content: `（子代理额度已用尽：本次额度 ¥${effSubBudget.toFixed(3)}，已用 ¥${cumCost.toFixed(3)}。已完成的步骤与结论仍有效；剩余工作请回报父代理，由父代理追加额度或改用别的做法。）`,
+        toolLog, usage: {}, guard: 'budget-sub', spentYuan: Math.round(cumCost * 1000) / 1000, budgetYuan: effSubBudget,
+      };
+    }
     if (ctx.__budgetRemain === 0) {
-      return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total' };
+      return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total', spentYuan: spentNow() };
     }
     // 5.2 后台/子代理完成通知注入
     scanBg();
     const bgNotes = await bgNotices();
     for (const n of bgNotes) msgs.push({ role: 'system', content: n });
     if (lim.budgetMin > 0 && Date.now() - t0 > lim.budgetMin * 60000) {
-      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget' };
+      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget', spentYuan: spentNow() };
     }
     if (lim.roundCap > 0 && round >= lim.roundCap) {
       return { content: `（达到 ${lim.roundCap} 轮护栏上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）`, toolLog, usage: {}, guard: 'cap' };
