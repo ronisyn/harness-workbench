@@ -41,7 +41,7 @@ console.log('判据：C1 ≥ 99% · C2 中位 ≤ 1,000 · P95 ≤ 5,000（《�
 
 console.log('== ① 基线段：改造生效前的历史轮次（冻结，只用于算成本账）==');
 const base = {};
-for (const [k, f] of [['真实流量', REAL_WHERE], ['  ├ 人发起', HUMAN_WHERE], ['  └ 定时任务', SCHEDULED_WHERE], ['探针', PROBE_WHERE]]) {
+for (const [k, f] of [['真实流量（基线）', REAL_WHERE], ['  ├ 人发起', HUMAN_WHERE], ['  └ 定时任务', SCHEDULED_WHERE], ['探针（基线）', PROBE_WHERE]]) {
   base[k] = await metrics(k, f, null);
   base[k].label = k;
 }
@@ -100,7 +100,7 @@ console.log('\n== ③ 成本基线（累计，不受分段影响）==');
 const cost = (await q('SELECT ROUND(SUM(cost),4) all_cost FROM usage_stats'))[0] || {};
 const realCost = (await q(`SELECT ROUND(SUM(u.cost),4) c FROM usage_stats u WHERE ${REAL_WHERE('u')}`))[0] || {};
 console.log(`  全库累计 ¥${cost.all_cost} · 真实流量累计 ¥${realCost.c}`);
-console.log(`  真实流量当前 C1 = ${pct(base['真实流量'].c1)}（基线段的累计值，会被历史大会话锁住，见 c1-ceiling.mjs 的集中度）`);
+console.log(`  真实流量当前 C1 = ${pct(base['真实流量（基线）'].c1)}（基线段的累计值，会被历史大会话锁住，见 c1-ceiling.mjs 的集中度）`);
 console.log('  提示：本段只作成本账。**别用累计 C1 判"现在好不好"**——判断只看 ② 新段。');
 console.log('\n复跑：node scripts/ra35-report.mjs   （可用 RA35_CUTOFF 覆盖切段时刻）');
 process.exit(0);
