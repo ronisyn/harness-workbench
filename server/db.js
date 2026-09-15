@@ -1,6 +1,7 @@
 // server/db.js - MySQL 连接池 + 建表
 import mysql from 'mysql2/promise';
 import { config } from './config.js';
+import { runMigrations, schemaVersion } from './migrations.js';
 
 export const pool = mysql.createPool({
   host: config.db.host,
@@ -444,67 +445,18 @@ export async function initSchema() {
   for (const sql of SCHEMA) {
     try { await pool.query(sql); } catch (e) { console.error('[db] schema error:', e.message); }
   }
-  // 存量库迁移（幂等：列已存在时报错被吞掉）
-  const MIGRATIONS = [
-    'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
-    "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
-    "ALTER TABLE conversations ADD COLUMN preset VARCHAR(8) DEFAULT 'all'",
-    "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
-    'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
-    'ALTER TABLE usage_stats ADD COLUMN cache_miss_tokens INT DEFAULT 0',
-    // 2026-09 对话内模型：conversations 记录每会话选中的 provider/model（前端打开会话时恢复、切换即保存）
-    "ALTER TABLE conversations ADD COLUMN provider VARCHAR(32)",
-    "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
-    // B1 壳维度：会话归属壳（NULL=默认壳语义，保持存量行为不变）
-    'ALTER TABLE conversations ADD COLUMN shell_id INT NULL',
-    // B1 修正：三态 mode 列长不足（force_off 被截断）→ 扩到 12
-    'ALTER TABLE shell_tools MODIFY COLUMN mode VARCHAR(12) NOT NULL',
-    // B1-④ 埋点：执行/审计/工具调用带 shell 维度（§8）
-    'ALTER TABLE usage_stats ADD COLUMN shell_id INT NULL',
-    'ALTER TABLE tool_calls ADD COLUMN shell_id INT NULL',
-    'ALTER TABLE audit_log ADD COLUMN shell_id INT NULL',
-    // B2：壳级意图词表（intentRules，v1.1 可选字段）
-    'ALTER TABLE shells ADD COLUMN intent_rules JSON',
-    // B3：壳级任务档案（taskProfiles，v1.2 可选字段）
-    'ALTER TABLE shells ADD COLUMN task_profiles JSON',
-    // ④：知识库壳私有维度（scope=shell 条目挂所属壳；存量行 shell_id=NULL 不受影响）
-    'ALTER TABLE knowledge ADD COLUMN shell_id INT NULL',
-    // F2 往返保真：DB 无列承载的 pack 扩展字段（tone/terms/mcps/defaultsAutoLoad/approvalMode/bindings/importRefs/credentials 等）
-    // 存 pack_extra（import 写入 / export/clone 合并还原），避免 clone/export→import→export 丢字段
-    'ALTER TABLE shells ADD COLUMN pack_extra JSON',
-    // 2026-09-09 知识库文档型升级：kind 分类（fact=运行事实[默认]/progress=进化进度/guide=平台规范/skill=技能/lesson=错题本）
-    // 仅增加表达维度，不改旧行语义（存量默认 fact）；scope 三档(global/shell/conv)不变，不新增隔离面
-    "ALTER TABLE knowledge ADD COLUMN kind VARCHAR(12) DEFAULT 'fact'",
-    // A6 知识治理（§7.3 条目结构化字段）：状态 active|superseded|obsolete + 关联组件/版本（superseded/obsolete 注入降权或仅历史）
-    "ALTER TABLE knowledge ADD COLUMN status VARCHAR(12) DEFAULT 'active'",
-    "ALTER TABLE knowledge ADD COLUMN related_component VARCHAR(120)",
-    // A7 难度人工勾选（§7.2：复测记录带难度 小|中|大，联动一次通过率）
-    "ALTER TABLE reviews ADD COLUMN difficulty VARCHAR(8)",
-    // A9 审计回溯（按会话）+ 90 天归档查询索引（§8.10）
-    'ALTER TABLE audit_log ADD COLUMN conversation_id INT NULL',
-    'ALTER TABLE audit_log_archive ADD COLUMN conversation_id INT NULL',
-    'ALTER TABLE audit_log_archive ADD COLUMN shell_id INT NULL',
-    // 2026-09-15 RA-05b：工具结果原始体积遥测（字节）——spill 阈值 32768 的标定依据。
-    // 单位取**字节**，与 spill 判定同口径（§5.4 计数单位=字节）；存量行留 0，由 scripts/backfill-result-bytes.mjs 一次性回填。
-    'ALTER TABLE tool_calls ADD COLUMN result_bytes INT DEFAULT 0',
-    // 2026-09-15 M1a：每轮前缀面指纹（system 提示 + 工具面）。此前只在 RW_PREFIX_DEBUG 日志里，
-    // 事后查不出"这次冷启动是谁打破了前缀"；落库后那是一条 SQL（方案 §4-M1）。存量行留 NULL。
-    // kind='collapse' 行留 NULL——折叠调用用的是归档器提示，不属于会话前缀，记上去会误导归因。
-    'ALTER TABLE usage_stats ADD COLUMN prefix_sys_hash VARCHAR(12) NULL',
-    'ALTER TABLE usage_stats ADD COLUMN prefix_tools_hash VARCHAR(12) NULL',
-    // 2026-09-15 工具面会话内冻结（引擎方案 v0.3 §4.4.1 规则3）：`light`（轻量面/全量面）此前按**每条消息内容**算，
-    // 同会话在闲聊↔干活之间切换时工具面来回翻，翻一次整段前缀作废。改为**单向粘滞**：一旦用过全量面就置 1，此后固定全量面。
-    'ALTER TABLE conversations ADD COLUMN face_full TINYINT DEFAULT 0',
-    // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
-    'DROP TABLE IF EXISTS capabilities',
-  ];
-  for (const sql of MIGRATIONS) {
-    try { await pool.query(sql); }
-    catch (e) {
-      // 仅"列已存在"可静默（幂等）；其余失败（权限/锁/断连）记日志便于定位——否则列漂移后主链路 500 难查
-      const msg = String((e && e.message) || e);
-      if (!/Duplicate column|already exists|Duplicate entry/i.test(msg)) console.error('[db] migration error:', msg);
-    }
+  // 存量库迁移：**已迁到 server/migrations.js 的带版本迁移链**（2026-09-15）。
+  // 此前是"一串幂等 ALTER + 报错就吞掉"：没有版本记录、每次启动全量重跑、真实失败与"列已存在"在日志里一个样。
+  // 现在：按序号应用、应用过就跳过、链有缺口直接报错（照 DSH 会话格式迁移链的两条：相邻无缺口、只向前）。
+  // **新增结构变更只加到 migrations.js 的 VERSIONS**，同时改上面的 SCHEMA 建表语句（新库走 CREATE，存量库走迁移）。
+  try {
+    const r = await runMigrations(pool);
+    if (r.applied.length) console.log('[db] 迁移已应用 ' + r.applied.join(', ') + '（此前已应用 ' + r.skipped + ' 条）');
+    if (r.failed) console.error('[db] 迁移失败于 ' + r.failed.id + '：' + r.failed.error);
+  } catch (e) {
+    // 链本身坏了（跳号/重复/格式错）→ 显式抛出：带着半条链跑比启动失败更糟
+    console.error('[db] 迁移链校验失败：' + ((e && e.message) || e));
+    throw e;
   }
   // 初始键种子（幂等：INSERT IGNORE，已存在不覆盖）：政策版本从 1 起；单段成本提醒默认关（0）；
   // 任务总账默认 100（会话 24h 真上限，与 agent.js 回退值/蓝图一致）；存量旧值 20/30 由部署迁移校正
@@ -553,4 +505,6 @@ export async function initSchema() {
     }
     if (missing.length) console.error('[db] 启动自检：关键列缺失（迁移可能被跳过）→ ' + missing.join(', '));
   } catch { /* 自检失败不阻断 */ }
+  // schema 版本（架构 §11.1：存储格式带版本号）——升级/排障时第一眼要看的东西
+  try { console.log('[db] schema 版本 = ' + (await schemaVersion(pool) || '（无记录）')); } catch { /* 忽略 */ }
 }

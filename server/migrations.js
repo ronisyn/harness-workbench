@@ -1,0 +1,159 @@
+// server/migrations.js - 结构变更的**唯一去处**：带版本号的迁移链（架构 §11.1「存储格式带版本与迁移链」）
+//
+// 为什么要它（此前是"一串幂等 ALTER + 报错就吞掉"）：
+//   · 没有任何地方记录"这个库现在是什么版本" ⇒ 客户机离线升级、回滚、排障都无从谈起；
+//   · 每次启动把全部 ALTER 重跑一遍，真实失败与"列已存在"在日志里长得一样；
+//   · 加新变更没有固定位置，散在 initSchema 里。
+//
+// 参考 DSH 的做法（`dsh-session-format` + `dsh-session-format-v0-to-v1/v1-to-v2/v2-to-v3`）：
+//   它的迁移是 `{name, fromVersion, toVersion, migrateHeader, migrateEvent}`，组合器在**注册时**强制
+//   `toVersion === fromVersion + 1`（只允许相邻步），把整条链编译成"唯一、完整、无缺口"，缺一步就
+//   **显式报错**（SessionFormatUnsupportedMigrationError）而不是跳过。
+//   我们照搬其中两条（不照搬文件格式那套，因为我们的对象是数据库结构）：
+//     ① **序号连续、无重复、按序**——启动时校验，链坏了立刻停（不要带着半条链跑）；
+//     ② **只向前**，不写降级脚本（《数据库迁移规范》：只增不删；破坏性变更分两步走）。
+//
+// 用法：新增结构变更 = 在 VERSIONS 末尾加一条 `{ id: '<下一个序号>_短名', statements: [...] }`，
+//       **同时**把新库路径（server/db.js 的 SCHEMA 建表语句）改成最终形状。两处都改才算完整。
+
+export const MIGRATION_ID_RE = /^(\d{4})_[a-z0-9_]+$/;
+
+/**
+ * 校验迁移链：id 格式合法、序号连续（从 1 起、无跳号）、无重复。
+ * 纯函数，坏了就抛错——**在应用任何一条之前**先校验，避免带着半条链跑。
+ */
+export function validateChain(versions) {
+  if (!Array.isArray(versions)) throw new Error('迁移链必须是数组');
+  const seen = new Set();
+  versions.forEach((v, i) => {
+    const m = MIGRATION_ID_RE.exec(String(v && v.id || ''));
+    if (!m) throw new Error('迁移 id 非法（应形如 0002_add_xxx）：' + (v && v.id));
+    if (seen.has(v.id)) throw new Error('迁移 id 重复：' + v.id);
+    seen.add(v.id);
+    const seq = Number(m[1]);
+    if (seq !== i + 1) throw new Error('迁移链有缺口或乱序：第 ' + (i + 1) + ' 条应为 ' + String(i + 1).padStart(4, '0') + '，实际 ' + v.id);
+    if (!Array.isArray(v.statements) || !v.statements.length) throw new Error('迁移 ' + v.id + ' 没有语句');
+  });
+  return true;
+}
+
+/** 待应用的迁移（按链序）。纯函数，便于夹具。 */
+export function pendingMigrations(versions, appliedIds) {
+  const done = new Set(appliedIds || []);
+  return versions.filter((v) => !done.has(v.id));
+}
+
+/**
+ * 版本化迁移的**改造前既有结构变更**（原 db.js 里那串幂等 ALTER，逐条搬运，未改内容）。
+ * 它是普通的一条迁移：首次运行真的执行一遍（在已有库上是无操作的幂等语句），执行过就不再重复。
+ */
+const BASELINE = [
+  'ALTER TABLE messages ADD COLUMN reasoning MEDIUMTEXT',
+  "ALTER TABLE conversations ADD COLUMN mode VARCHAR(16) DEFAULT 'chat'",
+  "ALTER TABLE conversations ADD COLUMN preset VARCHAR(8) DEFAULT 'all'",
+  "ALTER TABLE usage_stats ADD COLUMN kind VARCHAR(16) DEFAULT 'request'",
+  'ALTER TABLE usage_stats ADD COLUMN agent_run_id INT NULL',
+  'ALTER TABLE usage_stats ADD COLUMN cache_miss_tokens INT DEFAULT 0',
+  // 2026-09 对话内模型：conversations 记录每会话选中的 provider/model（前端打开会话时恢复、切换即保存）
+  "ALTER TABLE conversations ADD COLUMN provider VARCHAR(32)",
+  "ALTER TABLE conversations ADD COLUMN model VARCHAR(128)",
+  // B1 壳维度：会话归属壳（NULL=默认壳语义，保持存量行为不变）
+  'ALTER TABLE conversations ADD COLUMN shell_id INT NULL',
+  // B1 修正：三态 mode 列长不足（force_off 被截断）→ 扩到 12
+  'ALTER TABLE shell_tools MODIFY COLUMN mode VARCHAR(12) NOT NULL',
+  // B1-④ 埋点：执行/审计/工具调用带 shell 维度（§8）
+  'ALTER TABLE usage_stats ADD COLUMN shell_id INT NULL',
+  'ALTER TABLE tool_calls ADD COLUMN shell_id INT NULL',
+  'ALTER TABLE audit_log ADD COLUMN shell_id INT NULL',
+  // B2：壳级意图词表（intentRules，v1.1 可选字段）
+  'ALTER TABLE shells ADD COLUMN intent_rules JSON',
+  // B3：壳级任务档案（taskProfiles，v1.2 可选字段）
+  'ALTER TABLE shells ADD COLUMN task_profiles JSON',
+  // ④：知识库壳私有维度（scope=shell 条目挂所属壳；存量行 shell_id=NULL 不受影响）
+  'ALTER TABLE knowledge ADD COLUMN shell_id INT NULL',
+  // F2 往返保真：DB 无列承载的 pack 扩展字段（tone/terms/mcps/defaultsAutoLoad/approvalMode/bindings/importRefs/credentials 等）
+  // 存 pack_extra（import 写入 / export/clone 合并还原），避免 clone/export→import→export 丢字段
+  'ALTER TABLE shells ADD COLUMN pack_extra JSON',
+  // 2026-09-09 知识库文档型升级：kind 分类（fact=运行事实[默认]/progress=进化进度/guide=平台规范/skill=技能/lesson=错题本）
+  // 仅增加表达维度，不改旧行语义（存量默认 fact）；scope 三档(global/shell/conv)不变，不新增隔离面
+  "ALTER TABLE knowledge ADD COLUMN kind VARCHAR(12) DEFAULT 'fact'",
+  // A6 知识治理（§7.3 条目结构化字段）：状态 active|superseded|obsolete + 关联组件/版本（superseded/obsolete 注入降权或仅历史）
+  "ALTER TABLE knowledge ADD COLUMN status VARCHAR(12) DEFAULT 'active'",
+  "ALTER TABLE knowledge ADD COLUMN related_component VARCHAR(120)",
+  // A7 难度人工勾选（§7.2：复测记录带难度 小|中|大，联动一次通过率）
+  "ALTER TABLE reviews ADD COLUMN difficulty VARCHAR(8)",
+  // A9 审计回溯（按会话）+ 90 天归档查询索引（§8.10）
+  'ALTER TABLE audit_log ADD COLUMN conversation_id INT NULL',
+  'ALTER TABLE audit_log_archive ADD COLUMN conversation_id INT NULL',
+  'ALTER TABLE audit_log_archive ADD COLUMN shell_id INT NULL',
+  // 2026-09-15 RA-05b：工具结果原始体积遥测（字节）——spill 阈值标定的依据。
+  'ALTER TABLE tool_calls ADD COLUMN result_bytes INT DEFAULT 0',
+  // 2026-09-15 M1a：每轮前缀面指纹（system 提示 + 工具面）；存量行留 NULL
+  'ALTER TABLE usage_stats ADD COLUMN prefix_sys_hash VARCHAR(12) NULL',
+  'ALTER TABLE usage_stats ADD COLUMN prefix_tools_hash VARCHAR(12) NULL',
+  // 2026-09-15 工具面会话内冻结（v0.3 §4.4.1 规则3）：单向粘滞，一旦用过全量面就置 1
+  'ALTER TABLE conversations ADD COLUMN face_full TINYINT DEFAULT 0',
+  // 2026-09-09 清理：capabilities 账号表（从未接线到运行时，随代码移除一起清理）
+  'DROP TABLE IF EXISTS capabilities',
+];
+
+/** 迁移链。**新增结构变更只加在这里**（序号必须接上），同时改 db.js 的建表语句。 */
+export const VERSIONS = [
+  {
+    id: '0001_baseline', note: '改造前既有结构变更（只容忍"已存在"类错误）', statements: BASELINE,
+    // 这一条是**历史搬运**，语义与改造前完全一致：改造前的代码就是"执行这串 ALTER，把 Duplicate column/
+    // already exists 吞掉"。所以这里显式声明"只容忍已存在类错误"——**其余错误一律判失败**（这正是改进点：
+    // 过去所有错误都被吞，真实失败与"列已存在"在日志里长得一样）。
+    // 后续新增的迁移**不写 tolerate**（默认不容忍）：新变更必须是干净的。
+    tolerate: /Duplicate column|Duplicate key name|already exists|Duplicate entry/i,
+  },
+];
+
+const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  id VARCHAR(64) PRIMARY KEY,
+  note VARCHAR(200),
+  applied_at DATETIME DEFAULT NOW()
+)`;
+
+/**
+ * 应用待执行的迁移。
+ * @returns {{applied:string[], skipped:number, tolerated:number, failed:?{id:string, error:string}}}
+ * 失败处理：**记录不落、后续不再应用、日志醒目**，但不阻断启动（与既有 fail-soft 一致；
+ * 真正"关键列缺失"由 initSchema 末尾的启动自检兜底告警）。
+ */
+export async function runMigrations(pool, { versions = VERSIONS, log = console } = {}) {
+  validateChain(versions);
+  await pool.query(TBL);
+  const rows = await pool.query('SELECT id FROM schema_migrations');
+  const appliedIds = (rows[0] || []).map((r) => String(r.id));
+  const todo = pendingMigrations(versions, appliedIds);
+  const out = { applied: [], skipped: appliedIds.length, tolerated: 0, failed: null };
+  for (const v of todo) {
+    try {
+      for (const sql of v.statements) {
+        try {
+          await pool.query(sql);
+        } catch (e) {
+          const msg = String((e && e.message) || e);
+          if (v.tolerate && v.tolerate.test(msg)) { out.tolerated++; continue; }
+          throw e;
+        }
+      }
+      await pool.query('INSERT INTO schema_migrations (id, note) VALUES (?,?)', [v.id, String(v.note || '').slice(0, 200)]);
+      out.applied.push(v.id);
+    } catch (e) {
+      out.failed = { id: v.id, error: String((e && e.message) || e) };
+      log.error('[db] 迁移 ' + v.id + ' 失败，后续迁移不再应用：' + out.failed.error);
+      break;
+    }
+  }
+  return out;
+}
+
+/** 当前 schema 版本 = 已应用的最大序号（没有记录则返回 null）。 */
+export async function schemaVersion(pool) {
+  try {
+    const r = await pool.query('SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1');
+    return r[0] && r[0][0] ? String(r[0][0].id) : null;
+  } catch { return null; }
+}
