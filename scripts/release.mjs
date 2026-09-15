@@ -63,6 +63,24 @@ step('前端构建（vite build）', buildOk);
 // 4. 部署前检查：服务器活跃会话（只读提示，不自动 reload）
 step('部署走 C5 受控（git push → 服务器 pull → 人工/受控 reload）', true, '本脚本不自动部署');
 
+// 4.5 换纪元的代价，在**决策点**说出来（2026-09-16，C-31 实测驱动）
+// 为什么放这里：实测 214 次"整段重建"集中在一条 432 轮的会话上（量级 ≈14M tokens），成因就是**在它活跃期间反复部署**。
+// 判据不发明阈值：`agent_runs.status='running'` 就是"活跃"的权威定义（不设时间窗口）；读不到库就如实说跳过，不阻断发布。
+try {
+  const { db, pool } = await import('../server/db.js');
+  const rows = await db.query("SELECT conversation_id cid, goal, rounds, updated_at FROM agent_runs WHERE status='running' ORDER BY updated_at DESC LIMIT 20");
+  if (rows.length) {
+    console.log('\n⚠️ 当前有 ' + rows.length + ' 个会话在跑 —— 本次发布若改了工具面/系统提示，会换纪元，**它们的前缀会整段重建**：');
+    for (const r of rows) console.log('   conv=' + r.cid + ' 轮次=' + (r.rounds || 0) + ' 最后活动=' + String(r.updated_at).slice(5, 16) + ' ' + String(r.goal || '').replace(/\s+/g, ' ').slice(0, 40));
+    console.log('   建议：把同类工具面改动攒成一批再发；或等这些会话结束。');
+  } else {
+    console.log('\n✓ 当前没有 running 的会话 —— 此时换纪元不会作废任何活跃前缀（发布的好时机）。');
+  }
+  await pool.end();
+} catch (e) {
+  console.log('\n（跳过活跃会话检查：读不到库 —— ' + String((e && e.message) || e).slice(0, 80) + '）');
+}
+
 console.log('\n=== 结果: ' + ok.length + ' 通过 / ' + fail.length + ' 失败 ===');
 if (fail.length) {
   console.log('失败项：' + fail.join(', '));

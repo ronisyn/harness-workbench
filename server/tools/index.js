@@ -1083,18 +1083,22 @@ const RAW_TOOLS = [
       // F2 reload 防撞（2026-09 批2）：重启会打断服务器上一切进行中会话（agent_runs running 会被标 interrupted）。
       // 自会话豁免：当前 run/当前会话不算碰撞；但若有【其他】活跃任务（其他会话/定时/驱动在跑）→ 拒绝并告知，
       // 避免盲目 reload 打断别人（O-3 曾 2 次 reload 撞任务）。无其他活跃任务才调度重启。
+      // 2026-09-16 补（C-31 实测）：重启本身还有一笔**沉默成本**——改工具面/系统提示会换纪元，
+      // 所有活跃会话的前缀整段作废（实测：214 次重建集中在一条 432 轮的会话上，量级 ≈14M tokens，
+      // 是我在它活跃期间反复部署造成的）。这笔代价必须**在决策点说出来**，而不是事后从账本里发现。
+      const PREFIX_COST_NOTE = '注意：改工具面/系统提示会换纪元，**所有活跃会话**的前缀会整段重建（实测一次迭代可达千万 token 量级）——建议把同类改动攒成一批一起发布。';
       try {
         const other = await db.query(
           `SELECT COUNT(*) c FROM agent_runs WHERE status='running' AND id<>? AND conversation_id<>?`,
           [ctx.__runId ?? -1, ctx.conversationId ?? -1]
         );
         if (Number(other[0]?.c || 0) > 0) {
-          return { error: `reload 防撞：另有 ${other[0].c} 个任务正在运行（其他会话/定时/驱动），重启会中断它们。请等它们结束或让用户点"停止"后再 reload；当前会话不受影响。` };
+          return { error: `reload 防撞：另有 ${other[0].c} 个任务正在运行（其他会话/定时/驱动），重启会中断它们。请等它们结束或让用户点"停止"后再 reload；当前会话不受影响。` + PREFIX_COST_NOTE };
         }
       } catch { /* 查询失败不阻断（保守放行，由 maybeSelfRestart 侧兜底） */ }
       const note = String(a.note || '').slice(0, 300);
       requestRestart(note || 'platform code change');
-      return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。' };
+      return { scheduled: true, note, tip: '本回复发送完后平台将自动重启（约3-4秒），随后刷新页面即可。', prefixCost: PREFIX_COST_NOTE };
     } },
 
   // ---------- A5 开发需求采集（单一 intake 收口，§8.8 收敛与分层①）：intake 技能采集齐字段后 → intake_submit 落 extension_demands(待审)。
