@@ -153,6 +153,11 @@ export function applyEvent(view, ev) {
       // 灰字提示类：不影响重建，客户端可显示；契约里明确它们是"提示"，不承载事实
       v[ev.type] = ev;
       return v;
+    case 'llm_retry':
+      // 2026-09-16：厂商侧失败后的重试（统一失败分类/重试）。它**是事实**（这次执行真的重试过），
+      // 但不改变重建出的答案/状态——记进 retries 供界面与复盘看，避免落进 unknownTypes（那会掩盖真实漂移）。
+      v.retries = [...(v.retries || []), ev.retry];
+      return v;
     default:
       v.unknownTypes = [...view.unknownTypes, String(ev.type)];
       return v;

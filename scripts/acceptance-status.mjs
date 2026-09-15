@@ -57,10 +57,15 @@ L.push(`- 机检通过 **${counts.done}** · 缺锚点 **${counts.todo}** · 需
 L.push('');
 L.push('| 项 | 要求 | owner | 状态 | 说明 / 取证 |');
 L.push('|---|---|---|---|---|');
+// 单元格里的竖线必须**转义**成 `\|`（markdown 表格的转义写法），不能替换成别的字符。
+// 2026-09-16 修：原先 `.replace(/\|/g,'/')` 会把内容**静默改写**——说明里的逻辑或 `||` 印成 `//`，
+// 取证命令里的管道 `grep x | head` 变成 `grep x / head`（已经发生过：OP-08 的取证命令就是斜杠）。
+// 表格里的竖线是结构，正文里的竖线是内容，两者不能混为一谈。
+const cell = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|');
 for (const r of rows) {
   const ev = r.status === '✅' ? (r.anchors || []).map((a) => '`' + a.file + '`').join(' ') : '';
   const evTxt = r.kind === 'manual' ? (r.evidence || '（见说明）') : (r.missing && r.missing.length ? '缺：' + r.missing.join('；') : ev);
-  L.push(`| ${r.id} | ${r.title} | ${r.owner || '-'} | ${r.status} | ${String(r.note || '').replace(/\|/g, '/')}${evTxt ? '<br>' + evTxt.replace(/\|/g, '/') : ''} |`);
+  L.push(`| ${r.id} | ${r.title} | ${r.owner || '-'} | ${r.status} | ${cell(r.note)}${evTxt ? '<br>' + cell(evTxt) : ''} |`);
 }
 L.push('');
 L.push('## 怎么用');
