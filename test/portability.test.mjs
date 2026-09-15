@@ -135,6 +135,41 @@ test('run_test 走本机 shell（Windows 上 npm 只有 .cmd 形式，execFile �
   assert.ok(!/runCmd\('npm'/.test(s), '不许回退成 execFile 直呼 npm');
 });
 
+test('代码里用到的 RW_* 环境事实，每个都要在本文件里 import 过（启动路径的"没引入"只能在真机上撞见）', () => {
+  // 为什么要有这条：2026-09-16 我在 index.js 的启动回调里写了一句带 RW_PLATFORM_DIR 的日志，
+  // **忘了它没被 import** —— 本地全量夹具全绿（没有夹具会真的去 boot index.js），一直到部署后看 journalctl
+  // 才看见 `uncaughtException: ReferenceError: RW_PLATFORM_DIR is not defined`（幸好平台有全局兜底，
+  // 服务没死）。这类"符号没引入"在本仓库历史上出现过两次（`result is not defined`、`hookStop is not defined`），
+  // 共同点是**只在真实启动路径上出现**。所以这里做一条廉价的静态核对：把代码里的 RW_* 名字（先去掉注释，
+  // 免得注释里提到某名字也误报）与"本文件 import 到的那几个"对齐。
+  const ENV_EXPORTS = fs.readFileSync(path.join(ROOT, 'server', 'env.js'), 'utf8')
+    .match(/export const (RW_[A-Z0-9_]+)/g).map((s) => s.replace('export const ', ''));
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (p.endsWith('.js') && path.basename(p) !== 'env.js') files.push(p);
+    }
+  };
+  walk(path.join(ROOT, 'server'));
+  const bad = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    const code = strip(src);
+    const imported = new Set();
+    for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*'[^']*env\.js'/g)) {
+      for (const name of m[1].split(',')) { const t = name.trim().split(/\s+as\s+/)[0]; if (t) imported.add(t); }
+    }
+    for (const name of ENV_EXPORTS) {
+      const used = new RegExp('\\b' + name + '\\b').test(code);
+      if (used && !imported.has(name)) bad.push(path.relative(ROOT, f) + ' 用了 ' + name + ' 但没 import');
+    }
+  }
+  assert.deepEqual(bad, [], '这些会在真实启动/调用路径上抛 ReferenceError：' + bad.join('；'));
+});
+
 test('Windows 交付脚本必须带 UTF-8 BOM（否则 PowerShell 5.1 按 ANSI 解码，中文把脚本切坏）', () => {
   // 实测（2026-09-16，本机）：同一份 install-service.ps1，无 BOM 时 powershell.exe 的解析器报 12 个错
   // （`The string is missing the terminator`），补上 BOM 后 0 个错——Windows PowerShell 5.1 不带 BOM 就按

@@ -43,7 +43,7 @@ import { takeRestart, isRestartScheduled, markRestartScheduled, restartPlan } fr
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
-import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from './env.js';
 import { SHELL_CN } from './shell.js';
 
 const app = express();
