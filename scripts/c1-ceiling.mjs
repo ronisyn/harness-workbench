@@ -40,12 +40,13 @@ const nSample = await cnt(SAMPLE_WHERE('u'));
 const nReal = await cnt(REAL_WHERE('u'));
 const nProbe = await cnt(PROBE_WHERE('u'));
 const sum3 = nHuman + nSched + nSample;
-console.log(`  真实流量内部：人发起 ${fmt(nHuman)} + 定时任务 ${fmt(nSched)} = ${fmt(nHuman + nSched)}　vs　真实流量 ${fmt(nReal)}　${nHuman + nSched === nReal ? '✅ 一致（两个子档互斥且穷尽）' : '❌ 不一致'}`);
-// 「样本」是**人造定时任务**，它天然会被探针判据捞走一部分（它自己就是本轮改造的产物，会落 prefix:* 账本），
-// 所以它可能落在真实流量之外。这里只做提示，不做等值断言——口径归属写清楚比强行凑等式重要。
-console.log(`  样本(人造任务) ${fmt(nSample)} 轮${nSample && nSample > 0 ? '：' : '：'}其中落在真实流量内 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${REAL_WHERE('u')})`))} 轮、落在探针档 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${PROBE_WHERE('u')})`))} 轮`);
-if (nSample > 0) console.log('  ⚠️ 样本若落在探针档，说明它带 `prefix:*` 账本（本轮改造的产物）——引用样本成绩时按"人造任务"标注，别当真实使用。');
-console.log(`  探针档合计 ${fmt(nProbe)} 轮（含样本中被判为探针的部分）`);
+console.log(`  真实流量 = 人发起 ${fmt(nHuman)} + 定时任务 ${fmt(nSched)} + 样本 ${fmt(nSample)} = ${fmt(sum3)}　vs　${fmt(nReal)}　${sum3 === nReal ? '✅ 一致（三档互斥且穷尽）' : '❌ 不一致（某档写重了或漏了）'}`);
+console.log(`  样本(人造任务) ${fmt(nSample)} 轮：落在真实流量内 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${REAL_WHERE('u')})`))} / 落在探针档 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${PROBE_WHERE('u')})`))}`);
+if (await cnt(`(${SAMPLE_WHERE('u')}) AND (${PROBE_WHERE('u')})`) > 0) {
+  console.log('  ⚠️ 样本落在探针档：说明它的会话带有 `prefix:*` 账本且已被探针判据捞到——'
+    + '口径里那一支**只应匹配"已删除的会话"**（捞回早期已清理的探针），若新会话也中招就是判据写宽了。');
+}
+console.log(`  探针档合计 ${fmt(nProbe)} 轮`);
 
 console.log('\n== 结构结论（口径级，别按"单会话平均轮数 ≥100"理解——那是错的推导）==');;
 const all = (await q(`SELECT COUNT(*) n, COUNT(DISTINCT conversation_id) convs FROM usage_stats WHERE kind='round'`))[0];

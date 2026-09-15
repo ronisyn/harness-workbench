@@ -29,8 +29,15 @@ export const PROBE_TITLE_RE = '^(__.*__|ST-|B[1-7](-|[A-Z]|$)|PROBE$)';
 /** 探针行判据（可直接拼进 WHERE；假定 usage_stats 未被别名，或用 alias 前缀） */
 export const PROBE_WHERE = (alias = '') => {
   const p = alias ? alias + '.' : '';
+  // ⚠️ 账本那一支必须限定 `conversation_id NOT IN (SELECT id FROM conversations)`（=会话已删除）。
+  // 为什么（2026-09-15 实测踩到）：`prefix:*` 是本轮改造引入的**归因账本**，**任何**新会话都会落它；
+  // 不限定的话，改造后的真实会话会被判成探针 —— 实测：人造样本会话 conv=625（15 轮、C1 86.70%）
+  // 就这么被从"真实流量"里踢了出去，导致 RA-35 的"新段真实流量"永远是 0。
+  // 收窄后仍是原来那条有用的判据：捞回**已被清理**的探针会话（早期探针会话 528–569 已不在 conversations 里）。
   return `(${p}conversation_id IN (SELECT id FROM conversations WHERE title REGEXP '${PROBE_TITLE_RE}')
-           OR ${p}conversation_id IN (SELECT conversation_id FROM audit_log WHERE action LIKE 'prefix:%' AND conversation_id IS NOT NULL))`;
+           OR ${p}conversation_id IN (SELECT conversation_id FROM audit_log
+                                      WHERE action LIKE 'prefix:%' AND conversation_id IS NOT NULL
+                                        AND conversation_id NOT IN (SELECT id FROM conversations)))`;
 };
 // 孤儿 = 会话已删的残行 **∪** `conversation_id IS NULL` 的无主行
 //   · 前者是删会话留下的（曾实测到 5 个会话 10 行）；
