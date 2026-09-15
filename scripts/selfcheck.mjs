@@ -48,6 +48,9 @@ const c1 = await json(await jreq('/api/conversations', { method: 'POST', body: J
 step('create conversation', Boolean(c1.id));
 
 // 5. 普通对话 SSE（真实 LLM，需模型可达）
+// ⚠️ 帧解析注意：`part.split('\n').find(...)` 在加了 `id: <seq>` 行之后仍然有效（data 行在其后，find 会找到它）；
+//    但下面的 buf 每轮重新整体 split 会**重复计数**已处理的帧，故 deltaCount 只当"有没有 delta"用，
+//    不作精确条数（要精确请用 src/eventstream.js 的 parseSse）。
 let deltaCount = 0, doneFlag = false, errMsg = '';
 try {
   const res = await fetch(BASE + '/api/chat', {
@@ -65,14 +68,17 @@ try {
     for (const part of buf.split('\n\n')) {
       const line = part.split('\n').find((l) => l.startsWith('data:'));
       if (!line) continue;
-      const j = JSON.parse(line.slice(5).trim());
+      let j = null;
+      try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
       if (j.type === 'delta') deltaCount++;
       if (j.type === 'done') doneFlag = true;
       if (j.type === 'error') errMsg = j.message;
     }
   }
 } catch (e) { errMsg = e.message; }
-step('plain chat SSE streaming', deltaCount > 0 && doneFlag, errMsg || deltaCount + ' deltas');
+// 原先第三个参数写的是未定义的 `result` → 这行必抛 ReferenceError，被上面 catch 吞成 errMsg，
+// 于是"流明明正常"也永远报 ❌（12/12 与 11/12 的差别就来自这里）。改成真实诊断信息。
+step('plain chat SSE streaming', deltaCount > 0 && doneFlag, errMsg || ('deltas=' + deltaCount + ' done=' + doneFlag));
 
 // 6. 清理
 const d = await jreq('/api/conversations/' + c1.id, { method: 'DELETE' }, token);
