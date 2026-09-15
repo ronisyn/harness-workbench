@@ -10,20 +10,29 @@ import { FAIL, failSpec } from '../server/failures.js';
 
 const days = Math.max(1, Number(process.argv[2]) || 7);
 const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+// 只统计**真实会话**（conversation_id > 0）：本仓库用 0/负数作夹具与探针的哨兵会话，而夹具会真的走 execTool
+// 并把失败落账（例如"子代理工具面收窄""壳未装载"各 42 次、MCP 未连接 41 次全是夹具产生的）。
+// 不排除它们，这个仪表就会把测试噪音报成生产失败——实测：7 天内失败 186 次里 139 次来自哨兵会话。
+// 另一侧（哨兵）的口径照常打印，**不藏数据**：要判断"夹具是不是在污染账本"时看那一行。
+const REAL = 'conversation_id > 0';
 
 const byCode = await db.query(
   `SELECT COALESCE(error_code, '(无码/存量行)') AS code, COUNT(*) AS n, COUNT(DISTINCT tool_name) AS tools
-   FROM tool_calls WHERE status='fail' AND created_at >= ? GROUP BY code ORDER BY n DESC`, [since]);
+   FROM tool_calls WHERE status='fail' AND ${REAL} AND created_at >= ? GROUP BY code ORDER BY n DESC`, [since]);
 const byTool = await db.query(
   `SELECT tool_name, COALESCE(error_code,'(无码)') AS code, COUNT(*) AS n
-   FROM tool_calls WHERE status='fail' AND created_at >= ? GROUP BY tool_name, code ORDER BY n DESC LIMIT 20`, [since]);
+   FROM tool_calls WHERE status='fail' AND ${REAL} AND created_at >= ? GROUP BY tool_name, code ORDER BY n DESC LIMIT 20`, [since]);
 const totals = await db.query(
-  `SELECT COUNT(*) AS all_n, SUM(status='fail') AS fail_n FROM tool_calls WHERE created_at >= ?`, [since]);
+  `SELECT COUNT(*) AS all_n, SUM(status='fail') AS fail_n,
+          (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND created_at >= ?) AS probe_all,
+          (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND status='fail' AND created_at >= ?) AS probe_fail
+   FROM tool_calls WHERE ${REAL} AND created_at >= ?`, [since, since, since]);
 
 const t = totals[0] || { all_n: 0, fail_n: 0 };
-console.log(`=== 工具失败码统计（近 ${days} 天）===`);
+console.log(`=== 工具失败码统计（近 ${days} 天，仅真实会话）===`);
 console.log(`工具调用 ${t.all_n || 0} 次，其中失败 ${t.fail_n || 0} 次`
-  + (t.all_n ? `（失败率 ${((t.fail_n || 0) / t.all_n * 100).toFixed(1)}%）` : ''));
+  + (t.all_n ? `（失败率 ${((t.fail_n || 0) / t.all_n * 100).toFixed(1)}%）` : '')
+  + `　·　另：夹具/哨兵会话 ${t.probe_all || 0} 次调用、${t.probe_fail || 0} 次失败（**已排除**，不混进上面的数字）`);
 console.log('\n按失败码：');
 if (!byCode.length) console.log('  （无失败记录）');
 for (const r of byCode) {

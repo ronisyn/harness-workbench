@@ -5,6 +5,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+# 凭据文档（C-18：唯一访问路径 server/credentials.js）——密钥绝不进版本库
+.credentials.yaml
 
 # Logs
 *.log
