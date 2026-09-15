@@ -57,7 +57,14 @@ const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 's
 const TOUCHED = new Set(['conversations', 'agent_runs', 'deliveries']);
 
 const enc = (col, v) => (v === undefined ? null : (JSON_COLS.has(col) ? JSON.stringify(v) : v));
-const dec = (col, v) => (v === null || v === undefined ? v : (JSON_COLS.has(col) && typeof v === 'string' ? JSON.parse(v) : v));
+// 读时 parse，但**解析失败就原样返回**：`settings.svalue` 里有历史遗留的**纯字符串**（不是 JSON），
+// 老代码路径本来就是把它们原样给出去的；这里若直接抛，整张设置页会 500（真机部署时实测到：
+// `GET /api/settings` → SyntaxError: Unexpected non-whitespace character after JSON at position 4）。
+const dec = (col, v) => {
+  if (v === null || v === undefined) return v;
+  if (!JSON_COLS.has(col) || typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return v; }
+};
 
 /** 行 → 中性记录（只映射契约里声明过的字段；调用方不该认识列名）。 */
 function toRecord(entity, row, { at = false } = {}) {
