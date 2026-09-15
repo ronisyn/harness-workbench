@@ -12,14 +12,27 @@ import { RW_WORKSPACE } from '../env.js';
 const FEISHU_API = 'https://open.feishu.cn/open-apis';
 
 // 飞书事件解密（AES-256-CBC，encrypt_key 派生）
-function decryptEvent(encryptStr) {
+function decryptEvent(encryptStr, encryptKey) {
   const b = Buffer.from(encryptStr, 'base64');
   const iv = b.subarray(0, 16);
   const cipher = b.subarray(16);
-  const key = crypto.createHash('sha256').update(process.env.FEISHU_ENCRYPT_KEY || '').digest();
+  const key = crypto.createHash('sha256').update(String(encryptKey || '')).digest();
   const d = crypto.createDecipheriv('aes-256-cbc', key, iv);
   const plain = Buffer.concat([d.update(cipher), d.final()]);
   return JSON.parse(plain.toString('utf8'));
+}
+
+// 来源校验的三条口径（2026-09-16 照飞书开放平台官方文档实现，不是自己拍的规范）：
+//  · 配了 Encrypt Key ⇒ **签名校验**：sha256(X-Lark-Request-Timestamp + X-Lark-Request-Nonce + encrypt_key + 原始请求体)，
+//    与请求头 X-Lark-Signature 比对。官方明确"body 指整个请求体，**不要在反序列化后再计算**"
+//    ⇒ 依赖 index.js 的 express.json 把原始字节留一份（rawBody）。
+//  · 只配了 Verification Token ⇒ 比对事件里的 token（官方注明这种简单但明文传输、安全性较低）。
+//  · 两个都没配 ⇒ 本入口**没有来源校验**：任何能访问这个端口的人都能 POST 一个事件把 Agent 叫起来。
+//    这里**不阻断**（避免把正在用的渠道打死），但启动时明确告警——这就是"如实声明"的那一半。
+//  另：官方口径里【请求网址校验（challenge）**不在**签名校验范围内】，所以 challenge 单独按 token 比对。
+export function feishuSignature(timestamp, nonce, encryptKey, rawBody) {
+  const prefix = String(timestamp) + String(nonce) + String(encryptKey);
+  return crypto.createHash('sha256').update(prefix).update(rawBody || Buffer.alloc(0)).digest('hex');
 }
 
 // 解析消息内容（text 或 file/media）
@@ -62,18 +75,35 @@ export function registerFeishuWebhook(app) {
 
   router.post('/webhook', async (req, res) => {
     const body = req.body || {};
-    // URL 验证（首次配置时飞书发 challenge）
-    if (body.challenge !== undefined) {
-      return res.json({ challenge: body.challenge });
-    }
-    // 事件解密
+    const encKey = process.env.FEISHU_ENCRYPT_KEY || '';
+    const vToken = process.env.FEISHU_VERIFICATION_TOKEN || '';
+    // 事件解密（加密模式下 challenge 也在密文里，必须先解密才能分辨"这是网址校验还是真事件"）
     let event = body;
     if (body.encrypt) {
-      try { event = decryptEvent(body.encrypt); } catch (e) { return res.status(400).json({ ok: false, message: '解密失败' }); }
+      try { event = decryptEvent(body.encrypt, encKey); } catch { return res.status(400).json({ ok: false, message: '解密失败' }); }
+    }
+    // 请求网址校验（首次配置时飞书发 challenge）：官方明确它不在签名校验范围内，按 Verification Token 比对
+    if (event.challenge !== undefined || event.type === 'url_verification') {
+      if (vToken && event.token !== vToken) return res.status(401).json({ ok: false, message: 'challenge 的 token 不匹配' });
+      return res.json({ challenge: event.challenge });
+    }
+    // 真实事件：**先验来源，再动手**（DSH 的 GitHub webhook 也是"解析 JSON 之前验签、失败 401"）
+    if (encKey) {
+      const sig = String(req.get('X-Lark-Signature') || '');
+      const ts = String(req.get('X-Lark-Request-Timestamp') || '');
+      const nonce = String(req.get('X-Lark-Request-Nonce') || '');
+      if (!sig || !ts || !nonce || !req.rawBody) return res.status(401).json({ ok: false, message: '缺少签名头（配置了 Encrypt Key 就必须带 X-Lark-Signature/Timestamp/Nonce）' });
+      const want = feishuSignature(ts, nonce, encKey, req.rawBody);
+      // 定长比较：避免按字节提前返回造成的时序差异
+      const okSig = sig.length === want.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want));
+      if (!okSig) return res.status(401).json({ ok: false, message: '签名校验失败' });
+    } else if (vToken) {
+      const t = (event.header && event.header.token) || event.token;
+      if (t !== vToken) return res.status(401).json({ ok: false, message: 'token 校验失败' });
     }
     const header = event.header || {};
     const ev = event.event || {};
-    res.json({ ok: true }); // 先确认接收
+    res.json({ ok: true }); // 先确认接收（官方要求 3 秒内回 200，否则会重推）
 
     if (header.event_type !== 'im.message.receive_v1') return;
 
@@ -103,5 +133,11 @@ export function registerFeishuWebhook(app) {
   });
 
   app.use('/api/feishu', router);
+  // 如实声明：没有任何校验密钥时，这个入口是不设防的（能访问端口的人都能 POST 一个事件把 Agent 叫起来）。
+  // 不在这里拒绝请求（那会把正在用的渠道打死），但启动时必须说清楚，别让"看起来接上了"掩盖"其实没验来源"。
+  if (!process.env.FEISHU_ENCRYPT_KEY && !process.env.FEISHU_VERIFICATION_TOKEN) {
+    console.warn('[feishu] webhook 未配置 FEISHU_ENCRYPT_KEY / FEISHU_VERIFICATION_TOKEN：本入口**不校验来源**，'
+      + '任何能访问该端口的人都能 POST 事件触发 Agent 调用（配置见 scripts/PROD-DEPLOY.md 的加密策略一节）。');
+  }
   console.log('[feishu] webhook 已注册（/api/feishu/webhook，需公网 HTTPS 回调）');
 }

@@ -47,7 +47,9 @@ import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from
 import { SHELL_CN } from './shell.js';
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+// verify：留一份**原始请求体字节**。飞书回调的来源校验要对"原始 body"算 HMAC（官方明确"不要在反序列化后计算"），
+// 而 express.json 解析完就把字节丢了；留引用是标准做法，成本可忽略（每个请求多一个 Buffer 引用）。
+app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // 进程级兜底：DB/异步偶发 rejection 不拖垮整个平台（记录并保活；比 Node 默认崩溃更稳）
 process.on('unhandledRejection', (reason) => console.error('[rw] unhandledRejection:', reason instanceof Error ? (reason.stack || reason.message) : reason));
