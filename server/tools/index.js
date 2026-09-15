@@ -467,16 +467,18 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 子代理（F16/F17：主代理派生独立代理执行任务，复用完整 Agent 循环） ----------
-  { name: 'subagent', description: '启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（"子:"前缀）并留痕。', permission: 'read',
+  { name: 'subagent', description: '启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（"子:"前缀）并留痕。可用 tools 把它的工具清单收窄到只有几个（如查库存的子代理只给 db_query），用 budgetYuan 给它切一块额度（只烧这块，没花完会回收）。', permission: 'read',
     params: {
       prompt: { type: 'string', required: true, desc: '给子代理的完整任务指令（自包含，含目标与验收标准）' },
       name: { type: 'string', desc: '子代理名称（用于展示，默认 子代理）' },
       model: { type: 'string', desc: '子代理模型，默认与主代理相同' },
       mode: { type: 'string', enum: ['sync', 'async'], desc: 'sync=等结果(默认) | async=立即返回id' },
+      tools: { type: 'string', desc: '可选：只给子代理这些工具（逗号分隔，如 "db_query,kb_search"）。给了就是白名单——其他工具**不出现在它的清单里、也调不动**；不给=继承父级工具面' },
+      budgetYuan: { type: 'number', desc: '可选：切给这个子代理的额度（元）。只烧这一块，用尽即停并回报；没花完的部分显式回收。不给=沿用父级段阈值' },
     },
     run: async (a, ctx) => {
       if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限，请自己直接完成任务');
-      const { spawnSubagent, waitSub, subs } = await import('../subagent.js');
+      const { spawnSubagent, waitSub, subs, subagentOutcome } = await import('../subagent.js');
       const running = [...subs.values()].filter((s) => s.status === 'running').length;
       if (running >= 8) throw new Error('当前并发子代理已达上限(8)，稍后再试或减少并行数');
       const prompt = String(a.prompt || '').trim();
@@ -486,54 +488,46 @@ const RAW_TOOLS = [
         provider: ctx.__provider || ctx.provider || 'deepseek',
         model: a.model || ctx.__model || ctx.model || 'deepseek-v4-flash',
         permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+        tools: a.tools ?? null, budgetYuan: a.budgetYuan ?? null,
       });
       if (a.mode === 'async') return { sub_id: id, status: 'running', tip: '用 subagent_output 查询结果（id=' + id + '）' };
       const rec = await waitSub(id);
-      if (rec.status === 'error') throw new Error('子代理失败: ' + rec.error);
-      return {
-        sub_id: id, status: rec.status, durationMs: rec.durationMs,
-        toolSteps: (rec.toolLog || []).length,
-        lastSteps: (rec.toolLog || []).slice(-8),
-        result: String(rec.result || '').slice(0, 6000),
-      };
+      return subagentOutcome(rec); // RA-13：失败/挂起也照出（含部分正文、已完成步骤与"该块未取得"标注），不再抛异常
     } },
-  { name: 'subagent_output', description: '查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果。未完成就继续查询/等一会。', permission: 'read',
+  { name: 'subagent_output', description: '查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果，error=失败（会连失败原因、已花额度与已完成步骤一起给出，不要据此丢弃已完成的部分）。未完成就继续查询/等一会。', permission: 'read',
     params: { id: { type: 'string', required: true, desc: 'sub_id（subagent async 返回）' } },
     run: async (a) => {
-      const { subs: subMap } = await import('../subagent.js');
+      const { subs: subMap, subagentOutcome } = await import('../subagent.js');
       const rec = subMap.get(String(a.id));
       if (!rec) throw new Error('子代理不存在: ' + a.id);
       if (rec.status === 'running') return { sub_id: rec.id, status: 'running', tip: '仍在执行，稍后重试' };
-      if (rec.status === 'error') return { sub_id: rec.id, status: 'error', error: rec.error };
-      return { sub_id: rec.id, status: 'done', durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, lastSteps: (rec.toolLog || []).slice(-8), result: String(rec.result || '').slice(0, 6000) };
+      return subagentOutcome(rec);
     } },
-  { name: 'subagent_report', description: '调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论），用于复盘与审计', permission: 'read',
+  { name: 'subagent_report', description: '调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论、额度收支），用于复盘与审计', permission: 'read',
     params: { id: { type: 'string', required: true, desc: 'sub_id' } },
     run: async (a) => {
-      const { subs: subMap } = await import('../subagent.js');
+      const { subs: subMap, subagentOutcome } = await import('../subagent.js');
       const rec = subMap.get(String(a.id));
       if (!rec) throw new Error('子代理不存在: ' + a.id);
       if (rec.status === 'running') return { sub_id: rec.id, status: 'running', tip: '尚未结束，结束后再取报告' };
+      const o = subagentOutcome(rec);
       const steps = (rec.toolLog || []).map((t) => ({ name: t.name, status: t.status, durationMs: t.durationMs, args: t.args, result: String(t.result || '').slice(0, 400) }));
-      return {
-        sub_id: rec.id, name: rec.name, kind: rec.kind || 'spawn', status: rec.status, error: rec.error || null,
-        task: rec.prompt, durationMs: rec.durationMs, toolSteps: steps.length, steps, result: String(rec.result || '').slice(0, 8000),
-      };
+      return { ...o, task: rec.prompt, steps, result: String(rec.result || '').slice(0, 8000) };
     } },
-  { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）', permission: 'read',
+  { name: 'subagent_join', description: '等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）。失败的那些也会照出失败原因与已完成步骤。', permission: 'read',
     params: { ids: { type: 'string', required: true, desc: '逗号分隔的 sub_id 列表' } },
     run: async (a) => {
-      const { subs: subMap, waitSub } = await import('../subagent.js');
+      const { subs: subMap, waitSub, subagentOutcome } = await import('../subagent.js');
       const ids = String(a.ids).split(',').map((s) => s.trim()).filter(Boolean);
       const out = [];
       for (const id of ids) {
-        if (!subMap.has(id)) { out.push({ sub_id: id, error: '不存在' }); continue; }
+        if (!subMap.has(id)) { out.push({ sub_id: id, status: 'error', degraded: true, error: '不存在（可能已按 TTL 清理，保留 2 小时）' }); continue; }
         const rec = await waitSub(id);
-        out.push({ sub_id: id, status: rec.status, durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, result: rec.status === 'done' ? String(rec.result || '').slice(0, 5000) : rec.error });
+        out.push(subagentOutcome(rec));
       }
-      return { joined: out };
+      return { joined: out, note: out.some((o) => o.degraded) ? '有子代理未成功：交付物里请照常给出这些块并标注"未取得"，不要静默省略。' : undefined };
     } },
-  { name: 'subagent_list', description: '列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时），用于编排与排查', permission: 'read',
+  { name: 'subagent_list', description: '列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时/额度），用于编排与排查', permission: 'read',
     params: {},
     run: async () => {
       const { subs: subMap } = await import('../subagent.js');
@@ -541,18 +535,21 @@ const RAW_TOOLS = [
         id: s.id, name: s.name, kind: s.kind || 'spawn', status: s.status, depth: s.depth || 0,
         createdAt: s.createdAt, durationMs: s.durationMs || null,
         toolSteps: (s.toolLog || []).length,
+        tools: s.tools || null, budgetYuan: s.budgetYuan ?? null, spentYuan: s.spentYuan ?? null,
       }));
       return { total: subMap.size, subs: arr };
     } },
-  { name: 'subagent_fork', description: '派生一个"延续本会话上下文"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）', permission: 'read',
+  { name: 'subagent_fork', description: '派生一个"延续本会话上下文"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）；tools/budgetYuan 同 subagent。', permission: 'read',
     params: {
       prompt: { type: 'string', required: true, desc: '给子代理的独立任务（它会同时看到本会话最近对话）' },
       name: { type: 'string' },
       mode: { type: 'string', desc: 'sync(默认)=等结果 | async=立即返回id' },
+      tools: { type: 'string', desc: '可选：只给子代理这些工具（逗号分隔）。给了就是白名单，其他工具不出现也调不动' },
+      budgetYuan: { type: 'number', desc: '可选：切给这个子代理的额度（元），只烧这块，没花完显式回收' },
     },
     run: async (a, ctx) => {
       if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限');
-      const { spawnSubagent, waitSub } = await import('../subagent.js');
+      const { spawnSubagent, waitSub, subagentOutcome } = await import('../subagent.js');
       const prompt = String(a.prompt || '').trim();
       if (!prompt) throw new Error('prompt 必填');
       // 种子：本会话最近历史（排除"触发本次 fork 的最新用户指令"，避免子代理照指令递归套娃），各截断 500 字
@@ -568,18 +565,19 @@ const RAW_TOOLS = [
         prompt, name: String(a.name || '').slice(0, 30) || undefined,
         provider: ctx.__provider || 'deepseek', model: a.model || ctx.__model || 'deepseek-v4-flash',
         permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
-        seedMessages: seed,
+        seedMessages: seed, tools: a.tools ?? null, budgetYuan: a.budgetYuan ?? null,
       });
       if (a.mode === 'async') return { sub_id: id, status: 'running', tip: '用 subagent_join/subagent_output 收口' };
       const rec = await waitSub(id);
-      if (rec.status === 'error') throw new Error('子代理失败: ' + rec.error);
-      return { sub_id: id, status: rec.status, durationMs: rec.durationMs, toolSteps: (rec.toolLog || []).length, result: String(rec.result || '').slice(0, 6000) };
+      return subagentOutcome(rec);
     } },
   { name: 'subagent_fanout', description: '批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要', permission: 'read',
     params: {
       template: { type: 'string', required: true, desc: '子代理任务模板，其中 {{item}} 会被替换为具体条目' },
       items: { type: 'string', required: true, desc: '条目数组的 JSON，如 ["a.txt","b.txt"]（或逗号分隔字符串）' },
       name: { type: 'string', desc: '子代理名前缀，默认 批量' },
+      tools: { type: 'string', desc: '可选：每个子代理只给这些工具（逗号分隔）——批量同类检查时用它把工具面收到最小' },
+      budgetYuan: { type: 'number', desc: '可选：**每个**子代理切多少额度（元）。只烧自己那块，没花完显式回收' },
     },
     run: async (a, ctx) => {
       if (ctx.noSubagent) throw new Error('子代理嵌套已达 3 层上限');
@@ -587,7 +585,7 @@ const RAW_TOOLS = [
       try { items = Array.isArray(a.items) ? a.items : JSON.parse(a.items); } catch { items = String(a.items || '').split(',').map((s) => s.trim()); }
       items = items.filter(Boolean).slice(0, 12);
       if (!items.length) throw new Error('items 为空');
-      const { spawnSubagent, waitSub, subs } = await import('../subagent.js');
+      const { spawnSubagent, waitSub, subs, subagentOutcome } = await import('../subagent.js');
       const results = [];
       const batchOf = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
       for (const batch of batchOf(items, 6)) {
@@ -600,11 +598,14 @@ const RAW_TOOLS = [
             prompt, name: (a.name || '批量') + '-' + (results.length + spawned.length + 1),
             provider: ctx.__provider || 'deepseek', model: ctx.__model || 'deepseek-v4-flash',
             permission: ctx.permission, parentCtx: ctx, keys: ctx.__keys || {}, temperature: ctx.__temperature,
+            tools: a.tools ?? null, budgetYuan: a.budgetYuan ?? null,
           }));
         }
         for (const sp of spawned) {
           const rec = await waitSub(sp.id);
-          results.push({ status: rec.status, error: rec.error || null, result: rec.status === 'done' ? String(rec.result || '').slice(0, 2500) : null });
+          // RA-13：每条都走统一出口——失败的照出失败原因与已完成步骤（degraded 标记），不塌成 null
+          const o = subagentOutcome(rec);
+          results.push({ status: o.status, degraded: o.degraded || false, error: o.error || null, result: String(o.result || '').slice(0, 2500) || null });
         }
       }
       // 条目与结果对齐
@@ -810,14 +811,21 @@ const RAW_TOOLS = [
       }
       const ap = createAsk(q, normalized);
       if (ctx.__emit) ctx.__emit({ type: 'ask', id: ap.id, question: q, options: normalized });
+      // RA-26 四面②：等待用户答复同样是独立状态（进出各一次事件，等待时长不计入执行用时）
+      const waitT0 = Date.now();
+      if (ctx.__onWait) ctx.__onWait('start', { round: ctx.__round, kind: 'ask', id: ap.id });
       let verdict = null;
-      while (!verdict) {
-        const race = await Promise.race([
-          ap.promise.then((v) => ({ done: true, v })),
-          new Promise((r) => setTimeout(() => r({ done: false }), 800)),
-        ]);
-        if (race.done) { verdict = race.v; break; }
-        if (ctx.__signal && ctx.__signal.aborted) { cancelAsk(ap.id); verdict = { option: null, reason: 'aborted' }; break; }
+      try {
+        while (!verdict) {
+          const race = await Promise.race([
+            ap.promise.then((v) => ({ done: true, v })),
+            new Promise((r) => setTimeout(() => r({ done: false }), 800)),
+          ]);
+          if (race.done) { verdict = race.v; break; }
+          if (ctx.__signal && ctx.__signal.aborted) { cancelAsk(ap.id); verdict = { option: null, reason: 'aborted' }; break; }
+        }
+      } finally {
+        if (ctx.__onWait) ctx.__onWait('end', { round: ctx.__round, kind: 'ask', id: ap.id, reason: verdict && verdict.reason, ms: Date.now() - waitT0 });
       }
       if (!verdict || verdict.option == null) {
         throw new Error(verdict && verdict.reason === 'aborted' ? '用户停止了操作' : '用户未在时限内选择（可稍后重新问）');
@@ -1197,14 +1205,22 @@ export async function execTool(name, args, ctx) {
         const argsDesc = JSON.stringify(args).slice(0, 300);
         const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}`);
         if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}${preview}` });
+        // RA-26 四面②：等待人工确认是一个**独立状态**（不是"还在跑"）——进出各发一次事件，
+        // 并把这段等待时长从"执行用时"里扣掉（见 agent.js 的 __onWait；时间预算不该为等待买单）。
+        const waitT0 = Date.now();
+        if (eff.__onWait) eff.__onWait('start', { round: eff.__round, kind: 'approval', id: ap.id });
         let verdict = null;
-        while (!verdict) {
-          const race = await Promise.race([
-            ap.promise.then((v) => ({ done: true, v })),
-            new Promise((r) => setTimeout(() => r({ done: false }), 800)),
-          ]);
-          if (race.done) { verdict = race.v; break; }
-          if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
+        try {
+          while (!verdict) {
+            const race = await Promise.race([
+              ap.promise.then((v) => ({ done: true, v })),
+              new Promise((r) => setTimeout(() => r({ done: false }), 800)),
+            ]);
+            if (race.done) { verdict = race.v; break; }
+            if (eff.__signal && eff.__signal.aborted) { cancelApproval(ap.id); verdict = { decision: 'aborted' }; break; }
+          }
+        } finally {
+          if (eff.__onWait) eff.__onWait('end', { round: eff.__round, kind: 'approval', id: ap.id, decision: verdict && verdict.decision, ms: Date.now() - waitT0 });
         }
         if (!verdict || verdict.decision !== 'approve') {
           blocked = verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : ''));

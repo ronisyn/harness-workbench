@@ -918,9 +918,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   };
   armSseHeartbeat();
   const stopSseHeartbeat = () => { clearTimeout(sseIdle); sseIdle = null; };
+  let sseLastSeq = 0; // RA-37：最近一次带序号的帧（事件环 seq）——写进 SSE 的 id: 字段，客户端可据此断线续订
   const send = (obj) => {
     try {
-      if (!res.writableEnded) { res.write(`data: ${JSON.stringify(obj)}\n\n`); armSseHeartbeat(); }
+      if (!res.writableEnded) {
+        // RA-37 事件契约：帧格式 `[id: <seq>\n]data: <json>\n\n`。id 只在载荷带 seq 时写
+        //（seq 是事件环的全局单调计数，见 agent.js emitEv）；无 seq 的帧（intent/route/done/error）照旧不带 id。
+        const seq = Number(obj && obj.seq);
+        const idLine = Number.isFinite(seq) && seq > 0 && seq !== sseLastSeq ? (sseLastSeq = seq, `id: ${seq}\n`) : '';
+        res.write(`${idLine}data: ${JSON.stringify(obj)}\n\n`);
+        armSseHeartbeat();
+      }
     } catch { /* 连接已关，忽略 */ }
   };
 
@@ -996,6 +1004,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         try { run = await ensureRun({ conversationId, accountId: req.user.id, goal: content }); } catch { /* 现场登记失败不阻塞 */ }
       }
       agentRunId = run ? run.id : null;
+      // RA-37 G7 开始事件：本次执行与下一次执行在事件流上的**边界**。此前没有 run 起点，
+      // 客户端只能靠 done/stopped/error 反推"上一轮到哪结束"，断线重连后更无法判断自己在哪一段。
+      // 字段刻意保持最小且都已在手：协议版本 + 会话/现场 id + 本轮选定的厂商/模型/暴露档/权限/轻量档。
+      send({
+        type: 'run_start', v: 1, conversationId, runId: agentRunId, light,
+        provider, model, preset: convPreset, permission: (highGuardIntent && permission === 'full') ? 'guard' : permission,
+      });
       // 5.7 预算融合：会话 24h 总账剩余（usage_stats 按会话归集，含子代理同会话计入；总预算 task_budget_total）
       let budgetRemain = null;
       try {
@@ -1057,6 +1072,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             send({ type: 'approval', id: ev.id, desc: ev.desc });
           } else if (ev.type === 'ask') {
             send({ type: 'ask', id: ev.id, question: ev.question, options: ev.options });
+          } else if (ev.type === 'wait_start') {
+            // RA-26 四面①：等待确认/答复的**进入**事件（接口面能区分"等确认"与"执行中"）
+            send({ type: 'wait_start', wait: ev.wait });
+          } else if (ev.type === 'wait_end') {
+            send({ type: 'wait_end', wait: ev.wait });
+          } else if (ev.type === 'fake_done_warn') {
+            send({ type: 'fake_done_warn', text: ev.text });
           } else if (ev.type === 'delta') {
             // P20：agent 每轮流式正文实时透出（final 真流；工具轮旁白由前端灰字化）
             if (!firstTokenMs) firstTokenMs = Date.now() - t0;
@@ -1092,7 +1114,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         answer = result.content || '（无输出）';
         usage = result.usage || {};
         if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-        // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不再分块重发；
+        // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不整段重发；
         // 兜底路径（一次性 fallback / F6a 诚实说明 / guard 文案等生成型内容）仍按 8 字分块模拟
         if (!result.streamed && answer) {
           const chunkSize = 8;
@@ -1100,18 +1122,60 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             if (!firstTokenMs) firstTokenMs = Date.now() - t0;
             send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
           }
+        } else if (answer) {
+          // RA-37 G1 补流对账：真流路径下，`answer` 可能在流完之后又被后置加工过——
+          // C4 自动续写段、TRUNC_NOTE 截断提示、假完成强制加注前缀、空答兜底摘要。
+          // 这些字节此前**从不经过 delta**，于是"事件流拼出来的正文 ≠ 落库正文"。
+          // 这里只补发"还没发出去的那一段"，不整段重发（否则客户端会重复显示一遍）：
+          //   · 后置追加（续写/截断提示/兜底摘要）→ 拼出的正文是落库正文的前缀 → 补发尾部；
+          //   · 假完成前缀（前置加注）→ 拼出的正文是落库正文的后缀 → 先补前缀，再补尾部。
+          const sentText = String(result.streamedText || '');
+          let head = '', tail = '';
+          if (!sentText) {
+            tail = answer; // 声称流式却没记到任何流式文本（异常路径）→ 整段补发
+          } else if (answer.startsWith(sentText)) {
+            head = ''; tail = answer.slice(sentText.length); // 后置追加：补尾部
+          } else if (answer.endsWith(sentText)) {
+            head = answer.slice(0, answer.length - sentText.length); tail = ''; // 前置加注：补前缀
+          } else if (answer.includes(sentText)) {
+            const at = answer.indexOf(sentText); head = answer.slice(0, at); tail = answer.slice(at + sentText.length);
+          } else {
+            // 对不上账：不静默（宁可多显示一遍，也不让客户端内容与落库不符），并如实告警
+            console.warn('[stream] 事件流正文与落库正文无法对账，已整段补发（conv=' + conversationId + ' streamed=' + sentText.length + ' answer=' + answer.length + '）');
+            tail = answer;
+          }
+          if (head) send({ type: 'delta', delta: head });
+          if (tail) send({ type: 'delta', delta: tail });
         }
       }
     }
     if (!skipStore) {
-      send({ type: 'done', usage });
-      // 存 assistant 消息（reasoning=思考过程，历史回看可见）；原子守卫防"删会话与落库并发"产生孤儿消息
-      const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) SELECT ?,?,?,?,?,?,?,? FROM conversations WHERE id=?',
-        [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0, conversationId]);
-      // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
-      if (r && r.insertId) await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [r.insertId, conversationId]);
+      // RA-37 G3 顺序修正：终结事件**在落库之后**发。原实现先 send(done) 再 INSERT，
+      // 客户端收到 done 立刻 GET /messages 会读不到这一行（实测可复现的竞态）。
+      // 现在 done 之前先落库，并把落库产生的 id 一并带出（G2：事件里终于有服务端持久化 id）。
+      let savedMsgId = null;
+      try {
+        // 存 assistant 消息（reasoning=思考过程，历史回看可见）；原子守卫防"删会话与落库并发"产生孤儿消息
+        const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) SELECT ?,?,?,?,?,?,?,? FROM conversations WHERE id=?',
+          [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0, conversationId]);
+        savedMsgId = (r && r.insertId) || null;
+        // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
+        if (savedMsgId) await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [savedMsgId, conversationId]);
+      } catch (e) { console.warn('[chat] assistant 落库失败（已如实告知客户端）：' + ((e && e.message) || e)); }
       // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
       // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
+      send({ type: 'done', usage, messageId: savedMsgId, runId: agentRunId, totals: result.usageTotals || null });
+      // RA-37：run_end 是"本次执行的账已落定"的回执——只在落库之后发，带持久化 id 与全量用量。
+      // 与 done 的区别：done 是**流终结**（老客户端只看它，字段保持向后兼容）；run_end 是**一致性回执**，
+      // 客户端拿它做"事件流重建结果 vs 服务端事实"的校验，也拿它做断线后"这一段是否已落定"的判定。
+      send({
+        type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'saved',
+        messageId: savedMsgId, contentLength: answer.length,
+        finishReason: result.finishReason || '', guard: result.guard || null,
+        usage: usage, totals: result.usageTotals || null, spentYuan: result.spentYuan ?? null,
+      });
+      // 断线/旁观客户端走 /activity 轮询时，结论由环自己的 run_end（clearActivity 追加，见 agent.js）给出，
+      // 不在这里重复往环里塞（环与 SSE 是两条投影，重复塞会让"同一事实两种投影"更乱）。
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
       // 2026-09：占位消息带中断原因 + 已执行进度（run.checkpoint 落库），避免"中断=看起来啥也没干"
@@ -1126,13 +1190,23 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           }
         }
         const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
-        if (await convAlive()) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
-          [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
+        let placeholderId = null;
+        if (await convAlive()) {
+          const pr = await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
+            [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
+          placeholderId = (pr && pr.insertId) || null;
+        }
+        // RA-37 G5：中断/异常也要有**带原因**的终结事件，且同样在落库之后发。
+        send({
+          type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'stopped',
+          reason: (actrl.signal && actrl.signal.reason === 'user') ? 'user' : 'disconnect',
+          reasonText: why, messageId: placeholderId, totals: result && result.usageTotals ? result.usageTotals : null,
+        });
       } catch { /* 忽略 */ }
     }
   } catch (e) {
-    send({ type: 'error', message: e.message });
-    // P20/②（O-17）：异常路径也必须落 assistant 占位消息（含已做进度与错误原因），绝不"无声无息"
+    // RA-37 G5：异常终结点先落占位消息、再发事件（与 done 路径同序），事件里带**结构化原因**而非只有 message
+    let errPlaceholderId = null;
     try {
       let prog = '';
       if (agentRunId) {
@@ -1143,9 +1217,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
         }
       }
-      await db.query('INSERT INTO messages (conversation_id, role, content) SELECT ?,?,? FROM conversations WHERE id=?',
+      const er = await db.query('INSERT INTO messages (conversation_id, role, content) SELECT ?,?,? FROM conversations WHERE id=?',
         [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）', conversationId]);
+      errPlaceholderId = (er && er.insertId) || null;
     } catch { /* 忽略 */ }
+    send({ type: 'error', message: e.message });
+    send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId });
     // 自审补：异常路径同样落观测（该轮真实消耗已入 usage_stats，观测表须同口径有行）
     if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }

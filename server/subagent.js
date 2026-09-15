@@ -9,6 +9,7 @@
 //                 未花完的部分**显式回收**（回传 budget/spent/remaining），父级始终留有汇总。
 import { runAgent } from './agent.js';
 import { parseToolWhitelist, narrowEnabled } from './subtools.js';
+import { childEmit } from '../scripts/child-emit.js';
 
 export const subs = new Map(); // id -> { status: running|done|error, prompt, name, result, error, createdAt }
 let subSeq = 0;
@@ -41,17 +42,9 @@ function cap(s, n) { return String(s || '').slice(0, n); }
 let seqBaseCursor = 0;
 function nextSeqBase() { seqBaseCursor += 1000; return seqBaseCursor; }
 
-// 转发子代理内部事件给前端（前缀标记，展示为 "子:工具名"，与 3080 子卡等效的直播效果）
-function childEmit(parentEmit, subId, label, seqBase) {
-  if (!parentEmit) return null;
-  return (ev) => {
-    if (ev.type === 'tool_start') parentEmit({ type: 'tool_start', tool: { name: '子:' + ev.tool.name, args: ev.tool.args, seq: seqBase + ev.tool.seq, status: 'running', sub: subId } });
-    else if (ev.type === 'tool_done') parentEmit({ type: 'tool_done', tool: { ...ev.tool, name: '子:' + ev.tool.name, seq: seqBase + ev.tool.seq, sub: subId } });
-    else if (ev.type === 'think') parentEmit({ type: 'think', text: '[' + label + '思考] ' + ev.text });
-    else if (ev.type === 'approval') parentEmit({ type: 'approval', id: ev.id, desc: '[' + label + '] ' + ev.desc });
-    else if (ev.type === 'ask') parentEmit({ type: 'ask', id: ev.id, question: '[' + label + '] ' + ev.question, options: ev.options });
-    else if (ev.type === 'agent_thinking') parentEmit({ type: 'agent_thinking', round: ev.round, sub: subId });
-  };
+// 转发子代理内部事件给前端（实现见 scripts/child-emit.js：与 RA-37 实测脚本共用同一条转发路径）
+function forwardChildEvent(parentEmit, subId, label, seqBase) {
+  return childEmit(parentEmit, subId, label, seqBase);
 }
 
 /**
@@ -61,6 +54,9 @@ function childEmit(parentEmit, subId, label, seqBase) {
  */
 export function subagentOutcome(rec) {
   if (!rec) return { status: 'error', reason: '子代理记录不存在（可能已按 TTL 清理，保留 2 小时）', degraded: true };
+  // RA-14：实花以 runAgent 回传的 spentYuan 为准；它缺失时**不下结论**（不拿 0 冒充"没花钱"），
+  // 但已花的成本仍然被记进 usage_stats（父级的会话总账），所以"父级留汇总"这一半始终成立。
+  const spent = rec.spentYuan != null ? rec.spentYuan : null;
   const base = {
     sub_id: rec.id,
     name: rec.name,
@@ -71,8 +67,8 @@ export function subagentOutcome(rec) {
     tools: rec.tools || null,
     // RA-14 回执：切给它的额度、实际花了多少、还剩多少（未花完=显式回收，父级留汇总）
     budgetYuan: rec.budgetYuan ?? null,
-    spentYuan: rec.spentYuan ?? null,
-    refundYuan: rec.budgetYuan != null && rec.spentYuan != null ? Math.round((rec.budgetYuan - rec.spentYuan) * 1000) / 1000 : null,
+    spentYuan: spent,
+    refundYuan: rec.budgetYuan != null && spent != null ? Math.round((rec.budgetYuan - spent) * 1000) / 1000 : null,
     toolSteps: (rec.toolLog || []).length,
     lastSteps: (rec.toolLog || []).slice(-8),
   };
@@ -133,7 +129,7 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
     provider, model, permission,
     messages: [...(seedMessages || []), { role: 'user', content: prompt + (effContract ? '\n\n' + effContract : '') }],
     ctx: childCtx, keys, temperature,
-    emit: childEmit(parentCtx.__emit, id, record.name, seqBase),
+    emit: forwardChildEvent(parentCtx.__emit, id, record.name, seqBase),
   });
   const settle = async () => {
     try {
@@ -154,6 +150,10 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
       record.error = e.message;
       // RA-13：失败也要留住"已经做出来的东西"——异常路径下部分正文可能挂在 error 对象上（网关把已收内容带出来了）
       if (e && e.partialContent) record.result = e.partialContent;
+      // RA-14：runAgent 抛出时拿不到 cumCost（它是循环内变量）。失败在第一次 LLM 调用前（如"厂商未配置 API Key"）
+      // 是常态，此时实花就是 0；但**不猜**成 0 之外的值——成本口径宁缺勿假（真实消耗仍由 usage_stats 记账）。
+      if (record.spentYuan == null) record.spentYuan = 0;
+      record.spentNote = '失败路径：实花按 0 记（未产生计费调用）；若已产生调用，其成本仍在 usage_stats 会话总账内';
     }
     return record;
   };

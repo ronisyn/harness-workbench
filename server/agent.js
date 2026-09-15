@@ -16,6 +16,33 @@ import { LIMIT_DEFAULTS } from './settingsSchema.js';
 import { LIGHT_TOOLSET } from './tools/registry.js';
 import { narrowEnabled } from './subtools.js';
 
+/**
+ * RA-26 四面④：时间预算的**算入口径**（纯函数，可夹具直测）。
+ * "已用时间" = 墙钟时长 − 等待人工确认/答复的累计时长。等待期间没有执行、没有烧钱，
+ * 让用户思考 5 分钟就吃掉 5 分钟预算（甚至直接挂起）不是"防失控保险丝"，而是把保险丝接到了用户身上。
+ * @param {number} wallMs 墙钟时长（Date.now() - t0）
+ * @param {number} waitedMs 等待累计时长
+ * @returns {number} 用于预算判定的执行用时（毫秒）
+ */
+export function budgetElapsedMs(wallMs, waitedMs) {
+  const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : 0; }; // 脏输入（null/undefined/非数字）按 0
+  return Math.max(0, num(wallMs) - num(waitedMs));
+}
+
+/**
+ * RA-14 子代理额度的生效值（纯函数，可夹具直测）：切给子代理的额度与"段阈值"取 min。
+ * 语义与 §8 的壳级收紧同向——**只能更严**：子代理拿到的额度永不超过父级本轮的段阈值。
+ * @param {number|null} subBudgetYuan 派发时切的额度（<=0 / null / undefined = 不切，沿用段阈值）
+ * @param {number} segBudgetYuan 父级本轮生效的段阈值（<=0 = 不限）
+ * @returns {number} 0 = 不设子额度；>0 = 生效额度（元）
+ */
+export function effectiveSubBudget(subBudgetYuan, segBudgetYuan) {
+  const sub = Number(subBudgetYuan);
+  if (!(sub > 0)) return 0;
+  const seg = Number(segBudgetYuan);
+  return seg > 0 ? Math.min(sub, seg) : sub;
+}
+
 // 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
 // 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）
 const activity = new Map(); // convId -> { items: [{seq,at,type,...}] }
@@ -232,8 +259,21 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let failWarned = false;  // F4 软提示只发一次（到 N 次后提示换策略，再 N 次才挂起）
   const t0 = Date.now();
   let cumTin = 0, cumTout = 0, cumCost = 0, cumHit = 0, cumMiss = 0; // WS2 本任务累计钱包；P8 cache hit 率测量（hit/(hit+miss)）
+  // RA-26 四面②：等待人工确认/答复的累计时长。这段时间里**没有**执行、没有烧钱，
+  // 因此必须从"执行用时"里扣掉——否则用户思考 5 分钟就吃掉 5 分钟时间预算、甚至直接触发挂起。
+  let cumWaitMs = 0;
+  const waitedNow = () => cumWaitMs;
   // RA-14：本任务"已花多少钱"的单一出口——子代理额度回收需要它（未花完的部分要能显式算出来）
   const spentNow = () => Math.round(cumCost * 1000) / 1000;
+  // RA-37 G4：本次执行的**累计**用量与成本（含折叠/续写等所有计费调用）。
+  // 原实现只把"最后一轮"的 usage 回给调用方，事件流据此重建出的成本必然偏小；这里给全量口径。
+  const runTotals = () => ({
+    tokens_in: cumTin, tokens_out: cumTout,
+    cache_hit: cumHit, cache_miss: cumMiss,
+    cost: Math.round(cumCost * 10000) / 10000,
+    hit_rate: (cumHit + cumMiss) > 0 ? Math.round((cumHit / (cumHit + cumMiss)) * 10000) / 10000 : null,
+    waitedMs: cumWaitMs, // RA-26：等待确认/答复的累计时长（毫秒）——"执行中"与"等待确认"在账上可分开
+  });
 
   // WS2 运行时快照：每轮重建注入（最新覆盖旧版语义；护栏现值与判定同源同轮读取）
   // 2026-09 token 优化（缓存友好）：快照内容每轮变化（轮次/用时/累计 token），若插在历史前（splice(1,0)）
@@ -244,9 +284,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const m = msgs[i];
       if (m && m.role === 'system' && String(m.content || '').startsWith('【运行时快照】')) { msgs.splice(i, 1); break; }
     }
-    const mins = Math.round((Date.now() - t0) / 60000);
+    const mins = Math.round(budgetElapsedMs(Date.now() - t0, cumWaitMs) / 60000); // RA-26：执行用时**不含**等待确认时长
     const resume = ctx.__resumeStats ? ` | 恢复任务（前次已执行 ${ctx.__resumeStats.rounds || 0} 轮，费用自本次起算）` : '';
-    const snap = '【运行时快照】第 ' + (round + 1) + ' 轮 | 已用 ' + mins + ' 分钟 | 护栏现值: 预算 ' + (lim.budgetMin || '不限') + ' 分钟 / 轮次 ' + (lim.roundCap || '不限') + ' / 循环检测 ' + (lim.loopGuard || '关') + ' / 并行 ' + (lim.maxParallelT || '串行')
+    const waitNote = cumWaitMs > 0 ? '（其中等待确认 ' + Math.round(cumWaitMs / 1000) + 's 不计入）' : '';
+    const snap = '【运行时快照】第 ' + (round + 1) + ' 轮 | 已用 ' + mins + ' 分钟' + waitNote + ' | 护栏现值: 预算 ' + (lim.budgetMin || '不限') + ' 分钟 / 轮次 ' + (lim.roundCap || '不限') + ' / 循环检测 ' + (lim.loopGuard || '关') + ' / 并行 ' + (lim.maxParallelT || '串行')
       + '（每轮读 settings，变更最快 5s 生效；set_limits 可调，0=不限）'
       + ' | 本任务累计: token in ' + cumTin + ' / out ' + cumTout + ' ≈ ¥' + cumCost.toFixed(3)
       + ' | cache hit ' + ((cumHit + cumMiss) > 0 ? Math.round(cumHit / (cumHit + cumMiss) * 100) : 100) + '%'
@@ -348,6 +389,13 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
     : toolDefs(ctx.preset, narrowEnabled(ctx.__enabledTools, ctx.__subTools), ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）；RA-12：叠加子代理白名单（只能更窄）
   const toolsHash = createHash('sha256').update(JSON.stringify(defs)).digest('hex').slice(0, 12);
+  // RA-12 取证出口：收窄后的实际工具清单只入日志（不落库、不改行为）——夹具与运维都能从 journalctl 核证
+  // "子代理的工具面到底给了哪几个"，而不是只能相信参数传对了。
+  if (process.env.RW_TOOLS_DEBUG === '1') {
+    console.log('[tools-face] conv=' + (ctx.conversationId || '-') + ' sub=' + (ctx.depth || 0)
+      + ' whitelist=' + (ctx.__subTools ? [...ctx.__subTools].join('|') : 'inherit')
+      + ' n=' + defs.length + ' tools=' + defs.map((d) => d.function.name).join(','));
+  }
   // C5 豁免失效归因（只报数、不设 0）：运行起点分类一次 —— 首轮 / 长空闲 / 切模型。
   // 依据《RW-Agent 架构 v1.1》§5.3 纪律5（失效可数）与计划 §0.3 的 C4/C5 口径；落 audit_log（现有载体，不新造表）。
   if (ctx.conversationId) {
@@ -386,7 +434,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
     if (ctx.__signal && ctx.__signal.aborted) {
-      return { content: '', stopped: true, toolLog, usage: {} };
+      return { content: '', stopped: true, toolLog, usage: {}, spentYuan: spentNow(), usageTotals: runTotals() };
     }
     // 护栏每轮读取（5s 缓存防 DB 风暴）：预算/轮次用最新值判定，快照与判定同源
     const lim = await agentLimits();
@@ -401,26 +449,27 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     })();
     // RA-14 子代理额度切分（§14.4）：父级派发时切一块额度给子代理，**只烧这一块**；默认 0=不切（沿用父级段阈值）。
     // 与段阈值/壳上限/会话总账是 **min 叠加**（只能更严，与 RA-17「子代理视窗只能比父级更窄」同向）。
-    const subBudgetYuan = ctx.__subBudgetYuan != null ? Number(ctx.__subBudgetYuan) : 0;
-    const effSubBudget = subBudgetYuan > 0 ? (effBudgetYuan > 0 ? Math.min(subBudgetYuan, effBudgetYuan) : subBudgetYuan) : 0;
+    // 判定放在**轮首**（LLM 调用之前）+ 轮尾成本累加之后各一次：轮首拦住"上一轮已超"的情况，
+    // 避免超额那一轮再发一次无谓的 LLM 调用；轮尾拦住"这一轮刚超"，立刻停不让下一轮继续。
+    const effSubBudget = effectiveSubBudget(ctx.__subBudgetYuan, effBudgetYuan);
     if (effSubBudget > 0 && cumCost > effSubBudget) {
       return {
         content: `（子代理额度已用尽：本次额度 ¥${effSubBudget.toFixed(3)}，已用 ¥${cumCost.toFixed(3)}。已完成的步骤与结论仍有效；剩余工作请回报父代理，由父代理追加额度或改用别的做法。）`,
-        toolLog, usage: {}, guard: 'budget-sub', spentYuan: Math.round(cumCost * 1000) / 1000, budgetYuan: effSubBudget,
+        toolLog, usage: {}, guard: 'budget-sub', spentYuan: spentNow(), budgetYuan: effSubBudget, usageTotals: runTotals(),
       };
     }
     if (ctx.__budgetRemain === 0) {
-      return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total', spentYuan: spentNow() };
+      return { content: '（会话 24h 任务总预算已用尽：task_budget_total。可调大该值或设 0=不限后回复"继续任务"）', toolLog, usage: {}, guard: 'budget-total', spentYuan: spentNow(), usageTotals: runTotals() };
     }
     // 5.2 后台/子代理完成通知注入
     scanBg();
     const bgNotes = await bgNotices();
     for (const n of bgNotes) msgs.push({ role: 'system', content: n });
-    if (lim.budgetMin > 0 && Date.now() - t0 > lim.budgetMin * 60000) {
-      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget', spentYuan: spentNow() };
+    if (lim.budgetMin > 0 && budgetElapsedMs(Date.now() - t0, cumWaitMs) > lim.budgetMin * 60000) {
+      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget', spentYuan: spentNow(), usageTotals: runTotals() };
     }
     if (lim.roundCap > 0 && round >= lim.roundCap) {
-      return { content: `（达到 ${lim.roundCap} 轮护栏上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）`, toolLog, usage: {}, guard: 'cap' };
+      return { content: `（达到 ${lim.roundCap} 轮护栏上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）`, toolLog, usage: {}, guard: 'cap', spentYuan: spentNow(), usageTotals: runTotals() };
     }
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
@@ -458,15 +507,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）；流失败 → 同模型一次性兜底一次（保底），再失败如实抛出（②由 index catch 落痕）
     let res = null;
     let roundLive = false;
+    let roundStreamed = ''; // RA-37 G1：本轮真正经 delta 发出去的正文——收尾时用它算"还差哪一段没发"
     try {
       res = await chatStreamWithTools(provider, model, msgs, defs, keys, {
         temperature,
         signal: ctx.__signal,
         onThink: (txt) => emitEv(ctx.conversationId, emit, { type: 'think', text: txt }),
-        onContent: (delta) => { roundLive = true; emitEv(ctx.conversationId, emit, { type: 'delta', delta }); },
+        onContent: (delta) => { roundLive = true; roundStreamed += delta; emitEv(ctx.conversationId, emit, { type: 'delta', delta }); },
       });
     } catch (e) {
-      if (e && e.aborted) return { content: '', stopped: true, toolLog, usage: {}, streamed: false };
+      if (e && e.aborted) return { content: '', stopped: true, toolLog, usage: {}, streamed: false, spentYuan: spentNow(), usageTotals: runTotals() };
       const fb = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature).catch(() => null);
       if (!fb) throw e;
       res = fb; // 兜底（一次性）：正文未流式，由 index 收尾分块发出
@@ -483,7 +533,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     } catch { /* 计量失败不影响执行 */ }
     // WS7.4/5.7 成本知情阈值（先停再问，非死限）：超阈值挂起，现场保留，用户回复"继续"即放行下一段
     if (effBudgetYuan > 0 && cumCost > effBudgetYuan) {
-      return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超可用预算 ¥${effBudgetYuan}（段阈值 task_budget_yuan=${lim.budgetYuan} × 会话总账剩余；可调大 task_budget_total/task_budget_yuan 或 0=关）。先停再问：回复"继续"放行下一段）`, toolLog, usage: res.usage, guard: 'budget-yuan' };
+      return { content: `（本任务累计成本 ¥${cumCost.toFixed(3)} 已超可用预算 ¥${effBudgetYuan}（段阈值 task_budget_yuan=${lim.budgetYuan} × 会话总账剩余；可调大 task_budget_total/task_budget_yuan 或 0=关）。先停再问：回复"继续"放行下一段）`, toolLog, usage: res.usage, guard: 'budget-yuan', spentYuan: spentNow(), usageTotals: runTotals() };
     }
     // 模型推理过程（reasoning）：P20 已由 chatStreamWithTools.onThink 逐块实时透出（此处不再整块后置）
     const calls = res.toolCalls || [];
@@ -579,7 +629,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           content: '⚠️ 模型本轮只进行了思考（reasoning ' + String(res.reasoning || '').length + ' 字符）但未产出正文或工具调用（finish_reason=' + (res.finishReason || 'unknown') + '）。' +
             (provider === 'glm' ? '提示：GLM thinking 模型的思考 token 计入输出预算，复杂任务可被思考耗尽致正文为空——可改选 glm-4.5 等非深度思考模型，或把任务拆小。' : '') +
             '\n思考摘要：' + String(res.reasoning || '').replace(/\s+/g, ' ').slice(0, 200),
-          toolLog, usage: res.usage, finishReason: res.finishReason || '',
+          toolLog, usage: res.usage, finishReason: res.finishReason || '', streamedText: roundStreamed,
         };
       }
       // 兜底：干了一串工具但最终没生成任何文字（模型判定完成却空答）→ 自动产出执行摘要，避免"无反馈就停"
@@ -594,7 +644,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         }
         final += '\n需要我基于这些结果继续说明或汇总，直接说即可。';
       }
-      return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '', streamed: roundLive }; // P20：正文已真流 → index 不再分块重发
+      return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '', streamed: roundLive, streamedText: roundStreamed, spentYuan: spentNow(), usageTotals: runTotals() }; // P20：正文已真流 → index 只补发"没流出去的那段"（RA-37 G1）
     }
     // 长任务现场：每轮工具执行后落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）
     if (ctx.__runId) {
@@ -627,7 +677,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (shouldPauseOnRepeat(noProgressCount, loopGuardN)) {
       return {
         content: `（任务已挂起：连续 ${loopGuardN} 次重复调用且无进展。现场已保存，回复"继续任务"可恢复，或给我新指令/新思路）`,
-        toolLog, usage: res.usage, paused: true, reason: '连续重复无进展',
+        toolLog, usage: res.usage, paused: true, reason: '连续重复无进展', spentYuan: spentNow(), usageTotals: runTotals(),
       };
     }
     // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
@@ -642,7 +692,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const seq = ++dispSeq; // 全 run 唯一，避免并行/子代理交错时撞号
       emitEv(ctx.conversationId, emit, { type: 'tool_start', tool: { name: call.function.name, args, seq, status: 'running' } });
       const tStart = Date.now();
-      const result = await execTool(call.function.name, args, { ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature });
+      const result = await execTool(call.function.name, args, {
+        ...ctx, __keys: keys, __emit: emit, __provider: provider, __model: model, __temperature: temperature,
+        __round: round + 1,
+        // RA-26：等待确认/答复的进出回调——等待进事件流（客户端能区分"等确认"与"执行中"），
+        // 时长累计到 cumWaitMs（不计入执行用时与时间预算）
+        __onWait: (phase, info) => {
+          if (phase === 'end') cumWaitMs += Number(info && info.ms) || 0;
+          emitEv(ctx.conversationId, emit, { type: phase === 'start' ? 'wait_start' : 'wait_end', wait: info || {} });
+        },
+      });
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
       const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
@@ -685,7 +744,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       } else if (consecutiveFail >= lim.failGuardN * 2) {
         return {
           content: `（任务已挂起：连续 ${consecutiveFail} 轮工具执行全部失败。现场已保存，回复"继续任务"可恢复——但请先说明你接下来要尝试的新策略，或请用户介入诊断）`,
-          toolLog, usage: res.usage, paused: true, reason: '连续失败无进展',
+          toolLog, usage: res.usage, paused: true, reason: '连续失败无进展', spentYuan: spentNow(), usageTotals: runTotals(),
         };
       }
     }

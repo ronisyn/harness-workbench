@@ -1,2633 +1,2681 @@
 {
- "defs": [
-  {
-   "name": "append_file",
-   "description": "追加内容到文件\n何时用：文件末尾追加（日志/渐进内容）\n勿用：覆盖/创建用 write_file\n例：append_file {path, content}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     },
-     "content": {
-      "type": "string"
-     }
+  "defs": [
+    {
+      "name": "append_file",
+      "description": "追加内容到文件\n何时用：文件末尾追加（日志/渐进内容）\n勿用：覆盖/创建用 write_file\n例：append_file {path, content}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
     },
-    "required": [
-     "path",
-     "content"
-    ]
-   }
-  },
-  {
-   "name": "ask_user",
-   "description": "向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。\n何时用：需要用户拍板/方案选择\n勿用：可自行查证的事实不要问\n例：ask_user {question, options}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "question": {
-      "type": "string",
-      "description": "要问用户的问题"
-     },
-     "options": {
-      "type": "string",
-      "description": "选项：JSON 数组字符串，如 [{\"label\":\"方案A\",\"value\":\"a\"},{\"label\":\"方案B\",\"value\":\"b\"}]；value 会作为返回值"
-     }
+    {
+      "name": "ask_user",
+      "description": "向用户提出一个结构化问题并等待其点选答案（仅在真正需要用户决策时使用：如二选一/方案选择/需要用户拍板；不要用于可自行查证的事实）。question=问题；options=选项。用户点选后返回所选 value。\n何时用：需要用户拍板/方案选择\n勿用：可自行查证的事实不要问\n例：ask_user {question, options}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "要问用户的问题"
+          },
+          "options": {
+            "type": "string",
+            "description": "选项：JSON 数组字符串，如 [{\"label\":\"方案A\",\"value\":\"a\"},{\"label\":\"方案B\",\"value\":\"b\"}]；value 会作为返回值"
+          }
+        },
+        "required": [
+          "question",
+          "options"
+        ]
+      }
     },
-    "required": [
-     "question",
-     "options"
-    ]
-   }
-  },
-  {
-   "name": "conv_summarize",
-   "description": "归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求\"总结这个对话\"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）\n何时用：长会话收尾/跨周 resume 前归档摘要（已注册）\n勿用：短会话不需要\n例：conv_summarize {}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "conversationId": {
-      "type": "number",
-      "description": "目标会话 id，缺省=当前会话"
-     },
-     "semantic": {
-      "type": "boolean",
-      "description": "true=强制 LLM 语义摘要；缺省自动（>80 条消息时）"
-     }
+    {
+      "name": "conv_summarize",
+      "description": "归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求\"总结这个对话\"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）\n何时用：长会话收尾/跨周 resume 前归档摘要（已注册）\n勿用：短会话不需要\n例：conv_summarize {}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "conversationId": {
+            "type": "number",
+            "description": "目标会话 id，缺省=当前会话"
+          },
+          "semantic": {
+            "type": "boolean",
+            "description": "true=强制 LLM 语义摘要；缺省自动（>80 条消息时）"
+          }
+        },
+        "required": []
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "copy_move",
-   "description": "复制或移动文件/目录（mode: copy|move）\n何时用：复制或移动文件/目录\n勿用：删除用 delete_file\n例：copy_move {src, dst, mode:\"copy\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "src": {
-      "type": "string"
-     },
-     "dst": {
-      "type": "string"
-     },
-     "mode": {
-      "type": "string",
-      "description": "copy=复制 | move=移动",
-      "enum": [
-       "copy",
-       "move"
-      ]
-     }
+    {
+      "name": "copy_move",
+      "description": "复制或移动文件/目录（mode: copy|move）\n何时用：复制或移动文件/目录\n勿用：删除用 delete_file\n例：copy_move {src, dst, mode:\"copy\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string"
+          },
+          "dst": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "copy=复制 | move=移动",
+            "enum": [
+              "copy",
+              "move"
+            ]
+          }
+        },
+        "required": [
+          "src",
+          "dst"
+        ]
+      }
     },
-    "required": [
-     "src",
-     "dst"
-    ]
-   }
-  },
-  {
-   "name": "create_contract",
-   "description": "创建任务契约并立项（讨论达成共识后使用；驱动器会在 run_at 到点后无人值守执行，直到验收通过并等待用户复测）。goal=目标（完整）；acceptance=验收清单 JSON 字符串数组（驱动器逐条跑 shell 命令核验，如 [\"grep -q X /path\"]）；boundaries=边界约束；runAt=可空 ISO 时间（空=立即排队）。\n何时用：立项：验收先成文，驱动器无人值守执行\n勿用：小任务或讨论中不要用\n例：create_contract {goal, acceptance, boundaries}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "goal": {
-      "type": "string",
-      "description": "任务目标（完整、含交付物）"
-     },
-     "title": {
-      "type": "string",
-      "description": "简短标题"
-     },
-     "acceptance": {
-      "type": "string",
-      "description": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
-     },
-     "boundaries": {
-      "type": "string",
-      "description": "边界/约束（不许动什么、注意什么）"
-     },
-     "runAt": {
-      "type": "string",
-      "description": "ISO 时间；空=立即执行"
-     }
+    {
+      "name": "create_contract",
+      "description": "创建任务契约并立项（讨论达成共识后使用；驱动器会在 run_at 到点后无人值守执行，直到验收通过并等待用户复测）。goal=目标（完整）；acceptance=验收清单 JSON 字符串数组（驱动器逐条跑 shell 命令核验，如 [\"grep -q X /path\"]）；boundaries=边界约束；runAt=可空 ISO 时间（空=立即排队）。\n何时用：立项：验收先成文，驱动器无人值守执行\n勿用：小任务或讨论中不要用\n例：create_contract {goal, acceptance, boundaries}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "description": "任务目标（完整、含交付物）"
+          },
+          "title": {
+            "type": "string",
+            "description": "简短标题"
+          },
+          "acceptance": {
+            "type": "string",
+            "description": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
+          },
+          "boundaries": {
+            "type": "string",
+            "description": "边界/约束（不许动什么、注意什么）"
+          },
+          "runAt": {
+            "type": "string",
+            "description": "ISO 时间；空=立即执行"
+          }
+        },
+        "required": [
+          "goal"
+        ]
+      }
     },
-    "required": [
-     "goal"
-    ]
-   }
-  },
-  {
-   "name": "db_query",
-   "description": "数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。\n何时用：只读查库（单条 SELECT；用量/会话/工具统计）\n勿用：写库用 db_write；SHOW/多语句不支持；表列结构先查 information_schema，勿猜列名\n例：db_query {sql:\"SELECT COUNT(*) FROM usage_stats\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "sql": {
-      "type": "string"
-     }
+    {
+      "name": "db_query",
+      "description": "数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。\n何时用：只读查库（单条 SELECT；用量/会话/工具统计）\n勿用：写库用 db_write；SHOW/多语句不支持；表列结构先查 information_schema，勿猜列名\n例：db_query {sql:\"SELECT COUNT(*) FROM usage_stats\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ]
+      }
     },
-    "required": [
-     "sql"
-    ]
-   }
-  },
-  {
-   "name": "db_write",
-   "description": "数据库写入（高危，留痕）\n何时用：数据库写入/迁移（非 SELECT）\n勿用：读用 db_query；写前先 SELECT 复核影响面\n例：db_write {sql, params}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "sql": {
-      "type": "string"
-     }
+    {
+      "name": "db_write",
+      "description": "数据库写入（高危，留痕）\n何时用：数据库写入/迁移（非 SELECT）\n勿用：读用 db_query；写前先 SELECT 复核影响面\n例：db_write {sql, params}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ]
+      }
     },
-    "required": [
-     "sql"
-    ]
-   }
-  },
-  {
-   "name": "delete_file",
-   "description": "删除文件（高危，留痕）\n何时用：删除文件/目录（确认过；高危留痕）\n勿用：保留内容用 copy_move 移走\n例：delete_file {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "delete_file",
+      "description": "删除文件（高危，留痕）\n何时用：删除文件/目录（确认过；高危留痕）\n勿用：保留内容用 copy_move 移走\n例：delete_file {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "edit_file",
-   "description": "精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）\n何时用：精确局部替换（old 需与文件内容唯一匹配）\n勿用：未先 read_file 不要盲改；大段重写用 write_file\n例：edit_file {path, old, new}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "文件路径"
-     },
-     "old": {
-      "type": "string",
-      "description": "要替换的原文（必须完全匹配文件内容）"
-     },
-     "new": {
-      "type": "string",
-      "description": "新内容（默认删除 old）"
-     }
+    {
+      "name": "edit_file",
+      "description": "精确增量修改文件：把 old 原文替换为 new 新文（只改局部，避免整文件重写；old 必须与文件现有内容完全一致）\n何时用：精确局部替换（old 需与文件内容唯一匹配）\n勿用：未先 read_file 不要盲改；大段重写用 write_file\n例：edit_file {path, old, new}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "文件路径"
+          },
+          "old": {
+            "type": "string",
+            "description": "要替换的原文（必须完全匹配文件内容）"
+          },
+          "new": {
+            "type": "string",
+            "description": "新内容（默认删除 old）"
+          }
+        },
+        "required": [
+          "path",
+          "old"
+        ]
+      }
     },
-    "required": [
-     "path",
-     "old"
-    ]
-   }
-  },
-  {
-   "name": "extract_docx",
-   "description": "提取 Word 文本\n何时用：解析 Word 文本\n勿用：文本文件用 read_file\n例：extract_docx {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "extract_docx",
+      "description": "提取 Word 文本\n何时用：解析 Word 文本\n勿用：文本文件用 read_file\n例：extract_docx {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "extract_pdf",
-   "description": "提取 PDF 文本\n何时用：解析 PDF 文本\n勿用：文本文件用 read_file\n例：extract_pdf {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "extract_pdf",
+      "description": "提取 PDF 文本\n何时用：解析 PDF 文本\n勿用：文本文件用 read_file\n例：extract_pdf {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "extract_pptx",
-   "description": "提取 PPT 文本\n何时用：解析 PPT 文本\n勿用：文本文件用 read_file\n例：extract_pptx {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "extract_pptx",
+      "description": "提取 PPT 文本\n何时用：解析 PPT 文本\n勿用：文本文件用 read_file\n例：extract_pptx {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "extract_xlsx",
-   "description": "提取 Excel 内容\n何时用：解析 Excel 内容\n勿用：文本文件用 read_file\n例：extract_xlsx {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "extract_xlsx",
+      "description": "提取 Excel 内容\n何时用：解析 Excel 内容\n勿用：文本文件用 read_file\n例：extract_xlsx {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "feishu_bitable_read",
-   "description": "读取飞书多维表格记录\n何时用：读飞书多维表格\n勿用：—\n例：feishu_bitable_read {appToken, tableId}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "appToken": {
-      "type": "string"
-     },
-     "tableId": {
-      "type": "string"
-     }
+    {
+      "name": "feishu_bitable_read",
+      "description": "读取飞书多维表格记录\n何时用：读飞书多维表格\n勿用：—\n例：feishu_bitable_read {appToken, tableId}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "appToken": {
+            "type": "string"
+          },
+          "tableId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "appToken",
+          "tableId"
+        ]
+      }
     },
-    "required": [
-     "appToken",
-     "tableId"
-    ]
-   }
-  },
-  {
-   "name": "feishu_doc_read",
-   "description": "读取飞书云文档/知识库文档内容（docx/wiki 链接）\n何时用：读飞书云文档/知识库内容\n勿用：非飞书用 fetch_url\n例：feishu_doc_read {url}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "url": {
-      "type": "string",
-      "description": "飞书文档链接或 ID"
-     }
+    {
+      "name": "feishu_doc_read",
+      "description": "读取飞书云文档/知识库文档内容（docx/wiki 链接）\n何时用：读飞书云文档/知识库内容\n勿用：非飞书用 fetch_url\n例：feishu_doc_read {url}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "飞书文档链接或 ID"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
     },
-    "required": [
-     "url"
-    ]
-   }
-  },
-  {
-   "name": "feishu_sheet_read",
-   "description": "读取飞书电子表格内容\n何时用：读飞书电子表格\n勿用：—\n例：feishu_sheet_read {url, range}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "url": {
-      "type": "string"
-     },
-     "range": {
-      "type": "string"
-     }
+    {
+      "name": "feishu_sheet_read",
+      "description": "读取飞书电子表格内容\n何时用：读飞书电子表格\n勿用：—\n例：feishu_sheet_read {url, range}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "range": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
     },
-    "required": [
-     "url"
-    ]
-   }
-  },
-  {
-   "name": "fetch_spill",
-   "description": "取回被溢出（spill）的工具结果全文。上下文里出现\"已省略 N 字节…全文已存 <路径>\"时，用它按范围分段读回\n何时用：上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文\n勿用：读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读\n例：fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "溢出文件路径（上下文提示里的定位符，\"全文已存 …\"后面的路径）"
-     },
-     "offset": {
-      "type": "number",
-      "description": "起始字符偏移（默认 0）"
-     },
-     "length": {
-      "type": "number",
-      "description": "读取字符数（默认 20000）"
-     }
+    {
+      "name": "fetch_spill",
+      "description": "取回被溢出（spill）的工具结果全文。上下文里出现\"已省略 N 字节…全文已存 <路径>\"时，用它按范围分段读回\n何时用：上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文\n勿用：读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读\n例：fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "溢出文件路径（上下文提示里的定位符，\"全文已存 …\"后面的路径）"
+          },
+          "offset": {
+            "type": "number",
+            "description": "起始字符偏移（默认 0）"
+          },
+          "length": {
+            "type": "number",
+            "description": "读取字符数（默认 20000）"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "fetch_url",
-   "description": "读取网页正文（简易提取）\n何时用：抓取指定网页正文\n勿用：找网页用 web_search\n例：fetch_url {url}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "url": {
-      "type": "string"
-     }
+    {
+      "name": "fetch_url",
+      "description": "读取网页正文（简易提取）\n何时用：抓取指定网页正文\n勿用：找网页用 web_search\n例：fetch_url {url}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
     },
-    "required": [
-     "url"
-    ]
-   }
-  },
-  {
-   "name": "find_file",
-   "description": "按文件名子串查找文件（name 无需通配符，如找 index.html 传 \"index.html\" 或 \"html\" 即可；不支持 * 通配）\n何时用：按文件名子串定位（免通配符）\n勿用：按内容搜索用 grep_search\n例：find_file {path, name:\"agent.js\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     },
-     "name": {
-      "type": "string"
-     }
+    {
+      "name": "find_file",
+      "description": "按文件名子串查找文件（name 无需通配符，如找 index.html 传 \"index.html\" 或 \"html\" 即可；不支持 * 通配）\n何时用：按文件名子串定位（免通配符）\n勿用：按内容搜索用 grep_search\n例：find_file {path, name:\"agent.js\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
     },
-    "required": [
-     "name"
-    ]
-   }
-  },
-  {
-   "name": "finish_task",
-   "description": "任务完成自检提交：把任务标记为\"已完成候选\"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入\"待用户复测\"。若工作区是 git 仓库且非平台代码目录，将自动提交未提交改动（P5 auto-commit 业务区）。\n何时用：提测：对照验收自检后提交\"完成候选\"\n勿用：未完成/未验证禁止调用\n例：finish_task {summary, selfCheck}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "summary": {
-      "type": "string",
-      "description": "完成总结（做了什么、结果如何）"
-     },
-     "selfCheck": {
-      "type": "string",
-      "description": "对照验收标准的自检说明"
-     }
+    {
+      "name": "finish_task",
+      "description": "任务完成自检提交：把任务标记为\"已完成候选\"。summary=完成总结；selfCheck=你对照验收标准自检的说明。调用后驱动器会自动跑验收钩子，通过后任务进入\"待用户复测\"。若工作区是 git 仓库且非平台代码目录，将自动提交未提交改动（P5 auto-commit 业务区）。\n何时用：提测：对照验收自检后提交\"完成候选\"\n勿用：未完成/未验证禁止调用\n例：finish_task {summary, selfCheck}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "description": "完成总结（做了什么、结果如何）"
+          },
+          "selfCheck": {
+            "type": "string",
+            "description": "对照验收标准的自检说明"
+          }
+        },
+        "required": [
+          "summary"
+        ]
+      }
     },
-    "required": [
-     "summary"
-    ]
-   }
-  },
-  {
-   "name": "get_goal",
-   "description": "查看当前会话的活动目标与进度\n何时用：查看当前活动目标与进度\n勿用：—\n例：get_goal {}",
-   "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-   }
-  },
-  {
-   "name": "git_branch",
-   "description": "git 分支操作（list|create|checkout）\n何时用：分支 list/create/checkout\n勿用：推送用 git_pull_push\n例：git_branch {dir, action:\"list\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string"
-     },
-     "action": {
-      "type": "string",
-      "enum": [
-       "list",
-       "create",
-       "checkout"
-      ]
-     },
-     "branch": {
-      "type": "string"
-     }
+    {
+      "name": "get_goal",
+      "description": "查看当前会话的活动目标与进度\n何时用：查看当前活动目标与进度\n勿用：—\n例：get_goal {}",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
     },
-    "required": [
-     "dir"
-    ]
-   }
-  },
-  {
-   "name": "git_commit",
-   "description": "git 提交（自动推送 origin/main——防\"只提交未推送被部署覆盖\"孤儿，2026-09-09 机制修复）\n何时用：小步提交（自改纪律：改前先提交当前状态）\n勿用：未验证代码不提交\n例：git_commit {dir, message}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string"
-     },
-     "message": {
-      "type": "string"
-     }
+    {
+      "name": "git_branch",
+      "description": "git 分支操作（list|create|checkout）\n何时用：分支 list/create/checkout\n勿用：推送用 git_pull_push\n例：git_branch {dir, action:\"list\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "checkout"
+            ]
+          },
+          "branch": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir"
+        ]
+      }
     },
-    "required": [
-     "dir",
-     "message"
-    ]
-   }
-  },
-  {
-   "name": "git_pull_push",
-   "description": "git 拉取/推送\n何时用：拉取/推送远程（push 前先 pull 防分叉）\n勿用：本地提交用 git_commit\n例：git_pull_push {dir, action:\"push\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string"
-     },
-     "action": {
-      "type": "string"
-     }
+    {
+      "name": "git_commit",
+      "description": "git 提交（自动推送 origin/main——防\"只提交未推送被部署覆盖\"孤儿，2026-09-09 机制修复）\n何时用：小步提交（自改纪律：改前先提交当前状态）\n勿用：未验证代码不提交\n例：git_commit {dir, message}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir",
+          "message"
+        ]
+      }
     },
-    "required": [
-     "dir"
-    ]
-   }
-  },
-  {
-   "name": "git_status",
-   "description": "查看 git 状态\n何时用：提交前查看工作区状态\n勿用：看提交历史用 run_command git log\n例：git_status {dir}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string"
-     }
+    {
+      "name": "git_pull_push",
+      "description": "git 拉取/推送\n何时用：拉取/推送远程（push 前先 pull 防分叉）\n勿用：本地提交用 git_commit\n例：git_pull_push {dir, action:\"push\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir"
+        ]
+      }
     },
-    "required": [
-     "dir"
-    ]
-   }
-  },
-  {
-   "name": "grep_search",
-   "description": "在路径(目录或单文件)中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）\n何时用：按正则搜文件内容（代码/文本文件）\n勿用：按文件名用 find_file；查库用 db_query\n例：grep_search {path, pattern:\"ensureRun\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     },
-     "pattern": {
-      "type": "string"
-     }
+    {
+      "name": "git_status",
+      "description": "查看 git 状态\n何时用：提交前查看工作区状态\n勿用：看提交历史用 run_command git log\n例：git_status {dir}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir"
+        ]
+      }
     },
-    "required": [
-     "pattern"
-    ]
-   }
-  },
-  {
-   "name": "hooks_list",
-   "description": "列出当前已注册的 hooks 事件钩子（before/after、目标工具、名称、是否内置）。当工具执行返回\"已被 hook 拦截\"时，用它查看是哪个纪律钩子拦的、为什么\n何时用：查看已注册 hooks（工具被\"已被 hook 拦截\"时排查是哪个纪律钩子）\n勿用：清除/调整钩子属平台管理，模型侧只读\n例：hooks_list {}",
-   "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-   }
-  },
-  {
-   "name": "intake_submit",
-   "description": "提交开发需求（单一 intake 收口）：四字段齐备后落 extension_demands 待审，供进化集审批台审。必须先在本会话 skill_load 载入对应的 intake 技能（plugin-dev-intake→插件 / app-dev-intake→应用），未载入会被硬闸拒绝。\n何时用：intake 技能（plugin/app/shell-dev-intake）采集齐 触发场景/期望效果/涉及壳/代码动作类型 后提交开发需求\n勿用：字段未齐/未载入对应 intake 技能（会被硬闸拦）；未审批不得自行开发\n例：intake_submit {assetType:\"plugin\", scene, effect, shells, actionType}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "assetType": {
-      "type": "string",
-      "description": "资产类型：plugin 插件 / app 应用 / shell 壳",
-      "enum": [
-       "plugin",
-       "app",
-       "shell"
-      ]
-     },
-     "assetKey": {
-      "type": "string",
-      "description": "关联扩展资产 key（升级既有资产时填；新资产留空=新立项）"
-     },
-     "scene": {
-      "type": "string",
-      "description": "触发场景（何时要用）"
-     },
-     "effect": {
-      "type": "string",
-      "description": "期望效果"
-     },
-     "shells": {
-      "type": "string",
-      "description": "涉及壳（如 code / 全部）"
-     },
-     "actionType": {
-      "type": "string",
-      "description": "代码动作类型（新增/升级/修 bug）"
-     }
+    {
+      "name": "grep_search",
+      "description": "在路径(目录或单文件)中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）\n何时用：按正则搜文件内容（代码/文本文件）\n勿用：按文件名用 find_file；查库用 db_query\n例：grep_search {path, pattern:\"ensureRun\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
     },
-    "required": [
-     "assetType",
-     "scene",
-     "effect",
-     "shells",
-     "actionType"
-    ]
-   }
-  },
-  {
-   "name": "job_list",
-   "description": "列出全部后台任务（jobId/命令/状态/日志路径）\n何时用：列出后台任务状态\n勿用：—\n例：job_list {}",
-   "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-   }
-  },
-  {
-   "name": "job_output",
-   "description": "查看后台任务输出日志（最近 8000 字符）\n何时用：读后台任务输出（最近 8000 字符）\n勿用：已完成的结果在任务返回里\n例：job_output {jobId}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "jobId": {
-      "type": "string"
-     }
+    {
+      "name": "hooks_list",
+      "description": "列出当前已注册的 hooks 事件钩子（before/after、目标工具、名称、是否内置）。当工具执行返回\"已被 hook 拦截\"时，用它查看是哪个纪律钩子拦的、为什么\n何时用：查看已注册 hooks（工具被\"已被 hook 拦截\"时排查是哪个纪律钩子）\n勿用：清除/调整钩子属平台管理，模型侧只读\n例：hooks_list {}",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
     },
-    "required": [
-     "jobId"
-    ]
-   }
-  },
-  {
-   "name": "kb_add",
-   "description": "写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代\"记住/以后都按…\"时用\n何时用：沉淀\"记住/以后都按…\"（global 或本会话）\n勿用：复盘条目标题加\"打回复盘:\"前缀（度量）\n例：kb_add {title, body, scope:\"global\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "title": {
-      "type": "string"
-     },
-     "body": {
-      "type": "string"
-     },
-     "scope": {
-      "type": "string",
-      "description": "global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)",
-      "enum": [
-       "global",
-       "shell",
-       "conv"
-      ]
-     },
-     "kind": {
-      "type": "string",
-      "description": "分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索",
-      "enum": [
-       "fact",
-       "progress",
-       "guide",
-       "skill",
-       "lesson"
-      ]
-     },
-     "overwrite": {
-      "type": "boolean",
-      "description": "同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖"
-     }
+    {
+      "name": "intake_submit",
+      "description": "提交开发需求（单一 intake 收口）：四字段齐备后落 extension_demands 待审，供进化集审批台审。必须先在本会话 skill_load 载入对应的 intake 技能（plugin-dev-intake→插件 / app-dev-intake→应用），未载入会被硬闸拒绝。\n何时用：intake 技能（plugin/app/shell-dev-intake）采集齐 触发场景/期望效果/涉及壳/代码动作类型 后提交开发需求\n勿用：字段未齐/未载入对应 intake 技能（会被硬闸拦）；未审批不得自行开发\n例：intake_submit {assetType:\"plugin\", scene, effect, shells, actionType}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "assetType": {
+            "type": "string",
+            "description": "资产类型：plugin 插件 / app 应用 / shell 壳",
+            "enum": [
+              "plugin",
+              "app",
+              "shell"
+            ]
+          },
+          "assetKey": {
+            "type": "string",
+            "description": "关联扩展资产 key（升级既有资产时填；新资产留空=新立项）"
+          },
+          "scene": {
+            "type": "string",
+            "description": "触发场景（何时要用）"
+          },
+          "effect": {
+            "type": "string",
+            "description": "期望效果"
+          },
+          "shells": {
+            "type": "string",
+            "description": "涉及壳（如 code / 全部）"
+          },
+          "actionType": {
+            "type": "string",
+            "description": "代码动作类型（新增/升级/修 bug）"
+          }
+        },
+        "required": [
+          "assetType",
+          "scene",
+          "effect",
+          "shells",
+          "actionType"
+        ]
+      }
     },
-    "required": [
-     "title"
-    ]
-   }
-  },
-  {
-   "name": "kb_del",
-   "description": "删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）\n何时用：删除错误/过期记忆\n勿用：—\n例：kb_del {id}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "id": {
-      "type": "number"
-     }
+    {
+      "name": "job_list",
+      "description": "列出全部后台任务（jobId/命令/状态/日志路径）\n何时用：列出后台任务状态\n勿用：—\n例：job_list {}",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
     },
-    "required": [
-     "id"
-    ]
-   }
-  },
-  {
-   "name": "kb_search",
-   "description": "搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里\n何时用：找记忆/历史决策/用户偏好（先搜再用）\n勿用：—\n例：kb_search {q}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "q": {
-      "type": "string",
-      "description": "关键词"
-     }
+    {
+      "name": "job_output",
+      "description": "查看后台任务输出日志（最近 8000 字符）\n何时用：读后台任务输出（最近 8000 字符）\n勿用：已完成的结果在任务返回里\n例：job_output {jobId}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "jobId"
+        ]
+      }
     },
-    "required": [
-     "q"
-    ]
-   }
-  },
-  {
-   "name": "kill_process",
-   "description": "终止进程（后台任务用 jobId/pid）\n何时用：终止失控/废弃后台任务\n勿用：正常任务等它自己结束\n例：kill_process {jobId}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "pid": {
-      "type": "number"
-     }
+    {
+      "name": "kb_add",
+      "description": "写入一条知识/长期记忆（scope=global 对所有会话生效；scope=shell 仅当前会话所属壳的会话可见；scope=conv 仅当前会话）。title 简短概括，body 为内容。用户交代\"记住/以后都按…\"时用\n何时用：沉淀\"记住/以后都按…\"（global 或本会话）\n勿用：复盘条目标题加\"打回复盘:\"前缀（度量）\n例：kb_add {title, body, scope:\"global\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)",
+            "enum": [
+              "global",
+              "shell",
+              "conv"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索",
+            "enum": [
+              "fact",
+              "progress",
+              "guide",
+              "skill",
+              "lesson"
+            ]
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖"
+          }
+        },
+        "required": [
+          "title"
+        ]
+      }
     },
-    "required": [
-     "pid"
-    ]
-   }
-  },
-  {
-   "name": "list_dir",
-   "description": "列出目录内容\n何时用：列目录看结构、确认路径存在\n勿用：递归找文件用 find_file\n例：list_dir {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "默认工作区"
-     }
+    {
+      "name": "kb_del",
+      "description": "删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）\n何时用：删除错误/过期记忆\n勿用：—\n例：kb_del {id}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "mkdir",
-   "description": "创建目录\n何时用：创建目录\n勿用：创建文件用 write_file\n例：mkdir {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "kb_search",
+      "description": "搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里\n何时用：找记忆/历史决策/用户偏好（先搜再用）\n勿用：—\n例：kb_search {q}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "关键词"
+          }
+        },
+        "required": [
+          "q"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "ocr_image",
-   "description": "图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）\n何时用：图片含文字需提取（截图/扫描件）\n勿用：图片理解用 view_image\n例：ocr_image {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "图片文件路径或 URL"
-     }
+    {
+      "name": "kill_process",
+      "description": "终止进程（后台任务用 jobId/pid）\n何时用：终止失控/废弃后台任务\n勿用：正常任务等它自己结束\n例：kill_process {jobId}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pid": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "pid"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "plan_done",
-   "description": "标记任务清单中第 N 步已完成（从 1 开始）\n何时用：标记清单第 N 步已完成（从 1 开始）\n勿用：全部完成后用 finish_task 提测\n例：plan_done {index:1}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "index": {
-      "type": "number",
-      "description": "步骤序号（从 1 开始）"
-     }
+    {
+      "name": "list_dir",
+      "description": "列出目录内容\n何时用：列目录看结构、确认路径存在\n勿用：递归找文件用 find_file\n例：list_dir {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "默认工作区"
+          }
+        },
+        "required": []
+      }
     },
-    "required": [
-     "index"
-    ]
-   }
-  },
-  {
-   "name": "plan_tasks",
-   "description": "为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）\n何时用：多步复杂任务先列清单（>3 步）\n勿用：单步小任务直接做\n例：plan_tasks {tasks:\"步骤列表\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "tasks": {
-      "type": "string",
-      "description": "任务步骤列表，用换行或分号分隔"
-     }
+    {
+      "name": "mkdir",
+      "description": "创建目录\n何时用：创建目录\n勿用：创建文件用 write_file\n例：mkdir {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "tasks"
-    ]
-   }
-  },
-  {
-   "name": "ralph",
-   "description": "对同一目标运行多轮\"全新视角\"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。\n何时用：难题多轮\"全新视角\"逼近（每轮无历史）\n勿用：常规任务别用（成本高）\n例：ralph {objective}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "objective": {
-      "type": "string",
-      "description": "不可变的目标"
-     },
-     "rounds": {
-      "type": "number",
-      "description": "轮次上限（默认 5，最大 10）"
-     }
+    {
+      "name": "ocr_image",
+      "description": "图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）\n何时用：图片含文字需提取（截图/扫描件）\n勿用：图片理解用 view_image\n例：ocr_image {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "图片文件路径或 URL"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "objective"
-    ]
-   }
-  },
-  {
-   "name": "read_file",
-   "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"/srv/harness-workbench/server/agent.js\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "文件绝对路径"
-     },
-     "numbered": {
-      "type": "boolean",
-      "description": "true=输出带行号前缀"
-     }
+    {
+      "name": "plan_done",
+      "description": "标记任务清单中第 N 步已完成（从 1 开始）\n何时用：标记清单第 N 步已完成（从 1 开始）\n勿用：全部完成后用 finish_task 提测\n例：plan_done {index:1}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "number",
+            "description": "步骤序号（从 1 开始）"
+          }
+        },
+        "required": [
+          "index"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "read_file_range",
-   "description": "分段读取大文件（offset 字符偏移）\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     },
-     "offset": {
-      "type": "number"
-     },
-     "length": {
-      "type": "number"
-     }
+    {
+      "name": "plan_tasks",
+      "description": "为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）\n何时用：多步复杂任务先列清单（>3 步）\n勿用：单步小任务直接做\n例：plan_tasks {tasks:\"步骤列表\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "string",
+            "description": "任务步骤列表，用换行或分号分隔"
+          }
+        },
+        "required": [
+          "tasks"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "reload_platform",
-   "description": "让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。\n何时用：自改代码生效（先 syntax_check+git commit）\n勿用：仅改配置/数据不需要\n例：reload_platform {}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "note": {
-      "type": "string",
-      "description": "改动说明（改了什么，便于审计回看）"
-     }
+    {
+      "name": "ralph",
+      "description": "对同一目标运行多轮\"全新视角\"Agent 循环（每轮子代理不带对话历史、只共享工作区记忆文件），直到某轮报告完成、阻塞或达到轮次上限。适合需要反复试错/多角度逼近的难题。返回各轮结论汇总。\n何时用：难题多轮\"全新视角\"逼近（每轮无历史）\n勿用：常规任务别用（成本高）\n例：ralph {objective}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "不可变的目标"
+          },
+          "rounds": {
+            "type": "number",
+            "description": "轮次上限（默认 5，最大 10）"
+          }
+        },
+        "required": [
+          "objective"
+        ]
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "repo_map",
-   "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"/srv/harness-workbench\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string",
-      "description": "目标目录，缺省=当前工作区"
-     }
+    {
+      "name": "read_file",
+      "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"/srv/harness-workbench/server/agent.js\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "文件绝对路径"
+          },
+          "numbered": {
+            "type": "boolean",
+            "description": "true=输出带行号前缀"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "run_command",
-   "description": "执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）\n何时用：无专门工具覆盖的系统操作（npm/部署/systemctl）\n勿用：cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具\n例：run_command {command:\"npm install\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "cmd": {
-      "type": "string",
-      "description": "命令（如 npm install）"
-     },
-     "timeout": {
-      "type": "number",
-      "description": "超时秒数 5-300，默认 30"
-     }
+    {
+      "name": "read_file_range",
+      "description": "分段读取大文件（offset 字符偏移）\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "number"
+          },
+          "length": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "cmd"
-    ]
-   }
-  },
-  {
-   "name": "run_long_task",
-   "description": "后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止\n何时用：长命令后台执行不阻塞\n勿用：短命令用 run_command\n例：run_long_task {command}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "cmd": {
-      "type": "string"
-     }
+    {
+      "name": "reload_platform",
+      "description": "让平台加载你刚修改的自身代码：先 syntax_check 确认无误再调用。平台会安排在【当前对话回复结束后】自动重启（约3-4秒），重启后代码改动生效。不要手动 systemctl restart（会中断你自己的执行）；仅改配置/数据时无需调用。\n何时用：自改代码生效（先 syntax_check+git commit）\n勿用：仅改配置/数据不需要\n例：reload_platform {}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "改动说明（改了什么，便于审计回看）"
+          }
+        },
+        "required": []
+      }
     },
-    "required": [
-     "cmd"
-    ]
-   }
-  },
-  {
-   "name": "run_test",
-   "description": "运行测试（write 级仅工作区内）\n何时用：运行项目测试套件\n勿用：单文件语法用 syntax_check\n例：run_test {dir}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "dir": {
-      "type": "string"
-     }
+    {
+      "name": "repo_map",
+      "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"/srv/harness-workbench\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string",
+            "description": "目标目录，缺省=当前工作区"
+          }
+        },
+        "required": []
+      }
     },
-    "required": [
-     "dir"
-    ]
-   }
-  },
-  {
-   "name": "set_goal",
-   "description": "设定本会话的长期目标（用户要求持续推进一件大事时用；目标会跨轮持续注入提醒，直到完成/放弃）\n何时用：用户要求持续推进的跨轮大目标\n勿用：一次性任务用 plan_tasks\n例：set_goal {objective}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "objective": {
-      "type": "string",
-      "description": "目标描述"
-     }
+    {
+      "name": "run_command",
+      "description": "执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）\n何时用：无专门工具覆盖的系统操作（npm/部署/systemctl）\n勿用：cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具\n例：run_command {command:\"npm install\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "description": "命令（如 npm install）"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "超时秒数 5-300，默认 30"
+          }
+        },
+        "required": [
+          "cmd"
+        ]
+      }
     },
-    "required": [
-     "objective"
-    ]
-   }
-  },
-  {
-   "name": "set_limits",
-   "description": "调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）；parallel=同一步内并行工具数（0=串行，默认10）。用户要求\"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务\"时用它，并汇报调整后的值。\n何时用：用户要求调整护栏（0=不限；先解释再改）\n勿用：未经请求不要自行放宽\n例：set_limits {minutes:0}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "minutes": {
-      "type": "number",
-      "description": "时间预算(分钟)，0=不限"
-     },
-     "rounds": {
-      "type": "number",
-      "description": "轮次上限，0=不限"
-     },
-     "loop": {
-      "type": "number",
-      "description": "循环检测连续次数，0=关闭"
-     },
-     "parallel": {
-      "type": "number",
-      "description": "并行工具数，0=串行"
-     }
+    {
+      "name": "run_long_task",
+      "description": "后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止\n何时用：长命令后台执行不阻塞\n勿用：短命令用 run_command\n例：run_long_task {command}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd"
+        ]
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "skill_load",
-   "description": "载入技能：该技能 SKILL.md 全文进入系统提示，本会话后续轮次持续生效（跨轮记忆）；重复载入即更新\n何时用：载入技能（全文入系统提示，会话内持续生效）\n勿用：一次性约定用 kb_add\n例：skill_load {name}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "name": {
-      "type": "string",
-      "description": "技能目录名（skills_list 查得）"
-     }
+    {
+      "name": "run_test",
+      "description": "运行测试（write 级仅工作区内）\n何时用：运行项目测试套件\n勿用：单文件语法用 syntax_check\n例：run_test {dir}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir"
+        ]
+      }
     },
-    "required": [
-     "name"
-    ]
-   }
-  },
-  {
-   "name": "skill_save",
-   "description": "创建/更新技能：写入 skills/<名称>/SKILL.md（frontmatter: name/description/version，正文为执行指令），之后可用 skill_load 载入\n何时用：新建/更新技能（复盘结论固化）\n勿用：零散经验用 kb_add\n例：skill_save {name, description, body}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "name": {
-      "type": "string"
-     },
-     "description": {
-      "type": "string",
-      "description": "一句话说明何时用该技能"
-     },
-     "content": {
-      "type": "string",
-      "description": "SKILL.md 正文指令"
-     }
+    {
+      "name": "set_goal",
+      "description": "设定本会话的长期目标（用户要求持续推进一件大事时用；目标会跨轮持续注入提醒，直到完成/放弃）\n何时用：用户要求持续推进的跨轮大目标\n勿用：一次性任务用 plan_tasks\n例：set_goal {objective}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "目标描述"
+          }
+        },
+        "required": [
+          "objective"
+        ]
+      }
     },
-    "required": [
-     "name",
-     "content"
-    ]
-   }
-  },
-  {
-   "name": "skills_list",
-   "description": "列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到\"技能/skill/按照某方法做\"时先查这里\n何时用：用户提\"技能/方法\"时先查可用技能\n勿用：已确定直接 skill_load\n例：skills_list {}",
-   "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-   }
-  },
-  {
-   "name": "subagent",
-   "description": "启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（\"子:\"前缀）并留痕。\n何时用：委派独立子任务（隔离上下文）\n勿用：小查询自己做；批量用 subagent_fanout\n例：subagent {prompt, mode:\"sync\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "prompt": {
-      "type": "string",
-      "description": "给子代理的完整任务指令（自包含，含目标与验收标准）"
-     },
-     "name": {
-      "type": "string",
-      "description": "子代理名称（用于展示，默认 子代理）"
-     },
-     "model": {
-      "type": "string",
-      "description": "子代理模型，默认与主代理相同"
-     },
-     "mode": {
-      "type": "string",
-      "description": "sync=等结果(默认) | async=立即返回id",
-      "enum": [
-       "sync",
-       "async"
-      ]
-     }
+    {
+      "name": "set_limits",
+      "description": "调整平台 Agent 运行护栏（写入 settings，立即生效、无需重启）：minutes=单轮时间预算分钟（0=不限）；rounds=最大工具轮次（0=不限）；loop=循环检测的连续相同次数（0=关闭）；parallel=同一步内并行工具数（0=串行，默认10）。用户要求\"取消10分钟护栏/取消轮次限制/放开限制/要跑长任务\"时用它，并汇报调整后的值。\n何时用：用户要求调整护栏（0=不限；先解释再改）\n勿用：未经请求不要自行放宽\n例：set_limits {minutes:0}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "minutes": {
+            "type": "number",
+            "description": "时间预算(分钟)，0=不限"
+          },
+          "rounds": {
+            "type": "number",
+            "description": "轮次上限，0=不限"
+          },
+          "loop": {
+            "type": "number",
+            "description": "循环检测连续次数，0=关闭"
+          },
+          "parallel": {
+            "type": "number",
+            "description": "并行工具数，0=串行"
+          }
+        },
+        "required": []
+      }
     },
-    "required": [
-     "prompt"
-    ]
-   }
-  },
-  {
-   "name": "subagent_fanout",
-   "description": "批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要\n何时用：同模板批量派发（{{item}} 占位）\n勿用：条目少时逐个做\n例：subagent_fanout {items, prompt}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "template": {
-      "type": "string",
-      "description": "子代理任务模板，其中 {{item}} 会被替换为具体条目"
-     },
-     "items": {
-      "type": "string",
-      "description": "条目数组的 JSON，如 [\"a.txt\",\"b.txt\"]（或逗号分隔字符串）"
-     },
-     "name": {
-      "type": "string",
-      "description": "子代理名前缀，默认 批量"
-     }
+    {
+      "name": "skill_load",
+      "description": "载入技能：该技能 SKILL.md 全文进入系统提示，本会话后续轮次持续生效（跨轮记忆）；重复载入即更新\n何时用：载入技能（全文入系统提示，会话内持续生效）\n勿用：一次性约定用 kb_add\n例：skill_load {name}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "技能目录名（skills_list 查得）"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
     },
-    "required": [
-     "template",
-     "items"
-    ]
-   }
-  },
-  {
-   "name": "subagent_fork",
-   "description": "派生一个\"延续本会话上下文\"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）\n何时用：子代理延续本会话上下文继续深挖\n勿用：全新任务用 subagent\n例：subagent_fork {prompt}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "prompt": {
-      "type": "string",
-      "description": "给子代理的独立任务（它会同时看到本会话最近对话）"
-     },
-     "name": {
-      "type": "string"
-     },
-     "mode": {
-      "type": "string",
-      "description": "sync(默认)=等结果 | async=立即返回id"
-     }
+    {
+      "name": "skill_save",
+      "description": "创建/更新技能：写入 skills/<名称>/SKILL.md（frontmatter: name/description/version，正文为执行指令），之后可用 skill_load 载入\n何时用：新建/更新技能（复盘结论固化）\n勿用：零散经验用 kb_add\n例：skill_save {name, description, body}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "一句话说明何时用该技能"
+          },
+          "content": {
+            "type": "string",
+            "description": "SKILL.md 正文指令"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ]
+      }
     },
-    "required": [
-     "prompt"
-    ]
-   }
-  },
-  {
-   "name": "subagent_join",
-   "description": "等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）\n何时用：收口多个异步子代理结果\n勿用：单个结果用 subagent_output\n例：subagent_join {ids}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "ids": {
-      "type": "string",
-      "description": "逗号分隔的 sub_id 列表"
-     }
+    {
+      "name": "skills_list",
+      "description": "列出可用技能（skills/技能目录名/SKILL.md，含名称与简介），用户提到\"技能/skill/按照某方法做\"时先查这里\n何时用：用户提\"技能/方法\"时先查可用技能\n勿用：已确定直接 skill_load\n例：skills_list {}",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
     },
-    "required": [
-     "ids"
-    ]
-   }
-  },
-  {
-   "name": "subagent_list",
-   "description": "列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时），用于编排与排查\n何时用：查看全部子代理状态（编排/排查）\n勿用：—\n例：subagent_list {}",
-   "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-   }
-  },
-  {
-   "name": "subagent_output",
-   "description": "查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果。未完成就继续查询/等一会。\n何时用：取异步子代理结果（running/done）\n勿用：未完成可稍候重试或 join\n例：subagent_output {id}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "id": {
-      "type": "string",
-      "description": "sub_id（subagent async 返回）"
-     }
+    {
+      "name": "subagent",
+      "description": "启动一个子代理独立执行任务并返回结果。mode=sync(默认)：等待子代理完成后返回其结论；mode=async：立即返回 sub_id（适合并行：一条消息里发多个 async 子代理调用会并行启动，随后用 subagent_output 逐个取结果再汇总）。子代理内部工具执行会实时显示（\"子:\"前缀）并留痕。可用 tools 把它的工具清单收窄到只有几个（如查库存的子代理只给 db_query），用 budgetYuan 给它切一块额度（只烧这块，没花完会回收）。\n何时用：委派独立子任务（隔离上下文）\n勿用：小查询自己做；批量用 subagent_fanout\n例：subagent {prompt, mode:\"sync\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "给子代理的完整任务指令（自包含，含目标与验收标准）"
+          },
+          "name": {
+            "type": "string",
+            "description": "子代理名称（用于展示，默认 子代理）"
+          },
+          "model": {
+            "type": "string",
+            "description": "子代理模型，默认与主代理相同"
+          },
+          "mode": {
+            "type": "string",
+            "description": "sync=等结果(默认) | async=立即返回id",
+            "enum": [
+              "sync",
+              "async"
+            ]
+          },
+          "tools": {
+            "type": "string",
+            "description": "可选：只给子代理这些工具（逗号分隔，如 \"db_query,kb_search\"）。给了就是白名单——其他工具**不出现在它的清单里、也调不动**；不给=继承父级工具面"
+          },
+          "budgetYuan": {
+            "type": "number",
+            "description": "可选：切给这个子代理的额度（元）。只烧这一块，用尽即停并回报；没花完的部分显式回收。不给=沿用父级段阈值"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
     },
-    "required": [
-     "id"
-    ]
-   }
-  },
-  {
-   "name": "subagent_report",
-   "description": "调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论），用于复盘与审计\n何时用：复盘/审计：取子代理全步骤明细\n勿用：只要结论用 subagent_output\n例：subagent_report {id}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "id": {
-      "type": "string",
-      "description": "sub_id"
-     }
+    {
+      "name": "subagent_fanout",
+      "description": "批量编排：对多个条目并行各派一个子代理执行同一任务模板，全部完成后统一汇总（模板中用 {{item}} 占位符代表每条目）。适用于批量处理：如对 10 个文件逐一做同类检查/转换/摘要\n何时用：同模板批量派发（{{item}} 占位）\n勿用：条目少时逐个做\n例：subagent_fanout {items, prompt}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "description": "子代理任务模板，其中 {{item}} 会被替换为具体条目"
+          },
+          "items": {
+            "type": "string",
+            "description": "条目数组的 JSON，如 [\"a.txt\",\"b.txt\"]（或逗号分隔字符串）"
+          },
+          "name": {
+            "type": "string",
+            "description": "子代理名前缀，默认 批量"
+          },
+          "tools": {
+            "type": "string",
+            "description": "可选：每个子代理只给这些工具（逗号分隔）——批量同类检查时用它把工具面收到最小"
+          },
+          "budgetYuan": {
+            "type": "number",
+            "description": "可选：**每个**子代理切多少额度（元）。只烧自己那块，没花完显式回收"
+          }
+        },
+        "required": [
+          "template",
+          "items"
+        ]
+      }
     },
-    "required": [
-     "id"
-    ]
-   }
-  },
-  {
-   "name": "syntax_check",
-   "description": "JS 语法检查（node --check）\n何时用：JS 语法校验（改代码后必跑）\n勿用：跑测试套件用 run_test\n例：syntax_check {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     }
+    {
+      "name": "subagent_fork",
+      "description": "派生一个\"延续本会话上下文\"的子代理（fork）：携带本会话最近的对话历史作为种子，适合让子代理接着当前任务的分析继续深挖/分头论证。mode=async 返回 sub_id（可 subagent_join/Output 收口）；tools/budgetYuan 同 subagent。\n何时用：子代理延续本会话上下文继续深挖\n勿用：全新任务用 subagent\n例：subagent_fork {prompt}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "给子代理的独立任务（它会同时看到本会话最近对话）"
+          },
+          "name": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "sync(默认)=等结果 | async=立即返回id"
+          },
+          "tools": {
+            "type": "string",
+            "description": "可选：只给子代理这些工具（逗号分隔）。给了就是白名单，其他工具不出现也调不动"
+          },
+          "budgetYuan": {
+            "type": "number",
+            "description": "可选：切给这个子代理的额度（元），只烧这块，没花完显式回收"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "undo_checkpoint",
-   "description": "回滚一次自动文件快照：写类工具(write_file/append_file/edit_file/delete_file)执行前系统已自动快照原内容。{list:true} 查看最近快照；{n:1} 回滚最近第 n 次（1=最新）。改坏了代码/文件时用它回到操作前一刻\n何时用：改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）\n勿用：正常小错用 edit_file 直接修\n例：undo_checkpoint {list:true} 或 {n:1}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "list": {
-      "type": "boolean",
-      "description": "true=只列快照不回滚"
-     },
-     "n": {
-      "type": "number",
-      "description": "回滚第 n 新的快照（默认 1=最近一次）"
-     },
-     "convId": {
-      "type": "string",
-      "description": "目标会话 id（默认当前会话）"
-     }
+    {
+      "name": "subagent_join",
+      "description": "等待一个或多个异步子代理全部完成并汇总返回（并行编排收口：一次等完所有 sub_id）。失败的那些也会照出失败原因与已完成步骤。\n何时用：收口多个异步子代理结果\n勿用：单个结果用 subagent_output\n例：subagent_join {ids}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "string",
+            "description": "逗号分隔的 sub_id 列表"
+          }
+        },
+        "required": [
+          "ids"
+        ]
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "update_goal",
-   "description": "更新当前活动目标的进度或状态（progress=进展说明；status=done 完成 / abandoned 放弃）\n何时用：汇报目标进展/标记完成/放弃\n勿用：—\n例：update_goal {progress, status:\"done\"}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "progress": {
-      "type": "string"
-     },
-     "status": {
-      "type": "string",
-      "description": "active|done|abandoned"
-     }
+    {
+      "name": "subagent_list",
+      "description": "列出当前平台内全部子代理及其状态（id/名称/类型 spawn|fork/状态/深度/耗时/额度），用于编排与排查\n何时用：查看全部子代理状态（编排/排查）\n勿用：—\n例：subagent_list {}",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
     },
-    "required": []
-   }
-  },
-  {
-   "name": "view_image",
-   "description": "用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述\n何时用：视觉理解图片内容\n勿用：纯文字提取用 ocr_image\n例：view_image {path}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string",
-      "description": "本地图片路径或 URL"
-     }
+    {
+      "name": "subagent_output",
+      "description": "查询异步子代理(subagent 的 mode=async)的结果：running=仍在执行，done=取回结果，error=失败（会连失败原因、已花额度与已完成步骤一起给出，不要据此丢弃已完成的部分）。未完成就继续查询/等一会。\n何时用：取异步子代理结果（running/done）\n勿用：未完成可稍候重试或 join\n例：subagent_output {id}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "sub_id（subagent async 返回）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
     },
-    "required": [
-     "path"
-    ]
-   }
-  },
-  {
-   "name": "web_search",
-   "description": "联网搜索（SearXNG 自托管）\n何时用：查外部新知/事实/时效信息\n勿用：查内部内容用 grep_search/db_query\n例：web_search {queries:[\"deepseek v4\"]}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "query": {
-      "type": "string"
-     },
-     "limit": {
-      "type": "number"
-     }
+    {
+      "name": "subagent_report",
+      "description": "调取已完成子代理的完整报告（任务、状态、全部工具步骤明细、结论、额度收支），用于复盘与审计\n何时用：复盘/审计：取子代理全步骤明细\n勿用：只要结论用 subagent_output\n例：subagent_report {id}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "sub_id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
     },
-    "required": [
-     "query"
-    ]
-   }
-  },
-  {
-   "name": "write_file",
-   "description": "写入文件（创建/覆盖）\n何时用：新建文件或整体覆盖\n勿用：局部小改用 edit_file；追加用 append_file\n例：write_file {path, content}",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "path": {
-      "type": "string"
-     },
-     "content": {
-      "type": "string"
-     }
+    {
+      "name": "syntax_check",
+      "description": "JS 语法检查（node --check）\n何时用：JS 语法校验（改代码后必跑）\n勿用：跑测试套件用 run_test\n例：syntax_check {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
-    "required": [
-     "path",
-     "content"
-    ]
-   }
-  }
- ],
- "tools": [
-  {
-   "name": "append_file",
-   "permission": "write",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
+    {
+      "name": "undo_checkpoint",
+      "description": "回滚一次自动文件快照：写类工具(write_file/append_file/edit_file/delete_file)执行前系统已自动快照原内容。{list:true} 查看最近快照；{n:1} 回滚最近第 n 次（1=最新）。改坏了代码/文件时用它回到操作前一刻\n何时用：改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）\n勿用：正常小错用 edit_file 直接修\n例：undo_checkpoint {list:true} 或 {n:1}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "list": {
+            "type": "boolean",
+            "description": "true=只列快照不回滚"
+          },
+          "n": {
+            "type": "number",
+            "description": "回滚第 n 新的快照（默认 1=最近一次）"
+          },
+          "convId": {
+            "type": "string",
+            "description": "目标会话 id（默认当前会话）"
+          }
+        },
+        "required": []
+      }
     },
-    "content": {
-     "type": "string",
-     "required": true
+    {
+      "name": "update_goal",
+      "description": "更新当前活动目标的进度或状态（progress=进展说明；status=done 完成 / abandoned 放弃）\n何时用：汇报目标进展/标记完成/放弃\n勿用：—\n例：update_goal {progress, status:\"done\"}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "progress": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "active|done|abandoned"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "view_image",
+      "description": "用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述\n何时用：视觉理解图片内容\n勿用：纯文字提取用 ocr_image\n例：view_image {path}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "本地图片路径或 URL"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "web_search",
+      "description": "联网搜索（SearXNG 自托管）\n何时用：查外部新知/事实/时效信息\n勿用：查内部内容用 grep_search/db_query\n例：web_search {queries:[\"deepseek v4\"]}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "写入文件（创建/覆盖）\n何时用：新建文件或整体覆盖\n勿用：局部小改用 edit_file；追加用 append_file\n例：write_file {path, content}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
     }
-   }
-  },
-  {
-   "name": "ask_user",
-   "permission": "read",
-   "params": {
-    "question": {
-     "type": "string",
-     "required": true,
-     "desc": "要问用户的问题"
+  ],
+  "tools": [
+    {
+      "name": "append_file",
+      "permission": "write",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        },
+        "content": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "options": {
-     "type": "string",
-     "required": true,
-     "desc": "选项：JSON 数组字符串，如 [{\"label\":\"方案A\",\"value\":\"a\"},{\"label\":\"方案B\",\"value\":\"b\"}]；value 会作为返回值"
-    }
-   }
-  },
-  {
-   "name": "conv_summarize",
-   "permission": "read",
-   "params": {
-    "conversationId": {
-     "type": "number",
-     "desc": "目标会话 id，缺省=当前会话"
+    {
+      "name": "ask_user",
+      "permission": "read",
+      "params": {
+        "question": {
+          "type": "string",
+          "required": true,
+          "desc": "要问用户的问题"
+        },
+        "options": {
+          "type": "string",
+          "required": true,
+          "desc": "选项：JSON 数组字符串，如 [{\"label\":\"方案A\",\"value\":\"a\"},{\"label\":\"方案B\",\"value\":\"b\"}]；value 会作为返回值"
+        }
+      }
     },
-    "semantic": {
-     "type": "boolean",
-     "desc": "true=强制 LLM 语义摘要；缺省自动（>80 条消息时）"
-    }
-   }
-  },
-  {
-   "name": "copy_move",
-   "permission": "write",
-   "params": {
-    "src": {
-     "type": "string",
-     "required": true
+    {
+      "name": "conv_summarize",
+      "permission": "read",
+      "params": {
+        "conversationId": {
+          "type": "number",
+          "desc": "目标会话 id，缺省=当前会话"
+        },
+        "semantic": {
+          "type": "boolean",
+          "desc": "true=强制 LLM 语义摘要；缺省自动（>80 条消息时）"
+        }
+      }
     },
-    "dst": {
-     "type": "string",
-     "required": true
+    {
+      "name": "copy_move",
+      "permission": "write",
+      "params": {
+        "src": {
+          "type": "string",
+          "required": true
+        },
+        "dst": {
+          "type": "string",
+          "required": true
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "copy",
+            "move"
+          ],
+          "desc": "copy=复制 | move=移动"
+        }
+      }
     },
-    "mode": {
-     "type": "string",
-     "enum": [
-      "copy",
-      "move"
-     ],
-     "desc": "copy=复制 | move=移动"
-    }
-   }
-  },
-  {
-   "name": "create_contract",
-   "permission": "write",
-   "params": {
-    "goal": {
-     "type": "string",
-     "required": true,
-     "desc": "任务目标（完整、含交付物）"
+    {
+      "name": "create_contract",
+      "permission": "write",
+      "params": {
+        "goal": {
+          "type": "string",
+          "required": true,
+          "desc": "任务目标（完整、含交付物）"
+        },
+        "title": {
+          "type": "string",
+          "desc": "简短标题"
+        },
+        "acceptance": {
+          "type": "string",
+          "desc": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
+        },
+        "boundaries": {
+          "type": "string",
+          "desc": "边界/约束（不许动什么、注意什么）"
+        },
+        "runAt": {
+          "type": "string",
+          "desc": "ISO 时间；空=立即执行"
+        }
+      }
     },
-    "title": {
-     "type": "string",
-     "desc": "简短标题"
+    {
+      "name": "db_query",
+      "permission": "global",
+      "params": {
+        "sql": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "acceptance": {
-     "type": "string",
-     "desc": "验收 shell 命令 JSON 数组字符串，如 [\"grep -q OK /srv/rw-workspace/a.txt\"]；空=仅自检"
+    {
+      "name": "db_write",
+      "permission": "global",
+      "params": {
+        "sql": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "boundaries": {
-     "type": "string",
-     "desc": "边界/约束（不许动什么、注意什么）"
+    {
+      "name": "delete_file",
+      "permission": "full",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "runAt": {
-     "type": "string",
-     "desc": "ISO 时间；空=立即执行"
-    }
-   }
-  },
-  {
-   "name": "db_query",
-   "permission": "global",
-   "params": {
-    "sql": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "db_write",
-   "permission": "global",
-   "params": {
-    "sql": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "delete_file",
-   "permission": "full",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "edit_file",
-   "permission": "write",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true,
-     "desc": "文件路径"
+    {
+      "name": "edit_file",
+      "permission": "write",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true,
+          "desc": "文件路径"
+        },
+        "old": {
+          "type": "string",
+          "required": true,
+          "desc": "要替换的原文（必须完全匹配文件内容）"
+        },
+        "new": {
+          "type": "string",
+          "desc": "新内容（默认删除 old）"
+        }
+      }
     },
-    "old": {
-     "type": "string",
-     "required": true,
-     "desc": "要替换的原文（必须完全匹配文件内容）"
+    {
+      "name": "extract_docx",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "new": {
-     "type": "string",
-     "desc": "新内容（默认删除 old）"
-    }
-   }
-  },
-  {
-   "name": "extract_docx",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "extract_pdf",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "extract_pptx",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "extract_xlsx",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "feishu_bitable_read",
-   "permission": "read",
-   "params": {
-    "appToken": {
-     "type": "string",
-     "required": true
+    {
+      "name": "extract_pdf",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "tableId": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "feishu_doc_read",
-   "permission": "read",
-   "params": {
-    "url": {
-     "type": "string",
-     "required": true,
-     "desc": "飞书文档链接或 ID"
-    }
-   }
-  },
-  {
-   "name": "feishu_sheet_read",
-   "permission": "read",
-   "params": {
-    "url": {
-     "type": "string",
-     "required": true
+    {
+      "name": "extract_pptx",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "range": {
-     "type": "string"
-    }
-   }
-  },
-  {
-   "name": "fetch_spill",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true,
-     "desc": "溢出文件路径（上下文提示里的定位符，\"全文已存 …\"后面的路径）"
+    {
+      "name": "extract_xlsx",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "offset": {
-     "type": "number",
-     "desc": "起始字符偏移（默认 0）"
+    {
+      "name": "feishu_bitable_read",
+      "permission": "read",
+      "params": {
+        "appToken": {
+          "type": "string",
+          "required": true
+        },
+        "tableId": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "length": {
-     "type": "number",
-     "desc": "读取字符数（默认 20000）"
-    }
-   }
-  },
-  {
-   "name": "fetch_url",
-   "permission": "read",
-   "params": {
-    "url": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "find_file",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": false
+    {
+      "name": "feishu_doc_read",
+      "permission": "read",
+      "params": {
+        "url": {
+          "type": "string",
+          "required": true,
+          "desc": "飞书文档链接或 ID"
+        }
+      }
     },
-    "name": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "finish_task",
-   "permission": "read",
-   "params": {
-    "summary": {
-     "type": "string",
-     "required": true,
-     "desc": "完成总结（做了什么、结果如何）"
+    {
+      "name": "feishu_sheet_read",
+      "permission": "read",
+      "params": {
+        "url": {
+          "type": "string",
+          "required": true
+        },
+        "range": {
+          "type": "string"
+        }
+      }
     },
-    "selfCheck": {
-     "type": "string",
-     "desc": "对照验收标准的自检说明"
-    }
-   }
-  },
-  {
-   "name": "get_goal",
-   "permission": "read",
-   "params": {}
-  },
-  {
-   "name": "git_branch",
-   "permission": "write",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": true
+    {
+      "name": "fetch_spill",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true,
+          "desc": "溢出文件路径（上下文提示里的定位符，\"全文已存 …\"后面的路径）"
+        },
+        "offset": {
+          "type": "number",
+          "desc": "起始字符偏移（默认 0）"
+        },
+        "length": {
+          "type": "number",
+          "desc": "读取字符数（默认 20000）"
+        }
+      }
     },
-    "action": {
-     "type": "string",
-     "enum": [
-      "list",
-      "create",
-      "checkout"
-     ]
+    {
+      "name": "fetch_url",
+      "permission": "read",
+      "params": {
+        "url": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "branch": {
-     "type": "string"
-    }
-   }
-  },
-  {
-   "name": "git_commit",
-   "permission": "write",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": true
+    {
+      "name": "find_file",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "message": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "git_pull_push",
-   "permission": "write",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": true
+    {
+      "name": "finish_task",
+      "permission": "read",
+      "params": {
+        "summary": {
+          "type": "string",
+          "required": true,
+          "desc": "完成总结（做了什么、结果如何）"
+        },
+        "selfCheck": {
+          "type": "string",
+          "desc": "对照验收标准的自检说明"
+        }
+      }
     },
-    "action": {
-     "type": "string"
-    }
-   }
-  },
-  {
-   "name": "git_status",
-   "permission": "read",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "grep_search",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": false
+    {
+      "name": "get_goal",
+      "permission": "read",
+      "params": {}
     },
-    "pattern": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "hooks_list",
-   "permission": "read",
-   "params": {}
-  },
-  {
-   "name": "intake_submit",
-   "permission": "write",
-   "params": {
-    "assetType": {
-     "type": "string",
-     "required": true,
-     "enum": [
-      "plugin",
-      "app",
-      "shell"
-     ],
-     "desc": "资产类型：plugin 插件 / app 应用 / shell 壳"
+    {
+      "name": "git_branch",
+      "permission": "write",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": true
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "create",
+            "checkout"
+          ]
+        },
+        "branch": {
+          "type": "string"
+        }
+      }
     },
-    "assetKey": {
-     "type": "string",
-     "required": false,
-     "desc": "关联扩展资产 key（升级既有资产时填；新资产留空=新立项）"
+    {
+      "name": "git_commit",
+      "permission": "write",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "scene": {
-     "type": "string",
-     "required": true,
-     "desc": "触发场景（何时要用）"
+    {
+      "name": "git_pull_push",
+      "permission": "write",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": true
+        },
+        "action": {
+          "type": "string"
+        }
+      }
     },
-    "effect": {
-     "type": "string",
-     "required": true,
-     "desc": "期望效果"
+    {
+      "name": "git_status",
+      "permission": "read",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "shells": {
-     "type": "string",
-     "required": true,
-     "desc": "涉及壳（如 code / 全部）"
+    {
+      "name": "grep_search",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": false
+        },
+        "pattern": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "actionType": {
-     "type": "string",
-     "required": true,
-     "desc": "代码动作类型（新增/升级/修 bug）"
-    }
-   }
-  },
-  {
-   "name": "job_list",
-   "permission": "full",
-   "params": {}
-  },
-  {
-   "name": "job_output",
-   "permission": "full",
-   "params": {
-    "jobId": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "kb_add",
-   "permission": "read",
-   "params": {
-    "title": {
-     "type": "string",
-     "required": true
+    {
+      "name": "hooks_list",
+      "permission": "read",
+      "params": {}
     },
-    "body": {
-     "type": "string"
+    {
+      "name": "intake_submit",
+      "permission": "write",
+      "params": {
+        "assetType": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "plugin",
+            "app",
+            "shell"
+          ],
+          "desc": "资产类型：plugin 插件 / app 应用 / shell 壳"
+        },
+        "assetKey": {
+          "type": "string",
+          "required": false,
+          "desc": "关联扩展资产 key（升级既有资产时填；新资产留空=新立项）"
+        },
+        "scene": {
+          "type": "string",
+          "required": true,
+          "desc": "触发场景（何时要用）"
+        },
+        "effect": {
+          "type": "string",
+          "required": true,
+          "desc": "期望效果"
+        },
+        "shells": {
+          "type": "string",
+          "required": true,
+          "desc": "涉及壳（如 code / 全部）"
+        },
+        "actionType": {
+          "type": "string",
+          "required": true,
+          "desc": "代码动作类型（新增/升级/修 bug）"
+        }
+      }
     },
-    "scope": {
-     "type": "string",
-     "enum": [
-      "global",
-      "shell",
-      "conv"
-     ],
-     "desc": "global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)"
+    {
+      "name": "job_list",
+      "permission": "full",
+      "params": {}
     },
-    "kind": {
-     "type": "string",
-     "enum": [
-      "fact",
-      "progress",
-      "guide",
-      "skill",
-      "lesson"
-     ],
-     "desc": "分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索"
+    {
+      "name": "job_output",
+      "permission": "full",
+      "params": {
+        "jobId": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "overwrite": {
-     "type": "boolean",
-     "desc": "同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖"
-    }
-   }
-  },
-  {
-   "name": "kb_del",
-   "permission": "write",
-   "params": {
-    "id": {
-     "type": "number",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "kb_search",
-   "permission": "read",
-   "params": {
-    "q": {
-     "type": "string",
-     "required": true,
-     "desc": "关键词"
-    }
-   }
-  },
-  {
-   "name": "kill_process",
-   "permission": "full",
-   "params": {
-    "pid": {
-     "type": "number",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "list_dir",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": false,
-     "desc": "默认工作区"
-    }
-   }
-  },
-  {
-   "name": "mkdir",
-   "permission": "write",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "ocr_image",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true,
-     "desc": "图片文件路径或 URL"
-    }
-   }
-  },
-  {
-   "name": "plan_done",
-   "permission": "read",
-   "params": {
-    "index": {
-     "type": "number",
-     "required": true,
-     "desc": "步骤序号（从 1 开始）"
-    }
-   }
-  },
-  {
-   "name": "plan_tasks",
-   "permission": "read",
-   "params": {
-    "tasks": {
-     "type": "string",
-     "required": true,
-     "desc": "任务步骤列表，用换行或分号分隔"
-    }
-   }
-  },
-  {
-   "name": "ralph",
-   "permission": "read",
-   "params": {
-    "objective": {
-     "type": "string",
-     "required": true,
-     "desc": "不可变的目标"
+    {
+      "name": "kb_add",
+      "permission": "read",
+      "params": {
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "body": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "shell",
+            "conv"
+          ],
+          "desc": "global=全会话 | shell=当前壳(需会话在壳内,默认壳不可用) | conv=仅当前会话(默认)"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "fact",
+            "progress",
+            "guide",
+            "skill",
+            "lesson"
+          ],
+          "desc": "分类：fact 运行事实(默认)/progress 进化进度/guide 平台规范/skill 技能/lesson 错题本——仅表达分类，不影响可见与检索"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "desc": "同名且新旧内容差异显著时默认拒绝覆盖（防误覆盖高价值旧记忆），置 true 显式确认覆盖"
+        }
+      }
     },
-    "rounds": {
-     "type": "number",
-     "desc": "轮次上限（默认 5，最大 10）"
-    }
-   }
-  },
-  {
-   "name": "read_file",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true,
-     "desc": "文件绝对路径"
+    {
+      "name": "kb_del",
+      "permission": "write",
+      "params": {
+        "id": {
+          "type": "number",
+          "required": true
+        }
+      }
     },
-    "numbered": {
-     "type": "boolean",
-     "desc": "true=输出带行号前缀"
-    }
-   }
-  },
-  {
-   "name": "read_file_range",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
+    {
+      "name": "kb_search",
+      "permission": "read",
+      "params": {
+        "q": {
+          "type": "string",
+          "required": true,
+          "desc": "关键词"
+        }
+      }
     },
-    "offset": {
-     "type": "number"
+    {
+      "name": "kill_process",
+      "permission": "full",
+      "params": {
+        "pid": {
+          "type": "number",
+          "required": true
+        }
+      }
     },
-    "length": {
-     "type": "number"
-    }
-   }
-  },
-  {
-   "name": "reload_platform",
-   "permission": "full",
-   "params": {
-    "note": {
-     "type": "string",
-     "desc": "改动说明（改了什么，便于审计回看）"
-    }
-   }
-  },
-  {
-   "name": "repo_map",
-   "permission": "read",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": false,
-     "desc": "目标目录，缺省=当前工作区"
-    }
-   }
-  },
-  {
-   "name": "run_command",
-   "permission": "full",
-   "params": {
-    "cmd": {
-     "type": "string",
-     "required": true,
-     "desc": "命令（如 npm install）"
+    {
+      "name": "list_dir",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": false,
+          "desc": "默认工作区"
+        }
+      }
     },
-    "timeout": {
-     "type": "number",
-     "desc": "超时秒数 5-300，默认 30"
-    }
-   }
-  },
-  {
-   "name": "run_long_task",
-   "permission": "full",
-   "params": {
-    "cmd": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "run_test",
-   "permission": "write",
-   "params": {
-    "dir": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "set_goal",
-   "permission": "read",
-   "params": {
-    "objective": {
-     "type": "string",
-     "required": true,
-     "desc": "目标描述"
-    }
-   }
-  },
-  {
-   "name": "set_limits",
-   "permission": "write",
-   "params": {
-    "minutes": {
-     "type": "number",
-     "desc": "时间预算(分钟)，0=不限"
+    {
+      "name": "mkdir",
+      "permission": "write",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
-    "rounds": {
-     "type": "number",
-     "desc": "轮次上限，0=不限"
+    {
+      "name": "ocr_image",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true,
+          "desc": "图片文件路径或 URL"
+        }
+      }
     },
-    "loop": {
-     "type": "number",
-     "desc": "循环检测连续次数，0=关闭"
+    {
+      "name": "plan_done",
+      "permission": "read",
+      "params": {
+        "index": {
+          "type": "number",
+          "required": true,
+          "desc": "步骤序号（从 1 开始）"
+        }
+      }
     },
-    "parallel": {
-     "type": "number",
-     "desc": "并行工具数，0=串行"
+    {
+      "name": "plan_tasks",
+      "permission": "read",
+      "params": {
+        "tasks": {
+          "type": "string",
+          "required": true,
+          "desc": "任务步骤列表，用换行或分号分隔"
+        }
+      }
+    },
+    {
+      "name": "ralph",
+      "permission": "read",
+      "params": {
+        "objective": {
+          "type": "string",
+          "required": true,
+          "desc": "不可变的目标"
+        },
+        "rounds": {
+          "type": "number",
+          "desc": "轮次上限（默认 5，最大 10）"
+        }
+      }
+    },
+    {
+      "name": "read_file",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true,
+          "desc": "文件绝对路径"
+        },
+        "numbered": {
+          "type": "boolean",
+          "desc": "true=输出带行号前缀"
+        }
+      }
+    },
+    {
+      "name": "read_file_range",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        },
+        "offset": {
+          "type": "number"
+        },
+        "length": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "name": "reload_platform",
+      "permission": "full",
+      "params": {
+        "note": {
+          "type": "string",
+          "desc": "改动说明（改了什么，便于审计回看）"
+        }
+      }
+    },
+    {
+      "name": "repo_map",
+      "permission": "read",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": false,
+          "desc": "目标目录，缺省=当前工作区"
+        }
+      }
+    },
+    {
+      "name": "run_command",
+      "permission": "full",
+      "params": {
+        "cmd": {
+          "type": "string",
+          "required": true,
+          "desc": "命令（如 npm install）"
+        },
+        "timeout": {
+          "type": "number",
+          "desc": "超时秒数 5-300，默认 30"
+        }
+      }
+    },
+    {
+      "name": "run_long_task",
+      "permission": "full",
+      "params": {
+        "cmd": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "run_test",
+      "permission": "write",
+      "params": {
+        "dir": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "set_goal",
+      "permission": "read",
+      "params": {
+        "objective": {
+          "type": "string",
+          "required": true,
+          "desc": "目标描述"
+        }
+      }
+    },
+    {
+      "name": "set_limits",
+      "permission": "write",
+      "params": {
+        "minutes": {
+          "type": "number",
+          "desc": "时间预算(分钟)，0=不限"
+        },
+        "rounds": {
+          "type": "number",
+          "desc": "轮次上限，0=不限"
+        },
+        "loop": {
+          "type": "number",
+          "desc": "循环检测连续次数，0=关闭"
+        },
+        "parallel": {
+          "type": "number",
+          "desc": "并行工具数，0=串行"
+        }
+      }
+    },
+    {
+      "name": "skill_load",
+      "permission": "read",
+      "params": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "desc": "技能目录名（skills_list 查得）"
+        }
+      }
+    },
+    {
+      "name": "skill_save",
+      "permission": "write",
+      "params": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "desc": "一句话说明何时用该技能"
+        },
+        "content": {
+          "type": "string",
+          "required": true,
+          "desc": "SKILL.md 正文指令"
+        }
+      }
+    },
+    {
+      "name": "skills_list",
+      "permission": "read",
+      "params": {}
+    },
+    {
+      "name": "subagent",
+      "permission": "read",
+      "params": {
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "desc": "给子代理的完整任务指令（自包含，含目标与验收标准）"
+        },
+        "name": {
+          "type": "string",
+          "desc": "子代理名称（用于展示，默认 子代理）"
+        },
+        "model": {
+          "type": "string",
+          "desc": "子代理模型，默认与主代理相同"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "sync",
+            "async"
+          ],
+          "desc": "sync=等结果(默认) | async=立即返回id"
+        },
+        "tools": {
+          "type": "string",
+          "desc": "可选：只给子代理这些工具（逗号分隔，如 \"db_query,kb_search\"）。给了就是白名单——其他工具**不出现在它的清单里、也调不动**；不给=继承父级工具面"
+        },
+        "budgetYuan": {
+          "type": "number",
+          "desc": "可选：切给这个子代理的额度（元）。只烧这一块，用尽即停并回报；没花完的部分显式回收。不给=沿用父级段阈值"
+        }
+      }
+    },
+    {
+      "name": "subagent_fanout",
+      "permission": "read",
+      "params": {
+        "template": {
+          "type": "string",
+          "required": true,
+          "desc": "子代理任务模板，其中 {{item}} 会被替换为具体条目"
+        },
+        "items": {
+          "type": "string",
+          "required": true,
+          "desc": "条目数组的 JSON，如 [\"a.txt\",\"b.txt\"]（或逗号分隔字符串）"
+        },
+        "name": {
+          "type": "string",
+          "desc": "子代理名前缀，默认 批量"
+        },
+        "tools": {
+          "type": "string",
+          "desc": "可选：每个子代理只给这些工具（逗号分隔）——批量同类检查时用它把工具面收到最小"
+        },
+        "budgetYuan": {
+          "type": "number",
+          "desc": "可选：**每个**子代理切多少额度（元）。只烧自己那块，没花完显式回收"
+        }
+      }
+    },
+    {
+      "name": "subagent_fork",
+      "permission": "read",
+      "params": {
+        "prompt": {
+          "type": "string",
+          "required": true,
+          "desc": "给子代理的独立任务（它会同时看到本会话最近对话）"
+        },
+        "name": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "desc": "sync(默认)=等结果 | async=立即返回id"
+        },
+        "tools": {
+          "type": "string",
+          "desc": "可选：只给子代理这些工具（逗号分隔）。给了就是白名单，其他工具不出现也调不动"
+        },
+        "budgetYuan": {
+          "type": "number",
+          "desc": "可选：切给这个子代理的额度（元），只烧这块，没花完显式回收"
+        }
+      }
+    },
+    {
+      "name": "subagent_join",
+      "permission": "read",
+      "params": {
+        "ids": {
+          "type": "string",
+          "required": true,
+          "desc": "逗号分隔的 sub_id 列表"
+        }
+      }
+    },
+    {
+      "name": "subagent_list",
+      "permission": "read",
+      "params": {}
+    },
+    {
+      "name": "subagent_output",
+      "permission": "read",
+      "params": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "desc": "sub_id（subagent async 返回）"
+        }
+      }
+    },
+    {
+      "name": "subagent_report",
+      "permission": "read",
+      "params": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "desc": "sub_id"
+        }
+      }
+    },
+    {
+      "name": "syntax_check",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "undo_checkpoint",
+      "permission": "write",
+      "params": {
+        "list": {
+          "type": "boolean",
+          "required": false,
+          "desc": "true=只列快照不回滚"
+        },
+        "n": {
+          "type": "number",
+          "required": false,
+          "desc": "回滚第 n 新的快照（默认 1=最近一次）"
+        },
+        "convId": {
+          "type": "string",
+          "required": false,
+          "desc": "目标会话 id（默认当前会话）"
+        }
+      }
+    },
+    {
+      "name": "update_goal",
+      "permission": "read",
+      "params": {
+        "progress": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "desc": "active|done|abandoned"
+        }
+      }
+    },
+    {
+      "name": "view_image",
+      "permission": "read",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true,
+          "desc": "本地图片路径或 URL"
+        }
+      }
+    },
+    {
+      "name": "web_search",
+      "permission": "read",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true
+        },
+        "limit": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "name": "write_file",
+      "permission": "write",
+      "params": {
+        "path": {
+          "type": "string",
+          "required": true
+        },
+        "content": {
+          "type": "string",
+          "required": true
+        }
+      }
     }
-   }
-  },
-  {
-   "name": "skill_load",
-   "permission": "read",
-   "params": {
-    "name": {
-     "type": "string",
-     "required": true,
-     "desc": "技能目录名（skills_list 查得）"
-    }
-   }
-  },
-  {
-   "name": "skill_save",
-   "permission": "write",
-   "params": {
-    "name": {
-     "type": "string",
-     "required": true
+  ],
+  "meta": {
+    "append_file": {
+      "tier": "core",
+      "when": "文件末尾追加（日志/渐进内容）",
+      "not": "覆盖/创建用 write_file",
+      "ex": "append_file {path, content}"
     },
-    "description": {
-     "type": "string",
-     "desc": "一句话说明何时用该技能"
+    "ask_user": {
+      "tier": "core",
+      "when": "需要用户拍板/方案选择",
+      "not": "可自行查证的事实不要问",
+      "ex": "ask_user {question, options}"
     },
-    "content": {
-     "type": "string",
-     "required": true,
-     "desc": "SKILL.md 正文指令"
-    }
-   }
-  },
-  {
-   "name": "skills_list",
-   "permission": "read",
-   "params": {}
-  },
-  {
-   "name": "subagent",
-   "permission": "read",
-   "params": {
-    "prompt": {
-     "type": "string",
-     "required": true,
-     "desc": "给子代理的完整任务指令（自包含，含目标与验收标准）"
+    "conv_summarize": {
+      "tier": "pro",
+      "when": "长会话收尾/跨周 resume 前归档摘要（已注册）",
+      "not": "短会话不需要",
+      "ex": "conv_summarize {}"
     },
-    "name": {
-     "type": "string",
-     "desc": "子代理名称（用于展示，默认 子代理）"
+    "copy_move": {
+      "tier": "core",
+      "when": "复制或移动文件/目录",
+      "not": "删除用 delete_file",
+      "ex": "copy_move {src, dst, mode:\"copy\"}"
     },
-    "model": {
-     "type": "string",
-     "desc": "子代理模型，默认与主代理相同"
+    "create_contract": {
+      "tier": "pro",
+      "when": "立项：验收先成文，驱动器无人值守执行",
+      "not": "小任务或讨论中不要用",
+      "ex": "create_contract {goal, acceptance, boundaries}"
     },
-    "mode": {
-     "type": "string",
-     "enum": [
-      "sync",
-      "async"
-     ],
-     "desc": "sync=等结果(默认) | async=立即返回id"
-    }
-   }
-  },
-  {
-   "name": "subagent_fanout",
-   "permission": "read",
-   "params": {
-    "template": {
-     "type": "string",
-     "required": true,
-     "desc": "子代理任务模板，其中 {{item}} 会被替换为具体条目"
+    "db_query": {
+      "tier": "pro",
+      "when": "只读查库（单条 SELECT；用量/会话/工具统计）",
+      "not": "写库用 db_write；SHOW/多语句不支持；表列结构先查 information_schema，勿猜列名",
+      "ex": "db_query {sql:\"SELECT COUNT(*) FROM usage_stats\"}"
     },
-    "items": {
-     "type": "string",
-     "required": true,
-     "desc": "条目数组的 JSON，如 [\"a.txt\",\"b.txt\"]（或逗号分隔字符串）"
+    "db_write": {
+      "tier": "expert",
+      "when": "数据库写入/迁移（非 SELECT）",
+      "not": "读用 db_query；写前先 SELECT 复核影响面",
+      "ex": "db_write {sql, params}"
     },
-    "name": {
-     "type": "string",
-     "desc": "子代理名前缀，默认 批量"
-    }
-   }
-  },
-  {
-   "name": "subagent_fork",
-   "permission": "read",
-   "params": {
-    "prompt": {
-     "type": "string",
-     "required": true,
-     "desc": "给子代理的独立任务（它会同时看到本会话最近对话）"
+    "delete_file": {
+      "tier": "expert",
+      "when": "删除文件/目录（确认过；高危留痕）",
+      "not": "保留内容用 copy_move 移走",
+      "ex": "delete_file {path}"
     },
-    "name": {
-     "type": "string"
+    "edit_file": {
+      "tier": "core",
+      "when": "精确局部替换（old 需与文件内容唯一匹配）",
+      "not": "未先 read_file 不要盲改；大段重写用 write_file",
+      "ex": "edit_file {path, old, new}"
     },
-    "mode": {
-     "type": "string",
-     "desc": "sync(默认)=等结果 | async=立即返回id"
-    }
-   }
-  },
-  {
-   "name": "subagent_join",
-   "permission": "read",
-   "params": {
-    "ids": {
-     "type": "string",
-     "required": true,
-     "desc": "逗号分隔的 sub_id 列表"
-    }
-   }
-  },
-  {
-   "name": "subagent_list",
-   "permission": "read",
-   "params": {}
-  },
-  {
-   "name": "subagent_output",
-   "permission": "read",
-   "params": {
-    "id": {
-     "type": "string",
-     "required": true,
-     "desc": "sub_id（subagent async 返回）"
-    }
-   }
-  },
-  {
-   "name": "subagent_report",
-   "permission": "read",
-   "params": {
-    "id": {
-     "type": "string",
-     "required": true,
-     "desc": "sub_id"
-    }
-   }
-  },
-  {
-   "name": "syntax_check",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
-    }
-   }
-  },
-  {
-   "name": "undo_checkpoint",
-   "permission": "write",
-   "params": {
-    "list": {
-     "type": "boolean",
-     "required": false,
-     "desc": "true=只列快照不回滚"
+    "extract_docx": {
+      "tier": "pro",
+      "when": "解析 Word 文本",
+      "not": "文本文件用 read_file",
+      "ex": "extract_docx {path}"
     },
-    "n": {
-     "type": "number",
-     "required": false,
-     "desc": "回滚第 n 新的快照（默认 1=最近一次）"
+    "extract_pdf": {
+      "tier": "pro",
+      "when": "解析 PDF 文本",
+      "not": "文本文件用 read_file",
+      "ex": "extract_pdf {path}"
     },
-    "convId": {
-     "type": "string",
-     "required": false,
-     "desc": "目标会话 id（默认当前会话）"
-    }
-   }
-  },
-  {
-   "name": "update_goal",
-   "permission": "read",
-   "params": {
-    "progress": {
-     "type": "string"
+    "extract_pptx": {
+      "tier": "pro",
+      "when": "解析 PPT 文本",
+      "not": "文本文件用 read_file",
+      "ex": "extract_pptx {path}"
     },
-    "status": {
-     "type": "string",
-     "desc": "active|done|abandoned"
-    }
-   }
-  },
-  {
-   "name": "view_image",
-   "permission": "read",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true,
-     "desc": "本地图片路径或 URL"
-    }
-   }
-  },
-  {
-   "name": "web_search",
-   "permission": "read",
-   "params": {
-    "query": {
-     "type": "string",
-     "required": true
+    "extract_xlsx": {
+      "tier": "pro",
+      "when": "解析 Excel 内容",
+      "not": "文本文件用 read_file",
+      "ex": "extract_xlsx {path}"
     },
-    "limit": {
-     "type": "number"
-    }
-   }
-  },
-  {
-   "name": "write_file",
-   "permission": "write",
-   "params": {
-    "path": {
-     "type": "string",
-     "required": true
+    "feishu_bitable_read": {
+      "tier": "pro",
+      "when": "读飞书多维表格",
+      "not": "—",
+      "ex": "feishu_bitable_read {appToken, tableId}"
     },
-    "content": {
-     "type": "string",
-     "required": true
+    "feishu_doc_read": {
+      "tier": "pro",
+      "when": "读飞书云文档/知识库内容",
+      "not": "非飞书用 fetch_url",
+      "ex": "feishu_doc_read {url}"
+    },
+    "feishu_sheet_read": {
+      "tier": "pro",
+      "when": "读飞书电子表格",
+      "not": "—",
+      "ex": "feishu_sheet_read {url, range}"
+    },
+    "fetch_spill": {
+      "tier": "core",
+      "when": "上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文",
+      "not": "读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读",
+      "ex": "fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}"
+    },
+    "fetch_url": {
+      "tier": "core",
+      "when": "抓取指定网页正文",
+      "not": "找网页用 web_search",
+      "ex": "fetch_url {url}"
+    },
+    "find_file": {
+      "tier": "core",
+      "when": "按文件名子串定位（免通配符）",
+      "not": "按内容搜索用 grep_search",
+      "ex": "find_file {path, name:\"agent.js\"}"
+    },
+    "finish_task": {
+      "tier": "core",
+      "when": "提测：对照验收自检后提交\"完成候选\"",
+      "not": "未完成/未验证禁止调用",
+      "ex": "finish_task {summary, selfCheck}"
+    },
+    "get_goal": {
+      "tier": "core",
+      "when": "查看当前活动目标与进度",
+      "not": "—",
+      "ex": "get_goal {}"
+    },
+    "git_branch": {
+      "tier": "pro",
+      "when": "分支 list/create/checkout",
+      "not": "推送用 git_pull_push",
+      "ex": "git_branch {dir, action:\"list\"}"
+    },
+    "git_commit": {
+      "tier": "pro",
+      "when": "小步提交（自改纪律：改前先提交当前状态）",
+      "not": "未验证代码不提交",
+      "ex": "git_commit {dir, message}"
+    },
+    "git_pull_push": {
+      "tier": "expert",
+      "when": "拉取/推送远程（push 前先 pull 防分叉）",
+      "not": "本地提交用 git_commit",
+      "ex": "git_pull_push {dir, action:\"push\"}"
+    },
+    "git_status": {
+      "tier": "pro",
+      "when": "提交前查看工作区状态",
+      "not": "看提交历史用 run_command git log",
+      "ex": "git_status {dir}"
+    },
+    "grep_search": {
+      "tier": "core",
+      "when": "按正则搜文件内容（代码/文本文件）",
+      "not": "按文件名用 find_file；查库用 db_query",
+      "ex": "grep_search {path, pattern:\"ensureRun\"}"
+    },
+    "hooks_list": {
+      "tier": "core",
+      "when": "查看已注册 hooks（工具被\"已被 hook 拦截\"时排查是哪个纪律钩子）",
+      "not": "清除/调整钩子属平台管理，模型侧只读",
+      "ex": "hooks_list {}"
+    },
+    "intake_submit": {
+      "tier": "pro",
+      "when": "intake 技能（plugin/app/shell-dev-intake）采集齐 触发场景/期望效果/涉及壳/代码动作类型 后提交开发需求",
+      "not": "字段未齐/未载入对应 intake 技能（会被硬闸拦）；未审批不得自行开发",
+      "ex": "intake_submit {assetType:\"plugin\", scene, effect, shells, actionType}"
+    },
+    "job_list": {
+      "tier": "pro",
+      "when": "列出后台任务状态",
+      "not": "—",
+      "ex": "job_list {}"
+    },
+    "job_output": {
+      "tier": "pro",
+      "when": "读后台任务输出（最近 8000 字符）",
+      "not": "已完成的结果在任务返回里",
+      "ex": "job_output {jobId}"
+    },
+    "kb_add": {
+      "tier": "pro",
+      "when": "沉淀\"记住/以后都按…\"（global 或本会话）",
+      "not": "复盘条目标题加\"打回复盘:\"前缀（度量）",
+      "ex": "kb_add {title, body, scope:\"global\"}"
+    },
+    "kb_del": {
+      "tier": "pro",
+      "when": "删除错误/过期记忆",
+      "not": "—",
+      "ex": "kb_del {id}"
+    },
+    "kb_search": {
+      "tier": "pro",
+      "when": "找记忆/历史决策/用户偏好（先搜再用）",
+      "not": "—",
+      "ex": "kb_search {q}"
+    },
+    "kill_process": {
+      "tier": "expert",
+      "when": "终止失控/废弃后台任务",
+      "not": "正常任务等它自己结束",
+      "ex": "kill_process {jobId}"
+    },
+    "list_dir": {
+      "tier": "core",
+      "when": "列目录看结构、确认路径存在",
+      "not": "递归找文件用 find_file",
+      "ex": "list_dir {path}"
+    },
+    "mkdir": {
+      "tier": "core",
+      "when": "创建目录",
+      "not": "创建文件用 write_file",
+      "ex": "mkdir {path}"
+    },
+    "ocr_image": {
+      "tier": "pro",
+      "when": "图片含文字需提取（截图/扫描件）",
+      "not": "图片理解用 view_image",
+      "ex": "ocr_image {path}"
+    },
+    "plan_done": {
+      "tier": "core",
+      "when": "标记清单第 N 步已完成（从 1 开始）",
+      "not": "全部完成后用 finish_task 提测",
+      "ex": "plan_done {index:1}"
+    },
+    "plan_tasks": {
+      "tier": "core",
+      "when": "多步复杂任务先列清单（>3 步）",
+      "not": "单步小任务直接做",
+      "ex": "plan_tasks {tasks:\"步骤列表\"}"
+    },
+    "ralph": {
+      "tier": "pro",
+      "when": "难题多轮\"全新视角\"逼近（每轮无历史）",
+      "not": "常规任务别用（成本高）",
+      "ex": "ralph {objective}"
+    },
+    "read_file": {
+      "tier": "core",
+      "when": "读文本内容、改前先读、查实现细节",
+      "not": "大文件超限用 read_file_range；列目录用 list_dir",
+      "ex": "read_file {path:\"/srv/harness-workbench/server/agent.js\"}"
+    },
+    "read_file_range": {
+      "tier": "core",
+      "when": "大文件按 offset/length 分段读",
+      "not": "小文件直接用 read_file",
+      "ex": "read_file_range {path, offset:10000, length:5000}"
+    },
+    "reload_platform": {
+      "tier": "expert",
+      "when": "自改代码生效（先 syntax_check+git commit）",
+      "not": "仅改配置/数据不需要",
+      "ex": "reload_platform {}"
+    },
+    "repo_map": {
+      "tier": "core",
+      "when": "大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）",
+      "not": "小目录直接 list_dir；找符号位置用 grep_search",
+      "ex": "repo_map {dir:\"/srv/harness-workbench\"}"
+    },
+    "run_command": {
+      "tier": "expert",
+      "when": "无专门工具覆盖的系统操作（npm/部署/systemctl）",
+      "not": "cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具",
+      "ex": "run_command {command:\"npm install\"}"
+    },
+    "run_long_task": {
+      "tier": "pro",
+      "when": "长命令后台执行不阻塞",
+      "not": "短命令用 run_command",
+      "ex": "run_long_task {command}"
+    },
+    "run_test": {
+      "tier": "core",
+      "when": "运行项目测试套件",
+      "not": "单文件语法用 syntax_check",
+      "ex": "run_test {dir}"
+    },
+    "set_goal": {
+      "tier": "core",
+      "when": "用户要求持续推进的跨轮大目标",
+      "not": "一次性任务用 plan_tasks",
+      "ex": "set_goal {objective}"
+    },
+    "set_limits": {
+      "tier": "expert",
+      "when": "用户要求调整护栏（0=不限；先解释再改）",
+      "not": "未经请求不要自行放宽",
+      "ex": "set_limits {minutes:0}"
+    },
+    "skill_load": {
+      "tier": "pro",
+      "when": "载入技能（全文入系统提示，会话内持续生效）",
+      "not": "一次性约定用 kb_add",
+      "ex": "skill_load {name}"
+    },
+    "skill_save": {
+      "tier": "pro",
+      "when": "新建/更新技能（复盘结论固化）",
+      "not": "零散经验用 kb_add",
+      "ex": "skill_save {name, description, body}"
+    },
+    "skills_list": {
+      "tier": "pro",
+      "when": "用户提\"技能/方法\"时先查可用技能",
+      "not": "已确定直接 skill_load",
+      "ex": "skills_list {}"
+    },
+    "subagent": {
+      "tier": "pro",
+      "when": "委派独立子任务（隔离上下文）",
+      "not": "小查询自己做；批量用 subagent_fanout",
+      "ex": "subagent {prompt, mode:\"sync\"}"
+    },
+    "subagent_fanout": {
+      "tier": "pro",
+      "when": "同模板批量派发（{{item}} 占位）",
+      "not": "条目少时逐个做",
+      "ex": "subagent_fanout {items, prompt}"
+    },
+    "subagent_fork": {
+      "tier": "pro",
+      "when": "子代理延续本会话上下文继续深挖",
+      "not": "全新任务用 subagent",
+      "ex": "subagent_fork {prompt}"
+    },
+    "subagent_join": {
+      "tier": "pro",
+      "when": "收口多个异步子代理结果",
+      "not": "单个结果用 subagent_output",
+      "ex": "subagent_join {ids}"
+    },
+    "subagent_list": {
+      "tier": "pro",
+      "when": "查看全部子代理状态（编排/排查）",
+      "not": "—",
+      "ex": "subagent_list {}"
+    },
+    "subagent_output": {
+      "tier": "pro",
+      "when": "取异步子代理结果（running/done）",
+      "not": "未完成可稍候重试或 join",
+      "ex": "subagent_output {id}"
+    },
+    "subagent_report": {
+      "tier": "pro",
+      "when": "复盘/审计：取子代理全步骤明细",
+      "not": "只要结论用 subagent_output",
+      "ex": "subagent_report {id}"
+    },
+    "syntax_check": {
+      "tier": "core",
+      "when": "JS 语法校验（改代码后必跑）",
+      "not": "跑测试套件用 run_test",
+      "ex": "syntax_check {path}"
+    },
+    "undo_checkpoint": {
+      "tier": "core",
+      "when": "改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）",
+      "not": "正常小错用 edit_file 直接修",
+      "ex": "undo_checkpoint {list:true} 或 {n:1}"
+    },
+    "update_goal": {
+      "tier": "core",
+      "when": "汇报目标进展/标记完成/放弃",
+      "not": "—",
+      "ex": "update_goal {progress, status:\"done\"}"
+    },
+    "view_image": {
+      "tier": "pro",
+      "when": "视觉理解图片内容",
+      "not": "纯文字提取用 ocr_image",
+      "ex": "view_image {path}"
+    },
+    "web_search": {
+      "tier": "core",
+      "when": "查外部新知/事实/时效信息",
+      "not": "查内部内容用 grep_search/db_query",
+      "ex": "web_search {queries:[\"deepseek v4\"]}"
+    },
+    "write_file": {
+      "tier": "core",
+      "when": "新建文件或整体覆盖",
+      "not": "局部小改用 edit_file；追加用 append_file",
+      "ex": "write_file {path, content}"
     }
-   }
-  }
- ],
- "meta": {
-  "append_file": {
-   "tier": "core",
-   "when": "文件末尾追加（日志/渐进内容）",
-   "not": "覆盖/创建用 write_file",
-   "ex": "append_file {path, content}"
   },
-  "ask_user": {
-   "tier": "core",
-   "when": "需要用户拍板/方案选择",
-   "not": "可自行查证的事实不要问",
-   "ex": "ask_user {question, options}"
-  },
-  "conv_summarize": {
-   "tier": "pro",
-   "when": "长会话收尾/跨周 resume 前归档摘要（已注册）",
-   "not": "短会话不需要",
-   "ex": "conv_summarize {}"
-  },
-  "copy_move": {
-   "tier": "core",
-   "when": "复制或移动文件/目录",
-   "not": "删除用 delete_file",
-   "ex": "copy_move {src, dst, mode:\"copy\"}"
-  },
-  "create_contract": {
-   "tier": "pro",
-   "when": "立项：验收先成文，驱动器无人值守执行",
-   "not": "小任务或讨论中不要用",
-   "ex": "create_contract {goal, acceptance, boundaries}"
-  },
-  "db_query": {
-   "tier": "pro",
-   "when": "只读查库（单条 SELECT；用量/会话/工具统计）",
-   "not": "写库用 db_write；SHOW/多语句不支持；表列结构先查 information_schema，勿猜列名",
-   "ex": "db_query {sql:\"SELECT COUNT(*) FROM usage_stats\"}"
-  },
-  "db_write": {
-   "tier": "expert",
-   "when": "数据库写入/迁移（非 SELECT）",
-   "not": "读用 db_query；写前先 SELECT 复核影响面",
-   "ex": "db_write {sql, params}"
-  },
-  "delete_file": {
-   "tier": "expert",
-   "when": "删除文件/目录（确认过；高危留痕）",
-   "not": "保留内容用 copy_move 移走",
-   "ex": "delete_file {path}"
-  },
-  "edit_file": {
-   "tier": "core",
-   "when": "精确局部替换（old 需与文件内容唯一匹配）",
-   "not": "未先 read_file 不要盲改；大段重写用 write_file",
-   "ex": "edit_file {path, old, new}"
-  },
-  "extract_docx": {
-   "tier": "pro",
-   "when": "解析 Word 文本",
-   "not": "文本文件用 read_file",
-   "ex": "extract_docx {path}"
-  },
-  "extract_pdf": {
-   "tier": "pro",
-   "when": "解析 PDF 文本",
-   "not": "文本文件用 read_file",
-   "ex": "extract_pdf {path}"
-  },
-  "extract_pptx": {
-   "tier": "pro",
-   "when": "解析 PPT 文本",
-   "not": "文本文件用 read_file",
-   "ex": "extract_pptx {path}"
-  },
-  "extract_xlsx": {
-   "tier": "pro",
-   "when": "解析 Excel 内容",
-   "not": "文本文件用 read_file",
-   "ex": "extract_xlsx {path}"
-  },
-  "feishu_bitable_read": {
-   "tier": "pro",
-   "when": "读飞书多维表格",
-   "not": "—",
-   "ex": "feishu_bitable_read {appToken, tableId}"
-  },
-  "feishu_doc_read": {
-   "tier": "pro",
-   "when": "读飞书云文档/知识库内容",
-   "not": "非飞书用 fetch_url",
-   "ex": "feishu_doc_read {url}"
-  },
-  "feishu_sheet_read": {
-   "tier": "pro",
-   "when": "读飞书电子表格",
-   "not": "—",
-   "ex": "feishu_sheet_read {url, range}"
-  },
-  "fetch_spill": {
-   "tier": "core",
-   "when": "上下文提示\"全文已存 <路径>\"时，按范围取回被溢出的工具结果全文",
-   "not": "读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读",
-   "ex": "fetch_spill {path:\"/srv/rw-workspace/spill/12/db_query-x.txt\", offset:0, length:20000}"
-  },
-  "fetch_url": {
-   "tier": "core",
-   "when": "抓取指定网页正文",
-   "not": "找网页用 web_search",
-   "ex": "fetch_url {url}"
-  },
-  "find_file": {
-   "tier": "core",
-   "when": "按文件名子串定位（免通配符）",
-   "not": "按内容搜索用 grep_search",
-   "ex": "find_file {path, name:\"agent.js\"}"
-  },
-  "finish_task": {
-   "tier": "core",
-   "when": "提测：对照验收自检后提交\"完成候选\"",
-   "not": "未完成/未验证禁止调用",
-   "ex": "finish_task {summary, selfCheck}"
-  },
-  "get_goal": {
-   "tier": "core",
-   "when": "查看当前活动目标与进度",
-   "not": "—",
-   "ex": "get_goal {}"
-  },
-  "git_branch": {
-   "tier": "pro",
-   "when": "分支 list/create/checkout",
-   "not": "推送用 git_pull_push",
-   "ex": "git_branch {dir, action:\"list\"}"
-  },
-  "git_commit": {
-   "tier": "pro",
-   "when": "小步提交（自改纪律：改前先提交当前状态）",
-   "not": "未验证代码不提交",
-   "ex": "git_commit {dir, message}"
-  },
-  "git_pull_push": {
-   "tier": "expert",
-   "when": "拉取/推送远程（push 前先 pull 防分叉）",
-   "not": "本地提交用 git_commit",
-   "ex": "git_pull_push {dir, action:\"push\"}"
-  },
-  "git_status": {
-   "tier": "pro",
-   "when": "提交前查看工作区状态",
-   "not": "看提交历史用 run_command git log",
-   "ex": "git_status {dir}"
-  },
-  "grep_search": {
-   "tier": "core",
-   "when": "按正则搜文件内容（代码/文本文件）",
-   "not": "按文件名用 find_file；查库用 db_query",
-   "ex": "grep_search {path, pattern:\"ensureRun\"}"
-  },
-  "hooks_list": {
-   "tier": "core",
-   "when": "查看已注册 hooks（工具被\"已被 hook 拦截\"时排查是哪个纪律钩子）",
-   "not": "清除/调整钩子属平台管理，模型侧只读",
-   "ex": "hooks_list {}"
-  },
-  "intake_submit": {
-   "tier": "pro",
-   "when": "intake 技能（plugin/app/shell-dev-intake）采集齐 触发场景/期望效果/涉及壳/代码动作类型 后提交开发需求",
-   "not": "字段未齐/未载入对应 intake 技能（会被硬闸拦）；未审批不得自行开发",
-   "ex": "intake_submit {assetType:\"plugin\", scene, effect, shells, actionType}"
-  },
-  "job_list": {
-   "tier": "pro",
-   "when": "列出后台任务状态",
-   "not": "—",
-   "ex": "job_list {}"
-  },
-  "job_output": {
-   "tier": "pro",
-   "when": "读后台任务输出（最近 8000 字符）",
-   "not": "已完成的结果在任务返回里",
-   "ex": "job_output {jobId}"
-  },
-  "kb_add": {
-   "tier": "pro",
-   "when": "沉淀\"记住/以后都按…\"（global 或本会话）",
-   "not": "复盘条目标题加\"打回复盘:\"前缀（度量）",
-   "ex": "kb_add {title, body, scope:\"global\"}"
-  },
-  "kb_del": {
-   "tier": "pro",
-   "when": "删除错误/过期记忆",
-   "not": "—",
-   "ex": "kb_del {id}"
-  },
-  "kb_search": {
-   "tier": "pro",
-   "when": "找记忆/历史决策/用户偏好（先搜再用）",
-   "not": "—",
-   "ex": "kb_search {q}"
-  },
-  "kill_process": {
-   "tier": "expert",
-   "when": "终止失控/废弃后台任务",
-   "not": "正常任务等它自己结束",
-   "ex": "kill_process {jobId}"
-  },
-  "list_dir": {
-   "tier": "core",
-   "when": "列目录看结构、确认路径存在",
-   "not": "递归找文件用 find_file",
-   "ex": "list_dir {path}"
-  },
-  "mkdir": {
-   "tier": "core",
-   "when": "创建目录",
-   "not": "创建文件用 write_file",
-   "ex": "mkdir {path}"
-  },
-  "ocr_image": {
-   "tier": "pro",
-   "when": "图片含文字需提取（截图/扫描件）",
-   "not": "图片理解用 view_image",
-   "ex": "ocr_image {path}"
-  },
-  "plan_done": {
-   "tier": "core",
-   "when": "标记清单第 N 步已完成（从 1 开始）",
-   "not": "全部完成后用 finish_task 提测",
-   "ex": "plan_done {index:1}"
-  },
-  "plan_tasks": {
-   "tier": "core",
-   "when": "多步复杂任务先列清单（>3 步）",
-   "not": "单步小任务直接做",
-   "ex": "plan_tasks {tasks:\"步骤列表\"}"
-  },
-  "ralph": {
-   "tier": "pro",
-   "when": "难题多轮\"全新视角\"逼近（每轮无历史）",
-   "not": "常规任务别用（成本高）",
-   "ex": "ralph {objective}"
-  },
-  "read_file": {
-   "tier": "core",
-   "when": "读文本内容、改前先读、查实现细节",
-   "not": "大文件超限用 read_file_range；列目录用 list_dir",
-   "ex": "read_file {path:\"/srv/harness-workbench/server/agent.js\"}"
-  },
-  "read_file_range": {
-   "tier": "core",
-   "when": "大文件按 offset/length 分段读",
-   "not": "小文件直接用 read_file",
-   "ex": "read_file_range {path, offset:10000, length:5000}"
-  },
-  "reload_platform": {
-   "tier": "expert",
-   "when": "自改代码生效（先 syntax_check+git commit）",
-   "not": "仅改配置/数据不需要",
-   "ex": "reload_platform {}"
-  },
-  "repo_map": {
-   "tier": "core",
-   "when": "大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）",
-   "not": "小目录直接 list_dir；找符号位置用 grep_search",
-   "ex": "repo_map {dir:\"/srv/harness-workbench\"}"
-  },
-  "run_command": {
-   "tier": "expert",
-   "when": "无专门工具覆盖的系统操作（npm/部署/systemctl）",
-   "not": "cat/ls/grep/sed/head/tail/find/cd/echo 用专门工具",
-   "ex": "run_command {command:\"npm install\"}"
-  },
-  "run_long_task": {
-   "tier": "pro",
-   "when": "长命令后台执行不阻塞",
-   "not": "短命令用 run_command",
-   "ex": "run_long_task {command}"
-  },
-  "run_test": {
-   "tier": "core",
-   "when": "运行项目测试套件",
-   "not": "单文件语法用 syntax_check",
-   "ex": "run_test {dir}"
-  },
-  "set_goal": {
-   "tier": "core",
-   "when": "用户要求持续推进的跨轮大目标",
-   "not": "一次性任务用 plan_tasks",
-   "ex": "set_goal {objective}"
-  },
-  "set_limits": {
-   "tier": "expert",
-   "when": "用户要求调整护栏（0=不限；先解释再改）",
-   "not": "未经请求不要自行放宽",
-   "ex": "set_limits {minutes:0}"
-  },
-  "skill_load": {
-   "tier": "pro",
-   "when": "载入技能（全文入系统提示，会话内持续生效）",
-   "not": "一次性约定用 kb_add",
-   "ex": "skill_load {name}"
-  },
-  "skill_save": {
-   "tier": "pro",
-   "when": "新建/更新技能（复盘结论固化）",
-   "not": "零散经验用 kb_add",
-   "ex": "skill_save {name, description, body}"
-  },
-  "skills_list": {
-   "tier": "pro",
-   "when": "用户提\"技能/方法\"时先查可用技能",
-   "not": "已确定直接 skill_load",
-   "ex": "skills_list {}"
-  },
-  "subagent": {
-   "tier": "pro",
-   "when": "委派独立子任务（隔离上下文）",
-   "not": "小查询自己做；批量用 subagent_fanout",
-   "ex": "subagent {prompt, mode:\"sync\"}"
-  },
-  "subagent_fanout": {
-   "tier": "pro",
-   "when": "同模板批量派发（{{item}} 占位）",
-   "not": "条目少时逐个做",
-   "ex": "subagent_fanout {items, prompt}"
-  },
-  "subagent_fork": {
-   "tier": "pro",
-   "when": "子代理延续本会话上下文继续深挖",
-   "not": "全新任务用 subagent",
-   "ex": "subagent_fork {prompt}"
-  },
-  "subagent_join": {
-   "tier": "pro",
-   "when": "收口多个异步子代理结果",
-   "not": "单个结果用 subagent_output",
-   "ex": "subagent_join {ids}"
-  },
-  "subagent_list": {
-   "tier": "pro",
-   "when": "查看全部子代理状态（编排/排查）",
-   "not": "—",
-   "ex": "subagent_list {}"
-  },
-  "subagent_output": {
-   "tier": "pro",
-   "when": "取异步子代理结果（running/done）",
-   "not": "未完成可稍候重试或 join",
-   "ex": "subagent_output {id}"
-  },
-  "subagent_report": {
-   "tier": "pro",
-   "when": "复盘/审计：取子代理全步骤明细",
-   "not": "只要结论用 subagent_output",
-   "ex": "subagent_report {id}"
-  },
-  "syntax_check": {
-   "tier": "core",
-   "when": "JS 语法校验（改代码后必跑）",
-   "not": "跑测试套件用 run_test",
-   "ex": "syntax_check {path}"
-  },
-  "undo_checkpoint": {
-   "tier": "core",
-   "when": "改坏文件/代码时回滚自动快照（写类工具执行前系统已自动快照）",
-   "not": "正常小错用 edit_file 直接修",
-   "ex": "undo_checkpoint {list:true} 或 {n:1}"
-  },
-  "update_goal": {
-   "tier": "core",
-   "when": "汇报目标进展/标记完成/放弃",
-   "not": "—",
-   "ex": "update_goal {progress, status:\"done\"}"
-  },
-  "view_image": {
-   "tier": "pro",
-   "when": "视觉理解图片内容",
-   "not": "纯文字提取用 ocr_image",
-   "ex": "view_image {path}"
-  },
-  "web_search": {
-   "tier": "core",
-   "when": "查外部新知/事实/时效信息",
-   "not": "查内部内容用 grep_search/db_query",
-   "ex": "web_search {queries:[\"deepseek v4\"]}"
-  },
-  "write_file": {
-   "tier": "core",
-   "when": "新建文件或整体覆盖",
-   "not": "局部小改用 edit_file；追加用 append_file",
-   "ex": "write_file {path, content}"
-  }
- },
- "cn": {
-  "append_file": "追加内容",
-  "ask_user": "向你提问",
-  "conv_summarize": "归档会话",
-  "copy_move": "复制/移动",
-  "create_contract": "创建任务契约",
-  "db_query": "查询数据库",
-  "db_write": "写入数据库",
-  "delete_file": "删除文件",
-  "edit_file": "修改文件",
-  "exit_plan_mode": "退出规划",
-  "extract_docx": "解析Word",
-  "extract_pdf": "解析PDF",
-  "extract_pptx": "解析PPT",
-  "extract_xlsx": "解析Excel",
-  "feishu_bitable_read": "读飞书多维表",
-  "feishu_doc_read": "读飞书文档",
-  "feishu_sheet_read": "读飞书表格",
-  "fetch_spill": "取回溢出结果",
-  "fetch_url": "抓取网页",
-  "find_file": "查找文件",
-  "finish_task": "任务提测",
-  "get_goal": "查看目标",
-  "git_branch": "Git分支",
-  "git_commit": "提交Git",
-  "git_pull_push": "Git推送/拉取",
-  "git_status": "查看Git状态",
-  "grep_search": "搜索内容",
-  "hooks_list": "查看钩子",
-  "intake_submit": "提交开发需求",
-  "job_list": "后台任务列表",
-  "job_output": "查看后台输出",
-  "kb_add": "写入知识",
-  "kb_del": "删除知识",
-  "kb_search": "搜索知识",
-  "kill_process": "终止进程",
-  "list_dir": "列出目录",
-  "mkdir": "创建目录",
-  "ocr_image": "OCR识图",
-  "plan_done": "标记步骤",
-  "plan_mode": "规划模式",
-  "plan_tasks": "规划任务",
-  "ralph": "多轮全新视角",
-  "read_file": "读取文件",
-  "read_file_range": "分段读取",
-  "reload_platform": "重载平台",
-  "repo_map": "代码地图",
-  "run_command": "执行命令",
-  "run_long_task": "后台长任务",
-  "run_test": "运行测试",
-  "set_goal": "设定目标",
-  "set_limits": "调整护栏",
-  "skill_load": "载入技能",
-  "skill_save": "保存技能",
-  "skills_list": "技能列表",
-  "subagent": "子代理执行",
-  "subagent_fanout": "批量派发子代理",
-  "subagent_fork": "子代理续上下文",
-  "subagent_join": "汇总子代理",
-  "subagent_list": "子代理列表",
-  "subagent_output": "取子代理结果",
-  "subagent_report": "子代理复盘",
-  "syntax_check": "语法检查",
-  "undo_checkpoint": "撤销快照",
-  "update_goal": "更新目标",
-  "view_image": "看图",
-  "web_search": "联网搜索",
-  "write_file": "写入文件"
- },
- "tierCn": {
-  "core": "基础",
-  "pro": "专业",
-  "expert": "高危"
- },
- "defaultToolset": [
-  "append_file",
-  "ask_user",
-  "db_query",
-  "edit_file",
-  "fetch_url",
-  "find_file",
-  "finish_task",
-  "git_commit",
-  "git_status",
-  "grep_search",
-  "hooks_list",
-  "kb_add",
-  "kb_search",
-  "list_dir",
-  "plan_done",
-  "plan_tasks",
-  "read_file",
-  "repo_map",
-  "run_command",
-  "run_test",
-  "set_goal",
-  "skill_load",
-  "skill_save",
-  "subagent",
-  "syntax_check",
-  "undo_checkpoint",
-  "web_search",
-  "write_file"
- ],
- "platformExempt": [
-  "fetch_spill",
-  "hooks_list",
-  "intake_submit",
-  "reload_platform",
-  "set_limits",
-  "undo_checkpoint"
- ],
- "lightToolset": [
-  "append_file",
-  "ask_user",
-  "copy_move",
-  "db_query",
-  "edit_file",
-  "fetch_url",
-  "find_file",
-  "finish_task",
-  "git_commit",
-  "git_status",
-  "grep_search",
-  "kb_add",
-  "kb_search",
-  "list_dir",
-  "mkdir",
-  "ocr_image",
-  "plan_done",
-  "plan_tasks",
-  "read_file",
-  "read_file_range",
-  "repo_map",
-  "run_test",
-  "skill_load",
-  "skills_list",
-  "syntax_check",
-  "view_image",
-  "web_search",
-  "write_file"
- ]
+  "cn": {
+    "append_file": "追加内容",
+    "ask_user": "向你提问",
+    "conv_summarize": "归档会话",
+    "copy_move": "复制/移动",
+    "create_contract": "创建任务契约",
+    "db_query": "查询数据库",
+    "db_write": "写入数据库",
+    "delete_file": "删除文件",
+    "edit_file": "修改文件",
+    "exit_plan_mode": "退出规划",
+    "extract_docx": "解析Word",
+    "extract_pdf": "解析PDF",
+    "extract_pptx": "解析PPT",
+    "extract_xlsx": "解析Excel",
+    "feishu_bitable_read": "读飞书多维表",
+    "feishu_doc_read": "读飞书文档",
+    "feishu_sheet_read": "读飞书表格",
+    "fetch_spill": "取回溢出结果",
+    "fetch_url": "抓取网页",
+    "find_file": "查找文件",
+    "finish_task": "任务提测",
+    "get_goal": "查看目标",
+    "git_branch": "Git分支",
+    "git_commit": "提交Git",
+    "git_pull_push": "Git推送/拉取",
+    "git_status": "查看Git状态",
+    "grep_search": "搜索内容",
+    "hooks_list": "查看钩子",
+    "intake_submit": "提交开发需求",
+    "job_list": "后台任务列表",
+    "job_output": "查看后台输出",
+    "kb_add": "写入知识",
+    "kb_del": "删除知识",
+    "kb_search": "搜索知识",
+    "kill_process": "终止进程",
+    "list_dir": "列出目录",
+    "mkdir": "创建目录",
+    "ocr_image": "OCR识图",
+    "plan_done": "标记步骤",
+    "plan_mode": "规划模式",
+    "plan_tasks": "规划任务",
+    "ralph": "多轮全新视角",
+    "read_file": "读取文件",
+    "read_file_range": "分段读取",
+    "reload_platform": "重载平台",
+    "repo_map": "代码地图",
+    "run_command": "执行命令",
+    "run_long_task": "后台长任务",
+    "run_test": "运行测试",
+    "set_goal": "设定目标",
+    "set_limits": "调整护栏",
+    "skill_load": "载入技能",
+    "skill_save": "保存技能",
+    "skills_list": "技能列表",
+    "subagent": "子代理执行",
+    "subagent_fanout": "批量派发子代理",
+    "subagent_fork": "子代理续上下文",
+    "subagent_join": "汇总子代理",
+    "subagent_list": "子代理列表",
+    "subagent_output": "取子代理结果",
+    "subagent_report": "子代理复盘",
+    "syntax_check": "语法检查",
+    "undo_checkpoint": "撤销快照",
+    "update_goal": "更新目标",
+    "view_image": "看图",
+    "web_search": "联网搜索",
+    "write_file": "写入文件"
+  },
+  "tierCn": {
+    "core": "基础",
+    "pro": "专业",
+    "expert": "高危"
+  },
+  "defaultToolset": [
+    "append_file",
+    "ask_user",
+    "db_query",
+    "edit_file",
+    "fetch_url",
+    "find_file",
+    "finish_task",
+    "git_commit",
+    "git_status",
+    "grep_search",
+    "hooks_list",
+    "kb_add",
+    "kb_search",
+    "list_dir",
+    "plan_done",
+    "plan_tasks",
+    "read_file",
+    "repo_map",
+    "run_command",
+    "run_test",
+    "set_goal",
+    "skill_load",
+    "skill_save",
+    "subagent",
+    "syntax_check",
+    "undo_checkpoint",
+    "web_search",
+    "write_file"
+  ],
+  "platformExempt": [
+    "fetch_spill",
+    "hooks_list",
+    "intake_submit",
+    "reload_platform",
+    "set_limits",
+    "undo_checkpoint"
+  ],
+  "lightToolset": [
+    "append_file",
+    "ask_user",
+    "copy_move",
+    "db_query",
+    "edit_file",
+    "fetch_url",
+    "find_file",
+    "finish_task",
+    "git_commit",
+    "git_status",
+    "grep_search",
+    "kb_add",
+    "kb_search",
+    "list_dir",
+    "mkdir",
+    "ocr_image",
+    "plan_done",
+    "plan_tasks",
+    "read_file",
+    "read_file_range",
+    "repo_map",
+    "run_test",
+    "skill_load",
+    "skills_list",
+    "syntax_check",
+    "view_image",
+    "web_search",
+    "write_file"
+  ]
 }

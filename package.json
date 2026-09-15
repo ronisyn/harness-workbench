@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test",
+    "test": "node --test --test-force-exit",
     "build": "vite build",
     "dev:web": "vite"
   },

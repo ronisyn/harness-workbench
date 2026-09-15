@@ -214,7 +214,11 @@ export function finalizeToolCalls(acc) {
 
 // 流式工具轮调用：返回 { content, reasoning, toolCalls, finishReason, usage }
 // opts：{ temperature, signal(外部中止, A5), onThink(思考块), onContent(正文增量), firstByteMs, idleMs, maxTokens }
+// [test-hook] `chatStreamWithTools.impl`：仅给"端到端实测"注入厂商桩（RA-37 的 scripts/ra37-rebuild.mjs）。
+// 目的是让实测能跑**真的** HTTP/SSE/agent 循环/落库/事件环，只把"字节从模型来"这一步换掉；
+// 生产路径不设置它 → 走下面真实实现，行为不变。
 export async function chatStreamWithTools(providerId, model, messages, tools, keys, opts = {}) {
+  if (typeof chatStreamWithTools.impl === 'function') return chatStreamWithTools.impl(providerId, model, messages, tools, keys, opts);
   const p = resolve(providerId, keys);
   const uniqTools = [];
   const seen = new Set();
