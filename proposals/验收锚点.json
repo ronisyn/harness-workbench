@@ -462,11 +462,37 @@
     },
     {
       "id": "RA-41",
-      "title": "被别的 agent 当 MCP 工具调用成功一次",
+      "title": "平台作为 MCP server：被别的 agent 当工具调用成功一次",
       "owner": "agent",
-      "kind": "milestone",
+      "kind": "auto",
       "milestone": "M2",
-      "note": "MCP server 形态未开工"
+      "note": "**2026-09-16 落地（D4-B）**。形态选择：MCP over **stdio**（newline-delimited JSON-RPC 2.0），因为 DSH 自己没有 MCP server（它作为 server 的通道是 stdio JSON-RPC / ACP），这一块没有可抄的对象；能抄的是它客户端的**握手与分页纪律**，那部分我们早就在 `server/mcp.js` 里实现过。工具面只有三个**平台能力**（`rw_chat` 跑一轮 / `rw_status` 查状态 / `rw_export` 导出），**不把内部 90+ 个模型工具搬出去**——那些含写盘与执行命令，是我们自己 agent 的工具，不是对外接口。协议面逐条夹具锁住（8 条）：握手回声、工具表、**未知方法 -32601 / 未知工具与缺参 -32602 / 坏 JSON -32700**、**工具执行失败走结果里的 isError（不是 JSON-RPC error）**、通知不回、以及 stdio 的粘包/半行分帧。**真机验证（两个独立客户端 + 一个第三方实现）**：① 平台自己的 MCP 客户端（已在真机连过 GitHub MCP server）连上来跑通 `rw_chat`（真跑一轮：`status=saved`、`content=\"收到\"`、message_id 落定）、`rw_status`（2 条消息）、`rw_export`（`rw-session v1`）；② 手写裸 JSON-RPC 客户端（不共用任何代码）握手/工具表/真实调用/协议错误全通；③ **官方 MCP Inspector（`npx @modelcontextprotocol/inspector@latest --cli`）连上来 `tools/list` 列出三个工具、并按 `tools/call` 真调一次 `rw_status` 拿到了真实会话内容** —— 这条是\"被别的实现当工具调\"的硬证据。配套修复：为跑通它，撞出并修掉一个**只在 read/write 权限会话上炸**的收尾 bug（见 C-35），selfcheck 因此新增\"权限档位\"这一轴（13 项）。**仍未做**：没有用真正的第三方 agent 产品（Claude Code / Codex 之类）端到端接过一次；MCP 的 resources/prompts 两类能力没实现（只做 tools）；出站回调（\"活干完通知你\"）仍未做。",
+      "anchors": [
+        {
+          "file": "server/mcp-server.js",
+          "pattern": "case 'initialize'"
+        },
+        {
+          "file": "server/mcp-server.js",
+          "pattern": "isError"
+        },
+        {
+          "file": "scripts/rw-mcp-server.mjs",
+          "pattern": "rw_chat"
+        },
+        {
+          "file": "server/mcp-version.js",
+          "pattern": "PROTOCOL_VERSION"
+        },
+        {
+          "file": "test/mcp-server.test.mjs",
+          "pattern": "stdio 分帧"
+        },
+        {
+          "file": "test/mcp-server.test.mjs",
+          "pattern": "工具执行失败"
+        }
+      ]
     },
     {
       "id": "RA-42",
