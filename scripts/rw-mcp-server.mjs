@@ -92,7 +92,8 @@ async function chatStream(conversationId, message, waitSeconds) {
         for (const line of block.split('\n')) {
           if (!line.startsWith('data:')) continue; // 跳过 `id:` 与 `: ping`
           let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
-          if (ev.type === 'delta' && ev.text) content += ev.text;
+          // 帧字段名以契约为准（§4）：流式正文在 `delta` 里；`text` 只是兼容旧写的兜底。
+          if (ev.type === 'delta') content += (ev.delta !== undefined ? ev.delta : (ev.text || ''));
           else if (ev.type === 'done') { done = ev; if (ev.content) content = ev.content; }
           else if (ev.type === 'run_end') runEnd = ev;
           else if (ev.type === 'error') errMsg = ev.message;
@@ -120,8 +121,18 @@ const backend = {
       cid = c.id; created = true;
     }
     const r = await chatStream(cid, String(args.message), Number(args.wait_seconds) || DEFAULT_WAIT);
+    // 兜底：流里没拿到正文（例如这一轮不是流式、或我们晚接了），**回读落库的那条**——
+    // 调用方要的是"平台说了什么"，不该因为我们没接全 delta 就给它一个空串。
+    let content = r.content || '';
+    if (!content) {
+      try {
+        const m = await api('/api/conversations/' + cid + '/messages');
+        const last = (m.messages || []).filter((x) => x.role === 'assistant').pop();
+        if (last) content = String(last.content || '');
+      } catch { /* 读不回就算了，下面如实给空 */ }
+    }
     return {
-      conversation_id: String(cid), created, status: r.status, content: r.content || '',
+      conversation_id: String(cid), created, status: r.status, content,
       run_id: r.runId ? String(r.runId) : null, message_id: r.messageId ? String(r.messageId) : null,
       ...(r.note ? { note: r.note } : {}),
       ...(r.status === 'timeout' ? { hint: '用 rw_status {conversation_id} 查进度' } : {}),
