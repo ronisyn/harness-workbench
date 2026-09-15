@@ -84,6 +84,42 @@ try {
 // 于是"流明明正常"也永远报 ❌（12/12 与 11/12 的差别就来自这里）。改成真实诊断信息。
 step('plain chat SSE streaming', deltaCount > 0 && doneFlag, errMsg || ('deltas=' + deltaCount + ' done=' + doneFlag));
 
+// 5b. **受限权限会话也要跑得通**（2026-09-16 加，起因是一个只在 read/write 会话上炸的真 bug）：
+// 实测 `/api/chat` 的 run_end 里 `root: permission === 'full' ? RW_FS_ROOT : ws` 中的 `ws` 声明在
+// 内层块里、被引用在块外 ⇒ 三元表达式只在**非 full** 时求值到它 ⇒ 每轮 read/write 会话跑完都抛
+// `ws is not defined`（full 会话永远看不到，所以之前 12/12 全绿也没发现；MCP server 默认 read 才踩出来）。
+// 这条检查把"权限档位"这一轴纳入部署后自检——同一件事在别的档位上是不是也成立，不能靠"默认档位能跑"推断。
+let permErr = '';
+try {
+  const cp = await json(await jreq('/api/conversations', { method: 'POST', body: JSON.stringify({ title: '__selfcheck_write__', permission: 'write' }) }, token));
+  let sawDone = false, sawRunEnd = null, sawErr = '';
+  const res = await fetch(BASE + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify({ conversationId: cp.id, content: '回答一个字：好' }),
+  });
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    for (const part of buf.split('\n\n')) {
+      const line = part.split('\n').find((l) => l.startsWith('data:'));
+      if (!line) continue;
+      let j = null;
+      try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      if (j.type === 'done') sawDone = true;
+      if (j.type === 'run_end') sawRunEnd = j.status;
+      if (j.type === 'error') sawErr = j.message;
+    }
+  }
+  await jreq('/api/conversations/' + cp.id, { method: 'DELETE' }, token);
+  permErr = sawErr || (sawRunEnd ? '' : '没有收到 run_end（这一轮的收尾抛错了？）');
+  step('write 权限会话也能跑完一轮', sawDone && sawRunEnd === 'saved', 'done=' + sawDone + ' run_end=' + (sawRunEnd || '-') + (sawErr ? ' err=' + sawErr : ''));
+} catch (e) { step('write 权限会话也能跑完一轮', false, e.message); }
+
 // 6. 清理
 const d = await jreq('/api/conversations/' + c1.id, { method: 'DELETE' }, token);
 step('delete conversation', d.ok === true);

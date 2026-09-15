@@ -737,6 +737,13 @@ function resolveRoute(content, provider, model, defOverrides) {
 
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
+  // 受限会话的边界根（read/write 用工作区，full 用文件系统根，见下面 agentCtx/run_end 的 root 三元表达式）。
+  // **必须在处理器最外层声明**：2026-09-16 实测——它原来声明在下面那个 `{...}` 块里（Agent 执行循环的块），
+  // 而 done/run_end 与异常兜底那三处在**块外**，只在 `permission === 'full'` 时走 `RW_FS_ROOT` 分支、
+  // 才"碰巧"不会求值到 `ws` ⇒ **只有 read/write 会话在跑完一轮时抛 `ws is not defined`**（full 会话永远看不到，
+  // 所以一直没被发现）。MCP server 默认用 read 权限建会话，第一次调用就把它踩出来了。声明提到最外层后，
+  // 无论块怎么套、哪条分支，都拿得到同一个值（它本来就是个常量）。
+  const ws = RW_WORKSPACE;
   if (!conversationId || !content) return res.status(400).json({ ok: false, code: 'PARAM_MISSING', message: '参数缺失' });
   const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id, face_full FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' }); }
@@ -1132,7 +1139,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     {
       // Agent 执行循环（统一通道）：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
-      const ws = RW_WORKSPACE;
+      // （受限会话用的根 `ws` 声明在处理器最外层——见那里的注释：声明在这个块里会让块外的 run_end 炸）
       // 长任务现场：登记/复用 run（断点恢复外壳）；纯问答（light）不登记现场（问答无断点恢复需求，省 run 噪音）
       let run = null;
       if (!light) {
