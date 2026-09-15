@@ -2,15 +2,28 @@
 // 依据《RW-Agent 架构 v1.1》§5.4：spill 发生在"工具刚返回时"，计数单位按**字节**；
 // 折叠/修剪（prune）是另一个时刻的事，不在本模块。
 // 三条设计约束（步6 验收 RA-05/RA-06/RA-07）：
-//   1) 触发 = 超内联上限：字符数 > cap，或字节数 > SPILL_BYTES（后者是字节天花板；中文下 cap 先触发）
+//   1) 触发 = 超内联上限：字符数 > cap，或字节数 > cap×SPILL_BYTES_PER_CHAR（字节天花板按 cap 派生，
+//      原因见下面 SPILL_BYTES_PER_CHAR 注释 —— 固定常量 32768 在普通路径上几何上不可能触发）
 //   2) 落盘 best-effort：存盘失败**不改工具成败**，降级为"内联截断 + 如实提示"（信息不静默丢失）
 //   3) 文件读取类工具不落盘：全文就是那个文件，定位符直接指向源路径（§5.4 "read 跳过"）
+// OP-17（2026-09-15）：本模块另负责溢出文件的**保留与清理**（cleanupSpill），此前只增不减。
 import fs from 'node:fs';
 import path from 'node:path';
 import { RW_WORKSPACE } from '../env.js';
 
-export const SPILL_BYTES = 32768; // 字节天花板（我方拍板值；按 C2/C4 标定见 RA-05b）
 export const SPILL_DIR = path.join(RW_WORKSPACE, 'spill');
+// ── 字节天花板（RA-05b 拍板，2026-09-15）────────────────────────────────────────────────
+// 旧写法是一个固定常量 `SPILL_BYTES = 32768`，而普通路径 cap=4000 字符 ⇒ 字节数 ∈ [4000, 12000]，
+// **恒定小于 32768** ⇒ 这个天花板在普通路径上**永不参与判定**（标定脚本实测：3,884 行里超阈值 0 行）。
+// 一个不参与判定的旋钮就是负债，但直接删掉会丢掉"中文字节成本更高"这层保护。改成**按 cap 派生**：
+//   天花板 = cap × SPILL_BYTES_PER_CHAR（取 2：ASCII 1 字节/字符、CJK 3 字节/字符 ⇒ 两倍是"贵一倍就该收"的界）
+// · cap=4000 → 8,000 字节（实测当前全量 max=4,333 字节 ⇒ **对现有流量零影响**，但对将来的 CJK 重结果会生效）
+// · cap=12000（子代理族）→ 24,000 字节
+// 这样"字符上限"管短文本、"字节上限"管同样字符数但更贵的中文重结果 —— 两个触发器都真的在判定里。
+export const SPILL_BYTES_PER_CHAR = 2;
+export const byteCeiling = (cap) => Math.max(1, Number(cap) || 0) * SPILL_BYTES_PER_CHAR;
+// 兼容旧引用（标定脚本按"普通路径的实际天花板"读它）：等价于 byteCeiling(4000)
+export const SPILL_BYTES = byteCeiling(4000);
 // 源文件即全文的读取类工具：它们的结果不复制落盘，定位符指向源路径（args.path）
 const READER_TOOLS = new Set(['read_file', 'read_file_range']);
 
@@ -42,7 +55,7 @@ function logSpill(tool, conv, bytes, outcome, extra) {
 export function spillToolResult(text, cap, meta = {}) {
   const s = String(text ?? '');
   const bytes = Buffer.byteLength(s, 'utf8');
-  if (s.length <= cap && bytes <= SPILL_BYTES) return s;
+  if (s.length <= cap && bytes <= byteCeiling(cap)) return s;
   const parts = splitPreview(s, cap);
   const tool = meta.tool || '';
   // 3) 读取类：全文=源文件，不落盘
@@ -77,4 +90,86 @@ export function readSpill(p, offset, length) {
   if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + length);
   const c = fs.readFileSync(abs, 'utf8');
   return { path: abs, offset: off, length: len, total: c.length, content: c.slice(off, off + len) };
+}
+
+// ── OP-17 溢出文件保留与清理策略（2026-09-15 补齐）────────────────────────────────────────
+// 旧状态：`spill/` **只增不减**——只有写出（mkdirSync/writeFileSync）与读取（readSpill），没有任何删除路径。
+// 实测当时 5 个文件 / 72KB、磁盘 20%，尚未成灾；但"靠运维手工清"不是策略，架构 §15 `OP-17` 因此挂着。
+// 两步策略（都是**保守**的，宁可少删）：
+//   ① 按龄：mtime 早于 maxAgeDays 的删掉（默认 7 天 —— 溢出文件是**当期取回**用的，过期即无引用价值）；
+//   ② 按量：仍超过 maxTotalBytes 时，从最旧开始删到额度内（默认 64MB）。
+// 安全边界：只走 `dir` 之下的两级（`<conv>/<file>`），逐项 `path.resolve` 复核前缀，
+//   目录本身与任何越界路径一律不删；单个文件删除失败只记账不抛。
+export const SPILL_MAX_AGE_DAYS = 7;
+export const SPILL_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+/**
+ * 清理溢出目录。
+ * @param {{dir?:string, maxAgeDays?:number, maxTotalBytes?:number, now?:number}} opts
+ * @returns {{scanned:number, totalBytes:number, deletedAge:number, deletedQuota:number, freedBytes:number, kept:number, errors:string[]}}
+ */
+export function cleanupSpill(opts = {}) {
+  const root = path.resolve(opts.dir || SPILL_DIR);
+  const maxAgeDays = Number(opts.maxAgeDays) > 0 ? Number(opts.maxAgeDays) : SPILL_MAX_AGE_DAYS;
+  const maxTotal = Number(opts.maxTotalBytes) > 0 ? Number(opts.maxTotalBytes) : SPILL_MAX_TOTAL_BYTES;
+  const now = Number(opts.now) || Date.now();
+  const cutoff = now - maxAgeDays * 86400000;
+  const out = { root, scanned: 0, totalBytes: 0, deletedAge: 0, deletedQuota: 0, freedBytes: 0, kept: 0, errors: [] };
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return out; } // 目录不存在 = 无事可做
+  const files = [];
+  for (const e of entries) {
+    const d = path.join(root, e.name);
+    if (path.resolve(d) === root) continue; // 防御：不处理根本身
+    if (e.isDirectory()) {
+      let subs = [];
+      try { subs = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+      for (const s of subs) {
+        if (!s.isFile()) continue;
+        const f = path.join(d, s.name);
+        if (!path.resolve(f).startsWith(root + path.sep)) continue; // 越界不碰
+        files.push(f);
+      }
+    } else if (e.isFile()) {
+      const f = path.join(root, e.name);
+      if (path.resolve(f).startsWith(root + path.sep)) files.push(f); // 兼容直接放在根下的历史文件
+    }
+  }
+  const rm = (f, size) => {
+    try { fs.unlinkSync(f); out.freedBytes += size; return true; }
+    catch (err) { out.errors.push(path.basename(f) + ': ' + (err && err.message ? err.message : String(err))); return false; }
+  };
+  // ① 按龄
+  const survivors = [];
+  for (const f of files) {
+    out.scanned++;
+    let st = null;
+    try { st = fs.statSync(f); } catch { continue; } // 已被别人删掉/不可读：跳过
+    out.totalBytes += st.size;
+    if (st.mtimeMs < cutoff) {
+      if (rm(f, st.size)) { out.deletedAge++; out.totalBytes -= st.size; continue; }
+    }
+    survivors.push({ f, size: st.size, mtimeMs: st.mtimeMs });
+  }
+  // ② 按量（从最旧开始）
+  if (out.totalBytes > maxTotal) {
+    survivors.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const s of survivors) {
+      if (out.totalBytes <= maxTotal) break;
+      if (rm(s.f, s.size)) { out.deletedQuota++; out.totalBytes -= s.size; }
+    }
+  }
+  out.kept = out.scanned - out.deletedAge - out.deletedQuota;
+  // 清理空的会话目录（不清根本身）
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const d = path.join(root, e.name);
+    try { if (fs.readdirSync(d).length === 0) fs.rmdirSync(d); } catch { /* 忽略 */ }
+  }
+  if (out.deletedAge || out.deletedQuota || out.errors.length) {
+    console.log('[spill-cleanup] 扫描 ' + out.scanned + ' · 按龄删 ' + out.deletedAge + ' · 按量删 ' + out.deletedQuota
+      + ' · 释放 ' + out.freedBytes + ' 字节 · 保留 ' + out.kept + ' · 现存 ' + out.totalBytes + ' 字节'
+      + (out.errors.length ? ' · 失败 ' + out.errors.length : ''));
+  }
+  return out;
 }

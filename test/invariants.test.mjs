@@ -47,30 +47,33 @@ test('① 工具面冻结：同输入同字节，且哈希必须能发现变化�
 });
 
 // ---------- ② 第 2 层 fail-closed ----------
+// 2026-09-15 OP-03：语义字段从 `failClosed` 布尔改为 `failure: 'closed'|'open'`，
+// 且**注册时必填**（不声明直接抛错，见 test/op03-hooks.test.mjs）。本项仍锁同一件事：
+// 出事时是拦还是放必须显式可审计，且安全网只能是那两条。
 test('② 安全网钩子声明 fail-closed；纪律钩子声明 fail-open（语义显式，不许靠缺省）', () => {
   const builtin = listHooks().filter((x) => x.builtin);
   assert.ok(builtin.length >= 10, '内置钩子应已注册：' + builtin.length);
-  for (const x of builtin) assert.equal(typeof x.failClosed, 'boolean', x.name + ' 必须显式声明 failClosed');
-  const closed = builtin.filter((x) => x.failClosed).map((x) => x.name);
+  for (const x of builtin) assert.ok(['closed', 'open'].includes(x.failure), x.name + ' 必须显式声明 failure=closed|open');
+  const closed = builtin.filter((x) => x.failure === 'closed').map((x) => x.name);
   for (const must of ['danger_command_guard', 'system_write_guard']) {
     assert.ok(closed.includes(must), must + ' 是安全网，必须 fail-closed（被改成放行＝门禁失效）');
   }
-  const open = builtin.filter((x) => !x.failClosed).map((x) => x.name);
+  const open = builtin.filter((x) => x.failure === 'open').map((x) => x.name);
   for (const guide of ['preset_tier_guard', 'enabled_tools_guard', 'readonly_intent_guard', 'shell_readonly_guard']) {
     assert.ok(open.includes(guide), guide + ' 是纪律引导，按设计 fail-open');
   }
 });
 
 test('② 故意破坏：fail-closed 钩子抛错 → 必须拦截（而不是放行）', async () => {
-  registerHook('before', 'ghost_tool', 'test_boom_closed', () => { throw new Error('注入的钩子故障'); }, { builtin: true, failClosed: true });
+  registerHook('before', 'ghost_tool', 'test_boom_closed', () => { throw new Error('注入的钩子故障'); }, { builtin: true, failure: 'closed' });
   const r = await emitHooks('before', 'ghost_tool', { args: {}, ctx: {} });
   assert.equal(r.stopped, true, 'fail-closed 钩子异常必须拦截执行');
-  assert.match(r.reason, /fail-closed 拦截/);
+  assert.match(r.reason, /fail-closed/);
   clearHook('before', 'ghost_tool', 'test_boom_closed');
 });
 
 test('② fail-open 钩子抛错 → 只告警不阻断（纪律是引导，不拖垮主流程）', async () => {
-  registerHook('before', 'ghost_tool', 'test_boom_open', () => { throw new Error('注入的纪律钩子故障'); }, { builtin: true, failClosed: false });
+  registerHook('before', 'ghost_tool', 'test_boom_open', () => { throw new Error('注入的纪律钩子故障'); }, { builtin: true, failure: 'open' });
   const r = await emitHooks('before', 'ghost_tool', { args: {}, ctx: {} });
   assert.equal(r.stopped, false, 'fail-open 钩子异常不应阻断');
   clearHook('before', 'ghost_tool', 'test_boom_open');

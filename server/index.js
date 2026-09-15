@@ -21,6 +21,7 @@ import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skil
 import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
 import { kbInjectMode, kbBlock } from './kbgate.js';
+import { lessonMode, lessonBlock, pickLessons } from './lessonrecall.js';   // OP-12：错题进按需召回面
 import { streamPatch } from './streampatch.js';
 import { clearReadCache } from './readcache.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
@@ -31,6 +32,7 @@ import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { REAL_WHERE } from './cohort.js';      // 复测口径单一来源（首页指标与复跑脚本同一份判据）
 import { checkEpochAndWarm } from './epoch.js'; // M2 换纪元检测与一次预热
+import { capabilityManifest, capabilitySummary } from './capabilities.js'; // RA-31 能力清单 / OP-16 降级语义
 import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
 import { autoTitle } from './autotitle.js';
@@ -661,7 +663,7 @@ function resolveRoute(content, provider, model, defOverrides) {
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
   if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
-  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
+  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id, face_full FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
   if (!convs.length) { return res.status(404).json({ ok: false, message: '会话不存在' }); }
   const convProvider = (convs[0].provider === 'auto') ? null : (convs[0].provider || null);
   const convModel = (convs[0].model === '__auto__') ? null : (convs[0].model || null);
@@ -857,6 +859,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       if (block) messages.push({ role: 'system', content: block });
     }
   } catch (e) { console.warn('[kb-inject] 判定/注入失败，本轮不注入知识：' + ((e && e.message) || e)); }
+  // OP-12 经验召回（2026-09-15）：`reviews`（错题本）此前**能写能查但不进任何召回/注入面**——
+  // 上一次踩过的坑不会被下一次任务读到，"经验复用"这条链是断的。现在按需召回：
+  //   任务语境 + 确有错题 + 与本次消息**有实词重叠** ⇒ 注入"标题级"最多 3 条（正文留库，db_query 可查）；
+  //   其余一律不注入（闲聊不注入 = 与 RA-09 同一条纪律）。判定/成型在 server/lessonrecall.js（纯函数，有夹具）。
+  try {
+    const rows = await db.query("SELECT id, bug_reason, difficulty, created_at FROM reviews WHERE result='bug' AND bug_reason IS NOT NULL ORDER BY id DESC LIMIT 30");
+    const picked = pickLessons(content, rows);
+    if (picked.length) {
+      const block = lessonBlock(picked, 'index');
+      if (block) messages.push({ role: 'system', content: block });
+    }
+  } catch (e) { console.warn('[lesson-recall] 判定/注入失败，本轮不注入错题：' + ((e && e.message) || e)); }
   // 断点恢复：本会话存在 interrupted/paused 的长任务现场 → 注入现场信息，支持"继续任务"
   try {
     const hint = await resumeHint(conversationId);
@@ -988,7 +1002,17 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     // P1 统一工具通道（2026-09 批1）：删除 needsTools 双路径——所有对话统一走 runAgent 执行循环，
     // needsTools 仅降级为 schema 宽度选择：任务词命中 → 全量工具；纯问答 → LIGHT_TOOLSET 轻量 schema
     // （模型可零工具直接答，也可用轻量工具单轮查询；结构性消除"无工具路径假开始"O-1）。
-    const light = !needsTools(content);
+    // ⚠️ 2026-09-15 修正（v0.3 §4.4.1 规则3「工具面会话内冻结」）：`light` 原本**按每条消息内容**算，
+    //   于是同一个会话在"闲聊"与"干活"之间切换时工具面来回翻 —— 轻量面 5,130 tokens / 全量面 14,731 tokens，
+    //   翻一次整段前缀作废（落库指纹当场抓到：同会话两轮出现两种 tools 指纹）。这与架构硬约束**真冲突**，
+    //   现已按"单向粘滞"收口：**会话一旦用过全量面，此后固定全量面**（最多翻转一次，且只朝更宽的方向）。
+    const faceFull = Number(convs[0].face_full || 0) === 1;
+    const light = !needsTools(content) && !faceFull;
+    if (!light && !faceFull) {
+      // 标记本会话已进入全量面（单向，不可回退）；写失败不影响本轮（下次再写）
+      db.query('UPDATE conversations SET face_full=1 WHERE id=?', [conversationId])
+        .catch(() => { /* 标记失败只是下次可能多翻一次，不影响正确性 */ });
+    }
     let answer = '';
     let usage = {};
     let thinkBuf = ''; // 本轮的思考过程（reasoning）累积，落库供历史回看
@@ -1160,6 +1184,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         messageId: savedMsgId, contentLength: answer.length,
         finishReason: runOutcome.finishReason || '', guard: runOutcome.guard || null,
         usage: usage, totals: runOutcome.usageTotals || null, spentYuan: runOutcome.spentYuan ?? null,
+        // RA-31 ③「用了哪些能力」+ §7.2 的 enforcement 诚实上报：紧凑版，只带"没做到 full 的层"与本次用过的工具名。
+        capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome.toolLog || []).map((t) => t.name)),
       });
       // 断线/旁观客户端走 /activity 轮询时，结论由环自己的 run_end（clearActivity 追加，见 agent.js）给出，
       // 不在这里重复往环里塞（环与 SSE 是两条投影，重复塞会让"同一事实两种投影"更乱）。
@@ -1188,6 +1214,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'stopped',
           reason: (actrl.signal && actrl.signal.reason === 'user') ? 'user' : 'disconnect',
           reasonText: why, messageId: placeholderId, totals: runOutcome && runOutcome.usageTotals ? runOutcome.usageTotals : null,
+          capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)),
         });
       } catch { /* 忽略 */ }
     }
@@ -1212,7 +1239,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       errPlaceholderId = (er && er.insertId) || null;
     } catch { /* 忽略 */ }
     send({ type: 'error', message: e.message });
-    send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId });
+    send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId, capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? '/' : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)) });
     // 自审补：异常路径同样落观测（该轮真实消耗已入 usage_stats，观测表须同口径有行）
     if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
@@ -1247,6 +1274,89 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
       cost: Number(u.cost || 0),
     },
   });
+});
+
+// ---------- RA-37 G5 续订：GET /api/conversations/:id/stream（断线重连的"接上"入口，2026-09-15）----------
+// 为什么必须是一条**只读**通道、而不是在 POST /api/chat 上认 `Last-Event-ID`：
+//   把"重连"和"再发一条消息"混成一个请求，重连一次就会重跑一次 agent —— 既重复花钱，
+//   又会把有副作用的工具（写文件/提交/部署）再执行一遍。续订只补发 + 跟播，绝不触发执行。
+// 语义：先补发事件环里 seq > Last-Event-ID（标准头，回退 ?after=）的事件，然后跟播到本次执行结束；
+//   帧格式与 /api/chat 一致（`id: <seq>\ndata: <json>\n\n`），所以客户端可以放心用同一个 EventSource 解析器。
+// 边界：环只保留最近 300 条且执行结束后 60s 回收（见 agent.js），超出范围接不上时**如实说明**
+//   （发 `stream_gap` 让客户端回落 /messages 重新拉全量），不假装接上了。
+app.get('/api/conversations/:id/stream', requireAuth, async (req, res) => {
+  const cid = Number(req.params.id);
+  const own = await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [cid, req.user.id]).catch(() => []);
+  if (!own.length) return res.status(404).json({ ok: false, message: '会话不存在' });
+  const rawId = req.headers['last-event-id'] != null ? req.headers['last-event-id'] : req.query.after;
+  let after = Number(rawId);
+  if (!Number.isFinite(after) || after < 0) after = 0;
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no',
+  });
+  let closed = false;
+  const t0 = Date.now();
+  const MAX_MS = 10 * 60 * 1000; // 跟播上限：超过就让客户端重连一次（比无限挂着更安全）
+  let idleRounds = 0;
+  const frame = (obj) => {
+    if (closed || res.writableEnded) return;
+    const seq = Number(obj && obj.seq);
+    const idLine = Number.isFinite(seq) && seq > 0 ? `id: ${seq}\n` : '';
+    try { res.write(`${idLine}data: ${JSON.stringify(obj)}\n\n`); } catch { closed = true; }
+  };
+  const hb = setInterval(() => { if (!closed && !res.writableEnded) { try { res.write(': ping\n\n'); } catch { closed = true; } } }, 15000);
+  const finish = (why) => {
+    clearInterval(hb); clearInterval(tick);
+    if (!closed && !res.writableEnded) { frame({ type: 'stream_end', reason: why, after, ts: Date.now() }); try { res.end(); } catch { /* 忽略 */ } }
+    closed = true;
+  };
+  req.on('close', () => { closed = true; clearInterval(hb); clearInterval(tick); });
+  const tick = setInterval(() => {
+    if (closed) return;
+    try {
+      const r = activitySince(cid, after);
+      if (r.items.length) {
+        idleRounds = 0;
+        for (const it of r.items) { after = it.seq; frame(it); } // 逐条带 id 发，客户端可断点续传
+      } else {
+        idleRounds++;
+        // 连续 3 次（约 1.5s）没有新事件且见过 run_end ⇒ 本次执行已经结束，收尾
+        if (idleRounds >= 3 && r.seq <= after) { finish('idle'); return; }
+      }
+      if (Date.now() - t0 > MAX_MS) { finish('timeout'); return; }
+    } catch (e) { finish('error:' + String((e && e.message) || e).slice(0, 80)); }
+  }, 500);
+  // 先说明"从哪接"：客户端据此判断自己是不是接丢了（配合 /messages 兜底）
+  frame({ type: 'stream_hello', conversationId: cid, after, ts: Date.now() });
+});
+
+// ---------- RA-31 能力清单（2026-09-15）：这个会话里的 agent 能做什么、受什么约束、降级时什么样 ----------
+// 《RW-Agent 架构 v1.1》§10 要求 agent 侧暴露 ① 结束原因 ② 用量 ③ **用了哪些能力** ④ "自述不可信"；
+// ③ 此前一直是空的。本接口把它成文暴露，同时按 §7.2 如实给出 `enforcement: full|partial|none`（OP-16）。
+// 交互界面（下一步）直接用这个接口渲染"能力/约束/降级"面板，不必自己拼。
+app.get('/api/agent/capabilities', requireAuth, async (req, res) => {
+  try {
+    const convId = Number(req.query.conversationId) || null;
+    let conv = null;
+    if (convId) conv = (await db.query('SELECT id, permission, preset, mode, shell_id FROM conversations WHERE id=? AND account_id=?', [convId, req.user.id]))[0] || null;
+    const permission = (conv && conv.permission) || 'full';
+    const preset = (conv && conv.preset) || 'all';
+    const ctx = { permission, preset, mode: (conv && conv.mode) || 'chat', root: permission === 'full' ? '/' : RW_WORKSPACE, shellId: conv ? conv.shell_id : null };
+    // 护栏现值与该会话同源读取（与 runAgent 每轮读 settings 的口径一致）
+    let guards = null;
+    try {
+      const { agentLimits } = await import('./agent.js');
+      const lim = await agentLimits();
+      guards = { budgetMin: lim.budgetMin, roundCap: lim.roundCap, loopGuard: lim.loopGuard, maxParallelT: lim.maxParallelT, budgetYuan: lim.budgetYuan, rev: lim.rev };
+    } catch { /* 护栏读不到不影响清单主体 */ }
+    let tools = null;
+    try {
+      const { toolDefs } = await import('./tools/index.js');
+      tools = toolDefs(preset, null, null).map((d) => d.function.name);
+    } catch { /* 工具面取不到就退回默认 */ }
+    res.json({ ok: true, conversationId: convId, manifest: capabilityManifest(ctx, { guards, tools }) });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
 // ---------- 缓存命中率摘要（§8.10 cache_hit_rate_target；首页状态带数据源,2026-09-11 A1） ----------
@@ -2428,6 +2538,24 @@ async function main() {
     catch (e) { console.error('[audit] 定时归档失败:', e.message); }
   }, 24 * 60 * 60 * 1000);
   if (auditArchTimer.unref) auditArchTimer.unref();
+  // OP-17 溢出文件保留与清理（2026-09-15）：`<工作区>/spill/` 此前**只增不减**（无任何删除路径）。
+  // 策略在 server/tools/spill.js（按龄 7 天 + 按量 64MB，两步都保守）；启动跑一次 + 每 6h 一次；
+  // 只有真删了东西才落账本（避免每天一条空账）。
+  const runSpillCleanup = async (when) => {
+    try {
+      const { cleanupSpill } = await import('./tools/spill.js');
+      const c = cleanupSpill();
+      if (c.deletedAge || c.deletedQuota) {
+        console.log('[spill-cleanup] ' + when + '：按龄 ' + c.deletedAge + ' · 按量 ' + c.deletedQuota
+          + ' · 释放 ' + c.freedBytes + ' 字节 · 现存 ' + c.totalBytes + ' 字节');
+        await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+          [null, 'spill:cleanup', JSON.stringify(c).slice(0, 800)]).catch(() => {});
+      }
+    } catch (e) { console.error('[spill-cleanup] 失败:', e.message); }
+  };
+  await runSpillCleanup('启动清理');
+  const spillTimer = setInterval(() => { runSpillCleanup('定时清理'); }, 6 * 60 * 60 * 1000);
+  if (spillTimer.unref) spillTimer.unref();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // RA-03：清单热重载——工具上下线/改档位改提示，只改 tools/manifest.js，**不重启服务**即刻生效

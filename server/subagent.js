@@ -10,9 +10,28 @@
 import { runAgent } from './agent.js';
 import { parseToolWhitelist, narrowEnabled } from './subtools.js';
 import { childEmit } from '../scripts/child-emit.js';
+import { db } from './db.js';
 
 export const subs = new Map(); // id -> { status: running|done|error, prompt, name, result, error, createdAt }
 let subSeq = 0;
+
+// OP-08：子代理深度上限（settings `subagent_max_depth`，默认 3，1=禁止派生）。
+// 读不到设置就回退 3 —— 与旧硬编码行为完全一致（"没有证据不动行为"）；10 秒缓存防每轮查库。
+export const SUBAGENT_MAX_DEPTH_DEFAULT = 3;
+let _depthCache = null, _depthAt = 0;
+export async function subagentMaxDepth() {
+  if (_depthCache != null && Date.now() - _depthAt < 10000) return _depthCache;
+  let v = SUBAGENT_MAX_DEPTH_DEFAULT;
+  try {
+    const r = await db.query('SELECT svalue FROM settings WHERE skey=?', ['subagent_max_depth']);
+    if (r && r[0] && r[0].svalue != null) {
+      const n = Number(r[0].svalue);
+      if (Number.isFinite(n) && n >= 1 && n <= 8) v = Math.floor(n);
+    }
+  } catch { /* 设置读不到按默认 */ }
+  _depthCache = v; _depthAt = Date.now();
+  return v;
+}
 
 // 长期运行护栏：finished 记录保留 2 小时；超过 300 条时淘汰最老的已完成项
 const SUB_TTL_MS = 2 * 60 * 60 * 1000;
@@ -100,19 +119,28 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
     budgetYuan: quota,
   };
   subs.set(id, record);
-  // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=3 或调用方强制 noSubagentOverride）
+  // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=上限 或调用方强制 noSubagentOverride）
+  // OP-08（2026-09-15）：上限原本**硬编码 3**，而"2 层够不够"从未实证。两件事一起补：
+  //   ① 上限改为可配置（settings `subagent_max_depth`，默认 3）——运维可收紧/放开而不用改代码；
+  //   ② 每次派生记录实际深度（journalctl `[subagent] depth=` + agent_runs.tool_counts 可统计），
+  //      这样"真实任务用到第几层"有数据可查，而不是靠拍脑袋。**本次不改默认值**：没有证据就不动行为。
+  const maxDepth = await subagentMaxDepth();
+  const childDepth = (parentCtx.depth || 0) + 1;
   const childCtx = {
     ...parentCtx,
     permission,
-    depth: (parentCtx.depth || 0) + 1,
+    depth: childDepth,
     skills: parentCtx.skills || {},
-    noSubagent: noSubagentOverride || (parentCtx.depth || 0) + 1 >= 3,
+    noSubagent: noSubagentOverride || childDepth >= maxDepth,
     // RA-12：收窄后的启用集 + 白名单本体（执行层门禁也读它）
     __enabledTools: effectiveEnabled,
     __subTools: whitelist,
     // RA-14：子代理额度（agent.js 每轮与段阈值/会话总账取 min 后判定）
     __subBudgetYuan: quota,
   };
+  record.depth = childDepth;
+  console.log('[subagent] depth=' + childDepth + '/' + maxDepth + ' id=' + id + ' name=' + String(record.name || '').slice(0, 40)
+    + ' tools=' + (whitelist ? whitelist.size : 'inherit') + (childCtx.noSubagent ? '（本层不可再派生）' : ''));
   const t0 = Date.now();
   // P10 子代理输出契约（2026-09 批4）：默认注入结构化输出模板（调用方可传 contract 覆盖/关闭）。
   // 目的：子代理返回"可消费的结构化结果"而非自由散文——父代理/驱动器可稳定解析（结论/产物/验证/遗留）。

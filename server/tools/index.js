@@ -1216,6 +1216,10 @@ export async function execTool(name, args, ctx) {
     // P2（2026-09 批2）：纪律钩子（preset/启用集/只读意图/命令纪律）先于审批执行——
     // 未启用/未暴露/只读意图下的调用先被 hooks 拦，不浪费 guard 审批卡；审批只对真正可执行的受控工具弹卡。
     let hookStop = null;
+    // 审计口径（2026-09-15，OP-03 尾巴）：`args` 到这里已经被两处就地改写过（相对路径归一、后续的 hook 改写），
+    // 若直接落库，账上记的就是"改写后"，**模型当初要执行什么就永久丢失了**。
+    // 因此先把"模型请求的原始参数"留一份，改写明细单独落 `hook:rewrite` 账本。
+    const argsAsked = { ...args };
     const payload = { args, ctx: eff };
     try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
     if (hookStop && hookStop.stopped) {
@@ -1281,6 +1285,19 @@ export async function execTool(name, args, ctx) {
       // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
       const rArgs = JSON.stringify(args).slice(0, 2000);
       const rResult = JSON.stringify(result).slice(0, 2000);
+      // OP-03 尾巴：`tool_calls.args` 记的是**实际执行**的参数（审计"动作"要看这个），
+      // 但参数被改写过时要额外落一条 `hook:rewrite`，把"模型请求的"与"实际执行的"都留下——
+      // 此前这两者的区别没有任何记录，事后无法回答"日志里的是改写前还是改写后"。
+      const rewrites = (hookStop && Array.isArray(hookStop.rewrites)) ? hookStop.rewrites : [];
+      const argsChanged = rewrites.length > 0 || JSON.stringify(argsAsked) !== JSON.stringify(args);
+      if (argsChanged) {
+        const detail = redactSecrets(JSON.stringify({ tool: name, rewrites: rewrites.map((w) => ({ by: w.by, asked: w.asked, used: w.used })), asked: argsAsked, used: args })).slice(0, 1500);
+        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [ctx.accountId ?? null, 'hook:rewrite', detail, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+        if (result && typeof result === 'object' && !Array.isArray(result)) {
+          result.hookRewrite = rewrites.length ? ('参数经 hook 改写（' + rewrites.map((w) => w.by).join(',') + '）') : '参数经平台归一（相对路径/占位符）';
+        }
+      }
       // RA-05b 原始体积遥测：**在 2000 字符截断之前**量，单位字节（与 spill 的 32768 字节判定同口径）。
       // 算的是 `JSON.stringify(result)` 的 UTF-8 字节数——即真正进 LLM 上下文的那份文本的体积。
       // result_summary 只存前 2000 字符（大结果不可回查分布），此列是 spill 阈值标定的唯一数据源。

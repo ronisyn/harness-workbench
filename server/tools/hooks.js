@@ -2,7 +2,17 @@
 // 目的：把"工具使用纪律/安全网"从平台静态门禁（preset/启用集/权限）升级为可动态注册的钩子——
 //   - before：工具执行【前】触发。钩子可拦截（返回 {stop:true, reason}）或改写参数（返回 {args:{...patch}}，浅合并进执行参数）
 //   - after：工具执行【后】触发（观察/审计用；返回 stop 仅记录在 result，不撤销已完成执行）
-// 任何钩子抛错：内置安全钩子（builtin+failClosed）保守拦截（fail-closed），其余 warn 后忽略——钩子永不拖垮主流程
+//
+// ── OP-03 策略引擎失败语义（2026-09-15 补齐）─────────────────────────────────────────────
+// 旧实现的问题：**失败语义靠一个隐式默认**（`builtin && failClosed` 才拦，其余抛错一律 warn 放过），
+//   架构 §15 的 `OP-03` 因此一直挂着"缺失"。现在改成三条硬规则：
+//   ① **注册时必须显式声明** `failure: 'closed' | 'open'`（不声明直接抛错）—— 语义从"默认值"变成"契约"；
+//   ② **超时按同一语义处置**：钩子挂起会卡住工具（旧实现没有超时，一个死循环钩子能冻住整轮），
+//      现在每个钩子有 `timeoutMs`（默认 2000）；超时与抛错走同一条 failure 分支；
+//   ③ **失败必留痕**：抛错/超时落 `audit_log`（`hook:error` / `hook:timeout`），失败不再是"日志里一行 warn"。
+//   另：改写参数时记录改写前后（`emitHooks` 返回 `rewrites`），由 execTool 落 `hook:rewrite` 账本——
+//   此前"日志记的是改写前还是改写后"没有答案，现在两个都记。
+//
 // 内置钩子（模块加载即注册，平台级强制纪律）：
 //   1. danger_command_guard（before run_command）—— 破坏性命令（删根/fork bomb/写盘/关机等）fail-closed 拦截
 //   2. system_write_guard（before 写类工具）—— 写系统关键区（/etc /boot /usr/bin 等）fail-closed 拦截
@@ -17,19 +27,49 @@ import { TOOL_META, PLATFORM_EXEMPT } from './registry.js';
 import { db } from '../db.js';
 const registry = [];
 const MAX_HOOKS = 128;
+const DEFAULT_TIMEOUT_MS = 2000;
+const FAILURE_MODES = ['closed', 'open'];
 
-// 注册钩子。side='before'|'after'；tool=具体工具名或 '*'（全部工具）；opts.builtin/failClosed 标记内置安全钩子
+// 注册钩子。side='before'|'after'；tool=具体工具名或 '*'（全部工具）。
+// opts.failure **必填**：'closed'=出事（抛错/超时）就拦，'open'=出事就放行（并 warn + 留痕）。
+// opts.timeoutMs 默认 2000；opts.rewritesArgs 声明"本钩子可能改写参数"（供审计口径核对）。
 export function registerHook(side, tool, name, fn, opts = {}) {
   if (!['before', 'after'].includes(side)) throw new Error('hook side 非法: ' + side);
   if (typeof fn !== 'function') throw new Error('hook fn 必须是函数');
   if (registry.length >= MAX_HOOKS) throw new Error('hooks 注册超上限 ' + MAX_HOOKS);
-  registry.push({ side, tool: tool || '*', name, fn, builtin: !!opts.builtin, failClosed: !!opts.failClosed });
-  return { side, tool: tool || '*', name, builtin: !!opts.builtin };
+  // OP-03 规则①：失败语义必须显式声明。兼容旧的 failClosed 布尔（老调用方），但两者都没有就拒绝注册。
+  let failure = opts.failure;
+  if (!failure && opts.failClosed !== undefined) failure = opts.failClosed ? 'closed' : 'open';
+  if (!FAILURE_MODES.includes(failure)) {
+    throw new Error(`hook ${name} 必须显式声明失败语义 opts.failure='closed'|'open'（OP-03：语义不能靠隐式默认）`);
+  }
+  const h = {
+    side, tool: tool || '*', name, fn, builtin: !!opts.builtin,
+    failure, timeoutMs: Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : DEFAULT_TIMEOUT_MS,
+    rewritesArgs: !!opts.rewritesArgs,
+  };
+  registry.push(h);
+  return { side: h.side, tool: h.tool, name: h.name, builtin: h.builtin, failure: h.failure };
 }
 
-// 查看已注册钩子（hooks_list 工具用；含 failClosed 语义——"出事时是拦还是放"必须可审计）
+// 查看已注册钩子（hooks_list 工具用；含失败语义——"出事时是拦还是放"必须可审计）
 export function listHooks() {
-  return registry.map((h) => ({ side: h.side, tool: h.tool, name: h.name, builtin: h.builtin, failClosed: h.failClosed }));
+  return registry.map((h) => ({
+    side: h.side, tool: h.tool, name: h.name, builtin: h.builtin,
+    failure: h.failure, timeoutMs: h.timeoutMs, rewritesArgs: h.rewritesArgs,
+  }));
+}
+
+// OP-03 启动自检：每个钩子的失败语义必须可判定（数量对账 + 取值合法）。返回 {n, closed, open, bad[]}
+export function hookPolicySummary() {
+  const bad = registry.filter((h) => !FAILURE_MODES.includes(h.failure)).map((h) => h.name);
+  return {
+    n: registry.length,
+    closed: registry.filter((h) => h.failure === 'closed').length,
+    open: registry.filter((h) => h.failure === 'open').length,
+    rewriters: registry.filter((h) => h.rewritesArgs).map((h) => h.name),
+    bad,
+  };
 }
 
 // 移除钩子（平台配置/管理用；side/tool/name 可部分省略做通配）
@@ -42,30 +82,55 @@ export function clearHook(side, tool, name) {
   return true;
 }
 
+// 钩子失败留痕（OP-03 规则③）：不阻断主流程，失败必须可事后查到。
+function logHookFailure(h, kind, reason) {
+  try {
+    db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [null, 'hook:' + kind, `hook=${h.name} side=${h.side} tool=${h.tool} failure=${h.failure} ${String(reason).slice(0, 200)}`]).catch(() => {});
+  } catch { /* 留痕失败不影响主流程 */ }
+}
+
 // 触发某 side+工具名的全部钩子。payload 传入 {args, ctx}；钩子可改 payload.args（浅合并语义）。
-// 返回 { stopped:boolean, reason?, by?, allowed?:boolean }——某钩子 stop 后不再执行后续钩子；
-// allow 短路（P6 规则层）：某钩子返回 {allow:true} 则跳过其余钩子并标记 allowed（调用方免审批/免纪律拦截）。
+// 返回 { stopped, reason?, by?, allowed?, rewrites?:[{by,asked,used}] }
+//   · 某钩子 stop 后不再执行后续钩子；
+//   · allow 短路（P6 规则层）：返回 {allow:true} 则跳过其余钩子并标记 allowed；
+//   · rewrites：本 side 内发生过的参数改写（调用方据此落 `hook:rewrite` 账本）。
 export async function emitHooks(side, tool, payload) {
   // P2：把当前工具名注入 payload.ctx.__toolName，供 '*' 纪律钩子（preset/启用集等）按名判定
   if (payload && payload.ctx && typeof payload.ctx === 'object') payload.ctx.__toolName = tool;
+  const rewrites = [];
   for (const h of registry) {
     if (h.side !== side) continue;
     if (h.tool !== tool && h.tool !== '*') continue;
     let r = null;
+    let timer = null;
     try {
-      r = (await h.fn(payload)) || {};
+      // OP-03 规则②：钩子必须有超时——旧实现没有超时，一个挂起的钩子能冻住整轮工具调用。
+      r = (await Promise.race([
+        Promise.resolve().then(() => h.fn(payload)),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('hook timeout ' + h.timeoutMs + 'ms')), h.timeoutMs); }),
+      ])) || {};
     } catch (e) {
-      if (h.builtin && h.failClosed) {
-        return { stopped: true, reason: '内置钩子 ' + h.name + ' 异常，fail-closed 拦截：' + (e && e.message ? e.message : e), by: h.name };
+      const isTimeout = /^hook timeout /.test(String((e && e.message) || ''));
+      const msg = (e && e.message ? e.message : String(e));
+      logHookFailure(h, isTimeout ? 'timeout' : 'error', msg);
+      if (h.failure === 'closed') {
+        return { stopped: true, reason: '钩子 ' + h.name + (isTimeout ? ' 超时' : ' 异常') + '，按其声明的 fail-closed 语义拦截：' + msg, by: h.name, rewrites };
       }
-      console.warn('[hooks] ' + side + ':' + tool + ' 钩子 ' + h.name + ' 抛错已忽略（不阻断主流程）: ' + (e && e.message ? e.message : e));
+      console.warn('[hooks] ' + side + ':' + tool + ' 钩子 ' + h.name + (isTimeout ? ' 超时' : ' 抛错') + '已按 fail-open 放行: ' + msg);
       continue;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    if (r.allow) return { stopped: false, allowed: true, by: h.name }; // P6 allow 短路：跳过其余纪律钩子
-    if (r.stop) return { stopped: true, reason: r.reason || h.name, by: h.name };
-    if (r.args && typeof r.args === 'object') payload.args = { ...(payload.args || {}), ...r.args };
+    if (r.allow) return { stopped: false, allowed: true, by: h.name, rewrites }; // P6 allow 短路
+    if (r.stop) return { stopped: true, reason: r.reason || h.name, by: h.name, rewrites };
+    if (r.args && typeof r.args === 'object') {
+      const asked = { ...(payload.args || {}) };
+      payload.args = { ...(payload.args || {}), ...r.args };
+      rewrites.push({ by: h.name, asked, used: { ...payload.args } });
+    }
   }
-  return { stopped: false };
+  return { stopped: false, rewrites };
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +139,9 @@ export async function emitHooks(side, tool, payload) {
 // 规则顺序=数组序，先匹配先生效；无规则命中 → 走常规纪律/审批。规则格式：
 //   { id, pattern: 工具名正则, argPattern?: 参数 JSON 正则(可空), action: 'allow'|'deny', why }
 // 本钩子最先注册（registry 序），deny 在 allow 前判定——管理员 deny 永远优先于 allow。
+// **失败语义 = open**（显式声明，OP-03）：它挂 `before '*'`，一旦 fail-closed，任何一次正则异常都会
+//   让**整个工具面停摆**；而平台真正的硬门禁是权限层 + 受控工具审批，本钩子是管理员便利层。
+//   "放行不等于不声张"：异常已由 emitHooks 落 `hook:error` 账本（OP-03 规则③）。
 // ---------------------------------------------------------------------------
 registerHook('before', '*', 'access_rules_guard', ({ args, ctx }) => {
   const name = ctx?.__toolName;
@@ -98,7 +166,7 @@ registerHook('before', '*', 'access_rules_guard', ({ args, ctx }) => {
   }
   if (denied) return { stop: true, reason: 'access 规则 deny（id=' + denied.id + '）：' + (denied.why || denied.pattern) + '。确需执行可 ask_user 请平台管理员调整规则' };
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // ---------------------------------------------------------------------------
 // 内置纪律钩子（平台强制安全网，fail-closed）
@@ -124,7 +192,7 @@ registerHook('before', 'run_command', 'danger_command_guard', ({ args }) => {
     }
   }
   return {};
-}, { builtin: true, failClosed: true });
+}, { builtin: true, failure: 'closed' });
 
 // O-5 修复（2026-09 批2）：写类守卫只挂【写类工具】（write_file/append_file/edit_file/copy_move/delete_file/mkdir），
 // 不挂 '*'——此前 '*' 使 read_file 读 /etc 配置也被"写守卫"误拦（读不是写，无写入风险）。
@@ -145,13 +213,15 @@ for (const w of WRITE_PATH_TOOLS) {
       return { stop: true, reason: '写入系统关键区被纪律钩子拦截：' + p + '（平台代码/工作区文件可正常写；确需写系统文件请改用 run_command 并明确经用户确认）' };
     }
     return {};
-  }, { builtin: true, failClosed: true });
+  }, { builtin: true, failure: 'closed' });
 }
 
 // ---------------------------------------------------------------------------
 // P2 纪律统一层（2026-09 批2）：从 execTool 内联门禁迁入的纪律钩子——
 // 纪律集中一处（listHooks 可审计、可动态调整），execTool 只保留权限层（checkPerm/limitPath/审批）与安全网（占位符检疫/快照）。
-// 说明：内置纪律钩子 fail-open（返回 stop 才拦，抛错 warn 不阻断）——纪律是引导，安全网（danger/system_write）才 fail-closed。
+// **失败语义一律 open**（显式声明，OP-03）：纪律是**引导**（拦的是"用错工具/越档调用"，不是危险动作），
+// 钩子自身出问题时应放行并留痕，而不是把主流程一起拖停。真正 fail-closed 的只有上面两处安全网
+// （danger_command_guard / system_write_guard）——"出事时是拦还是放"现在写在每一处注册上，不再是隐式默认。
 // ---------------------------------------------------------------------------
 
 // 3. preset 暴露面门禁（原 execTool 内联：非 all 会话调用未暴露层级 → 指引）
@@ -166,7 +236,7 @@ registerHook('before', '*', 'preset_tier_guard', ({ args, ctx }) => {
     }
   }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // 4. 启用集门禁（原 execTool 内联：账号启用集未含且非平台豁免 → 指引）
 registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
@@ -179,7 +249,7 @@ registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
     return { stop: true, reason: `工具 ${name} 未在工具启用集内（默认 28 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。` };
   }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // 5. 只读意图门禁（原 execTool 内联 P4：请求级只读规划时禁改动类工具）
 const READONLY_MUTATING = new Set([
@@ -195,7 +265,7 @@ for (const m of READONLY_MUTATING) {
       return { stop: true, reason: '只读规划意图（本轮）：工具 ' + m + ' 已被禁用。规划阶段只用只读工具（read/list/grep/find/web/db_query）；把方案作为回答展示，等用户批准后再执行改动。' };
     }
     return {};
-  }, { builtin: true, failClosed: false });
+  }, { builtin: true, failure: 'open' });
 }
 // P24(O-21/O-23)：MCP 外部工具（动态命名）同样受只读意图约束——管理员信任 ≠ 只读轮可执行外部副作用
 registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
@@ -204,7 +274,7 @@ registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
     return { stop: true, reason: '只读规划意图（本轮）：MCP 外部工具 ' + name + ' 已被禁用。规划阶段只用只读工具；把方案作为回答展示，等用户批准后再执行。' };
   }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
 registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
@@ -215,7 +285,7 @@ registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
     return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
   }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // A5 硬闸门（§8.6 关键流程技能）：开发需求采集必须走 intake 流程——
 // 未在本会话载入对应 intake 技能（plugin-dev-intake/app-dev-intake/shell-intake）时拒绝 intake_submit，
@@ -236,12 +306,14 @@ registerHook('before', 'intake_submit', 'intake_skill_guard', async ({ args, ctx
     return { stop: true, reason: `开发需求采集硬闸（§8.6）：intake_submit(${atype}) 前必须先载入流程技能 "${need}"（skill_load {name:"${need}"}）——它会逐项向你采集 触发场景/期望效果/涉及壳/代码动作类型，字段齐才允许立项，防跳过需求采集直接开发。` };
   }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });
 
 // ---------------------------------------------------------------------------
 // G 域质量钩子（2026-09 批4）：after 型（观察/留痕，不阻断已执行）——
 //   7. code_syntax_check（after write_file/edit_file）：改 .js/.mjs/.cjs 后自动 node --check，语法错误写入 result.hookNote
 //   8. finish_selfcheck_note（after finish_task）：校验 summary 长度与 selfCheck 提示（留痕引导提测质量）
+// after 型一律 failure: 'open'：**执行已经完成**，此时"拦"没有意义；且它们只写 `result.hookNote`，
+//   hookNote 是附加上下文，按 §7.3 双投影接缝不得替换工具结果本身。
 // ---------------------------------------------------------------------------
 const CODE_EXT = /\.(js|mjs|cjs)$/;
 const syntaxNote = ({ args, result }) => {
@@ -258,8 +330,8 @@ const syntaxNote = ({ args, result }) => {
   }
   return {};
 };
-registerHook('after', 'write_file', 'code_syntax_check', syntaxNote, { builtin: true, failClosed: false });
-registerHook('after', 'edit_file', 'code_syntax_check', syntaxNote, { builtin: true, failClosed: false });
+registerHook('after', 'write_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open' });
+registerHook('after', 'edit_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open' });
 
 registerHook('after', 'finish_task', 'finish_selfcheck_note', ({ args, result }) => {
   try {
@@ -272,4 +344,4 @@ registerHook('after', 'finish_task', 'finish_selfcheck_note', ({ args, result })
     }
   } catch { /* 忽略 */ }
   return {};
-}, { builtin: true, failClosed: false });
+}, { builtin: true, failure: 'open' });

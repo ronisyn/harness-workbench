@@ -148,7 +148,8 @@ function slimToolCallForContext(call) {
 // 它是"每轮改写请求前缀"的元凶——一旦触发，其后全部历史的前缀缓存失效（实测 C1 仅 11–25%，见归档 §20 步1）。
 // 依据《RW-Agent 架构 v1.1》§5.3 纪律1（只追加）：唯一允许的改写是"段边界整段替换一次"（maybeCollapseEarly）。
 // 上下文体积由 spill（步6）与段边界折叠共同控制；原文始终在 DB messages/tool_calls 可查（§7.3 双投影）。
-async function agentLimits() {
+// 导出给 RA-31 能力清单用（`/api/agent/capabilities` 要与会话同源读护栏现值；不导出就只能猜或硬编码）
+export async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {

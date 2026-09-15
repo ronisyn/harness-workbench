@@ -492,6 +492,9 @@ export async function initSchema() {
     // kind='collapse' 行留 NULL——折叠调用用的是归档器提示，不属于会话前缀，记上去会误导归因。
     'ALTER TABLE usage_stats ADD COLUMN prefix_sys_hash VARCHAR(12) NULL',
     'ALTER TABLE usage_stats ADD COLUMN prefix_tools_hash VARCHAR(12) NULL',
+    // 2026-09-15 工具面会话内冻结（引擎方案 v0.3 §4.4.1 规则3）：`light`（轻量面/全量面）此前按**每条消息内容**算，
+    // 同会话在闲聊↔干活之间切换时工具面来回翻，翻一次整段前缀作废。改为**单向粘滞**：一旦用过全量面就置 1，此后固定全量面。
+    'ALTER TABLE conversations ADD COLUMN face_full TINYINT DEFAULT 0',
     // 2026-09-09 清理：capabilities 账号表（A/B/C 虚假"能力开关"从未接线到运行时，随代码移除一起清理）
     'DROP TABLE IF EXISTS capabilities',
   ];
@@ -540,7 +543,7 @@ export async function initSchema() {
   try {
     const missing = [];
     const checks = [
-      ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'],
+      ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'], ['conversations', 'face_full'],
       ['usage_stats', 'shell_id'], ['usage_stats', 'prefix_sys_hash'], ['usage_stats', 'prefix_tools_hash'],
       ['tool_calls', 'shell_id'], ['tool_calls', 'result_bytes'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'], ['knowledge', 'kind'],
     ];
