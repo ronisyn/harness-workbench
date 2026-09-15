@@ -43,7 +43,7 @@ test('落账失败不阻断：db 抛错也不得让 persistEvent 抛出（事件
   assert.equal(typeof st.lastError === 'string' || st.lastError === null, true);
 });
 
-test('唯一写入点：只有 eventlog.js 往 events 表写，且 emitEv 必须调用它', () => {
+test('唯一写入点：只有 eventlog.js 往 events 表写，且挂在**对外事件契约的唯一出口**（index.js 的 send）上', () => {
   const files = [];
   const walk = (d) => {
     for (const it of fs.readdirSync(path.join(ROOT, d), { withFileTypes: true })) {
@@ -56,7 +56,12 @@ test('唯一写入点：只有 eventlog.js 往 events 表写，且 emitEv 必须
   walk('server');
   const inserters = files.filter((f) => /INSERT INTO events\b/i.test(read(f)));
   assert.deepEqual(inserters, ['server/eventlog.js'], 'events 账本只能有一个写入点，实际：' + inserters.join(', '));
-  assert.match(read('server/agent.js'), /persistEvent\(conversationId, ev\)/, 'emitEv 必须把事件交给账本（否则账本永远空着）');
+  // 落账点必须在 `send`（run 边界由 index.js 直接发、agent 侧事件也转到它）——挂在 agent.js 的 emitEv 上会漏掉
+  // intent/run_start/done/run_end，而那正是投影最需要的事件（第一版就是这么错的，端到端取证当场发现）。
+  const idx = read('server/index.js');
+  const sendBody = idx.slice(idx.indexOf('const send = (obj) =>'), idx.indexOf('const send = (obj) =>') + 900);
+  assert.match(sendBody, /persistEvent\(conversationId, obj\)/, 'send 必须把每一帧交给账本');
+  assert.ok(!/persistEvent/.test(read('server/agent.js')), 'agent.js 不得再落账（否则与 send 双写）');
   // 迁移与建表都要有（存量库走迁移、新库走 SCHEMA —— 两条路径缺一不可）
   assert.ok(VERSIONS.some((v) => v.id === '0003_event_log'), '迁移链必须有 0003_event_log');
   assert.match(read('server/db.js'), /CREATE TABLE IF NOT EXISTS events/, '新库 SCHEMA 也要建这张表');

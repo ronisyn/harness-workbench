@@ -10,6 +10,7 @@ import { activeProviders, allProviders, findProvider, syncChatModels } from './l
 import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
+import { persistEvent } from './eventlog.js'; // 事件账本（append-only）：唯一写入点挂在 send 上
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, TOOL_CN, TOOL_TIER_CN } from './tools/registry.js';
 import { shellContext, rowToPack } from './shells.js';
 import { classifyIntent } from './intent.js';
@@ -932,6 +933,13 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   const stopSseHeartbeat = () => { clearTimeout(sseIdle); sseIdle = null; };
   let sseLastSeq = 0; // RA-37：最近一次带序号的帧（事件环 seq）——写进 SSE 的 id: 字段，客户端可据此断线续订
   const send = (obj) => {
+    // 事件账本（append-only，2026-09-15）：**这里是对外事件契约的唯一出口** —— run 边界（intent/run_start/
+    // done/stopped/error/run_end）由本文件直接发，agent 侧事件（tool_*/plan/approval/llm_retry…）经 emit 闭包
+    // 也转到这里，所以"每一帧都落账"只有挂在 send 上才成立。
+    // 教训（端到端取证当场发现）：第一版把它挂在 agent.js 的 emitEv 上，于是账本里**没有 run 边界**——
+    // 而那正是投影最需要的事件。写完立刻用真会话核对，才看见这个洞。
+    // fire-and-forget：账本写不进去不许影响对话（内部自行计数并在出错时出声）。
+    try { persistEvent(conversationId, obj); } catch { /* 账本异常不影响对话 */ }
     try {
       if (!res.writableEnded) {
         // RA-37 事件契约：帧格式 `[id: <seq>\n]data: <json>\n\n`。id 只在载荷带 seq 时写
@@ -1109,6 +1117,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
             // P20：agent 每轮流式正文实时透出（final 真流；工具轮旁白由前端灰字化）
             if (!firstTokenMs) firstTokenMs = Date.now() - t0;
             send({ type: 'delta', delta: ev.delta });
+          } else if (ev.type === 'llm_retry') {
+            // 2026-09-15（统一失败分类/重试）：重试必须**看得见**——原先没有这个分支，
+            // 于是客户端与账本都收不到它（一个只写在代码里、没人能观测到的事件等于不存在）
+            send({ type: 'llm_retry', retry: ev.retry });
+          } else {
+            // 未知类型照发（客户端按契约忽略未知类型），好让**账本**不漏事件——账本是回放/投影的源，
+            // 漏一种就少一种。这里刻意不做白名单过滤。
+            send(ev);
           }
         },
       });

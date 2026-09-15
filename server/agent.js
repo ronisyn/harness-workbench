@@ -3,7 +3,6 @@
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost, llmRetryDecision, cancellableDelay } from './llm/gateway.js';
-import { persistEvent } from './eventlog.js'; // 事件账本（唯一写入点）
 import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
@@ -56,9 +55,9 @@ const ACT_MAX = 300;
 function emitEv(conversationId, emit, ev) {
   try { if (emit) emit(ev); } catch { /* 外部 emit 失败不影响执行 */ }
   if (!conversationId) return;
-  // 账本（append-only，落库）：SSE 只到"现在连着的那些页面"，内存环重启即忘；
-  // 事件账本是"可回放的那一份"（下一步的确定性投影要读它）。fire-and-forget，失败出声不阻断。
-  try { persistEvent(conversationId, ev); } catch { /* 落账异常不得影响执行（内部已自行计数/报错） */ }
+  // 注意：事件账本（append-only）**不在这里落**——它挂在 index.js 的 `send` 上（对外事件契约的唯一出口）。
+  // 第一版就挂在本函数，结果账本里没有 run_start/done/run_end（那些是本文件外面直接发的），
+  // 而那正是投影最需要的事件；端到端取证当场发现。**凡是"所有事件都经过"的判断，必须用真流量核对。**
   try {
     const key = String(conversationId);
     let rec = activity.get(key);
