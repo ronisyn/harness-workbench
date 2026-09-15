@@ -145,9 +145,17 @@ function headlessDb({ conv = { id: 77, permission: 'write', provider: null, mode
         messages.push({ id, role: params[1], content: params[2] });
         return { insertId: id };
       }
-      // 真库的 DESC LIMIT 30 语义：夹具必须照做 —— 窗口滑动的改写**正是要靠它才能被看见**
-      if (/FROM messages WHERE conversation_id=\? ORDER BY id DESC LIMIT 30/.test(s)) {
-        return messages.slice(-30).slice().reverse().map((m) => ({ ...m }));
+      // 真库语义：全量、按 id 升序（2026-09-16 去窗口之后与 /api/chat 同口径）。
+      // 夹具**照抄实现真正发的那条 SQL 形状**：形状一变（比如窗口/截断复活）这里就查不到东西，
+      // 前缀会当场塌成"只剩本条任务"，比"静默返回全量"更能让改写暴露出来。
+      if (/FROM messages WHERE conversation_id=\? ORDER BY id$/.test(s)) {
+        return messages.map((m) => ({ role: m.role, content: m.content }));
+      }
+      // 旧窗口形状：**故意如实执行**（而不是抛错）——这样"窗口复活"会以**真的改写**的形态出现，
+      // 让上面那条"长会话不许落 C4"的行为断言去抓它（抛错只能证明写了那条 SQL，证明不了前缀坏了）
+      if (/FROM messages WHERE conversation_id=\? ORDER BY id DESC LIMIT (\d+)/.test(s)) {
+        const n = Number(/LIMIT (\d+)/.exec(s)[1]);
+        return messages.slice(-n).slice().reverse().map((m) => ({ role: m.role, content: m.content }));
       }
       if (/FROM settings WHERE skey=\?/.test(s)) return [];
       if (/SELECT COALESCE\(SUM\(cost\)/.test(s)) return [{ c: 0 }];
@@ -190,25 +198,80 @@ test('③ headless：第一轮落一行 prefix:assemble（改前这条路径**�
   assert.equal(runAgent.calls[0].messages.at(-1).content, '看一眼磁盘', '落账不得改动送进引擎的消息');
 });
 
-test('③ headless：跨轮对照的是**真正拼进请求的那串历史**（窗口滑动 ⇒ 如实记一次 C4）', async () => {
+// 2026-09-16（v0.3 §4.4.1 规则1「只追加：禁止中途改写早期消息」）：headless 原有的
+//   "最近 30 条窗口 + assistant >4000 字符截断"已删除（与 `/api/chat` 09-16 那批 `17c74e9` 同口径）。
+//   下面这条**正向**断言的就是"去掉窗口之后长会话不再落 C4"——它是本次改动的机器判据。
+test('③ headless：**长会话连续多轮不许落 prefix:invalidate**（去窗口之后前缀只追加）', async () => {
+  // 故意造到远超旧窗口线（旧实现 30 条就开滑）：40 条旧历史
+  const messages = [];
+  for (let i = 1; i <= 40; i++) messages.push({ id: i, role: i % 2 ? 'user' : 'assistant', content: '第' + i + '条' });
+  const db = headlessDb({ messages });
+  const runAgent = fakeAgent();
+  const deps = { ...hdDeps({ db, runAgent }), db };
+  await runHeadless({ ...deps, task: '第一轮', quiet: true });
+  await runHeadless({ ...deps, task: '第二轮', quiet: true });
+  await runHeadless({ ...deps, task: '第三轮', quiet: true });
+
+  assert.equal(db.audit.filter((r) => r.action === 'prefix:invalidate').length, 0,
+    '只追加就是合规：跨过旧窗口线之后连续三轮**一条 C4 都不许有**（窗口一回来这里必然红）');
+  const rows = db.audit.filter((r) => r.action === 'prefix:assemble');
+  assert.equal(rows.length, 3, '每轮各一行指纹（跨轮对照的对照来源）');
+  // 条数逐轮 +2（本轮任务 + 上一轮回复）：41 → 43 → 45 —— 只增不减，正是"只追加"的形状
+  assert.match(rows[0].detail, / cnt=41 peak=41 /, '第 1 轮＝40 条旧历史 + 本轮任务');
+  assert.match(rows[1].detail, / cnt=43 peak=43 /, '第 2 轮＝41 + 上一轮回复 + 本轮任务（全量，不滑窗）');
+  assert.match(rows[2].detail, / cnt=45 peak=45 /, '第 3 轮同理：前缀只会变长，不会换头');
+  // 账与请求同源：真送出去的就是那 45 条（头 40 条旧历史**逐字还在最前面**）
+  assert.equal(runAgent.calls.length, 3);
+  assert.equal(runAgent.calls[2].messages.length, 45, '送进引擎的确实是全量历史（旧窗口实现这里只会是 30）');
+  assert.equal(runAgent.calls[2].messages[0].content, '第1条', '最老的那条历史仍在前缀最前（窗口若复活，这里会变成"第3条"）');
+});
+
+test('③ headless：跨轮对照的是**真正拼进请求的那串历史**（真的改写了才落 C4，不再靠窗口造样本）', async () => {
   const messages = [];
   for (let i = 1; i <= 28; i++) messages.push({ id: i, role: i % 2 ? 'user' : 'assistant', content: '第' + i + '条' });
   const db = headlessDb({ messages });
-  const deps = { ...hdDeps({ db }), db };
-  // 第 1 轮：库里 28 条 + 刚落的本轮用户消息 = 29 条（还没到 30 条窗口线）
+  const runAgent = fakeAgent();
+  const deps = { ...hdDeps({ db, runAgent }), db };
   await runHeadless({ ...deps, task: '第一轮', quiet: true });
   const first = db.audit.filter((r) => r.action === 'prefix:assemble');
   assert.equal(first.length, 1);
   assert.match(first[0].detail, / cnt=29 peak=29 /, '对照的条数＝真正拼进去的那串（29 = 28 条旧历史 + 本轮任务）');
-  // 第 2 轮：库里 31 条 ⇒ 窗口只取最近 30 条，前缀的**头一条**从 #1 变成 #2
+  assert.equal(runAgent.calls[0].messages.length, 29, '送进引擎的确实是那 29 条（账与请求同源）');
+  // 真改写：把库里早期消息**真的删掉**（事故形状；窗口已不是改写源了）
+  db.messages.splice(0, 10);
   await runHeadless({ ...deps, task: '第二轮', quiet: true });
   const invalid = db.audit.filter((r) => r.action === 'prefix:invalidate');
-  assert.equal(invalid.length, 1, '窗口滑掉第 1 条 = 前缀头部变了 ⇒ C4 非预期失效必须被看见（改前这条路看不见）');
-  // 注：这里 lost=0 —— 条数没少（29→30），是**指纹分支**抓到的"同条数换头"。两条分支同属一份判据，不必都命中。
-  assert.match(invalid[0].detail, / rewrite=1 lost=0 src=headless$/, 'C4 行要标明来源：三端混在一张表里，没有 src 就没法归因');
+  assert.equal(invalid.length, 1, '真的改写了历史 ⇒ C4 非预期失效必须被看见（判据没有被放宽）');
+  assert.match(invalid[0].detail, / rewrite=1 lost=8 src=headless$/, 'C4 行要标明来源，并如实报出少了多少条（29 峰值 − 21 本轮 = 8）');
   const last = db.audit.filter((r) => r.action === 'prefix:assemble').at(-1);
-  assert.match(last.detail, / cnt=30 peak=30 /, '本轮指纹＝窗口那 30 条（峰值只涨不落：会话历史见过的最大条数）');
-  assert.equal(db.audit.filter((r) => r.action === 'prefix:assemble').length, 2, '每轮各一行指纹（跨轮对照的对照来源）');
+  assert.match(last.detail, / cnt=21 peak=29 /, '这一轮只剩 21 条、峰值 29（lost 相对峰值，不相对上一轮）');
+  assert.equal(db.audit.filter((r) => r.action === 'prefix:assemble').length, 2, '每轮各一行指纹');
+});
+
+test('③ headless：长 assistant 历史**原样进请求**（截断一回来 ⇒ 前缀中段被换 ⇒ 必须落 C4）', async () => {
+  // 4600 字符的 assistant 历史（超过旧实现 4000 字符的截断线）
+  const long = '原'.repeat(4600);
+  const messages = [
+    { id: 1, role: 'user', content: '请给我一段长文' },
+    { id: 2, role: 'assistant', content: long },
+  ];
+  const db = headlessDb({ messages });
+  const runAgent = fakeAgent();
+  const deps = { ...hdDeps({ db, runAgent }), db };
+  await runHeadless({ ...deps, task: '第一轮', quiet: true });
+  await runHeadless({ ...deps, task: '第二轮', quiet: true });
+  assert.equal(runAgent.calls[1].messages[1].content, long,
+    '历史里的长文必须**一字不改**进请求（旧实现这里会变成"头 2400 + 标记 + 尾 1600"）');
+  assert.equal(db.audit.filter((r) => r.action === 'prefix:invalidate').length, 0,
+    '原样重放长文就是只追加：不许落 C4（截断一回来，下面这条与上面那条会一起红）');
+});
+
+test('③ headless：源码里不许再有"窗口/截断"的形状（静态反向锁：行为夹具之外再钉一道）', () => {
+  const src = read('scripts/rw-run.mjs');
+  assert.ok(!/ORDER BY id DESC LIMIT \d+/.test(src), '历史不得按 DESC/LIMIT 读（v0.3 §4.4.1 规则1：滑窗＝每轮改写前缀）');
+  assert.ok(!/历史消息过长已截断/.test(src), '不得再贴回截断标记（把历史中段换成另一串字节，同样不是只追加）');
+  assert.ok(!/\.slice\(0,\s*2400\)/.test(src), '旧截断实现（头 2400 + 尾 1600）不得复活');
+  assert.ok(/FROM messages WHERE conversation_id=\? ORDER BY id'/.test(src), '必须按 id 升序读**全量**历史（与 server/index.js 同口径）');
 });
 
 test('③ headless：短会话（历史不超窗）**不许**误报 C4（判据没被放宽，也没被弄成惊弓之鸟）', async () => {

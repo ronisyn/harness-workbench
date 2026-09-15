@@ -303,17 +303,21 @@ async function assembleMessages({ db, conv, task, RW_WORKSPACE }) {
       }
     } catch { /* 项目说明不可用时跳过（与平台侧同处置，不因此中断一次执行） */ }
   }
-  // 历史：最近 30 条（长会话压缩口径见平台侧 /api/chat；headless 不做摘要生成——那是旁路 LLM 成本，
-  // 不该由"跑一次任务"悄悄产生）。当前这条用户消息刚落库，所以它天然在最后一条。
-  const rows = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 30', [conv.id]);
-  for (const m of rows.reverse()) {
-    let c = String(m.content || '');
-    if (m.role === 'assistant' && c.length > 4000) {
-      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
-    }
+  // 历史：**全量、原样**（v0.3 §4.4.1 规则1「只追加：禁止中途改写早期消息；折叠只在**段边界整段替换一次**」）。
+  // 2026-09-16 改（与 `/api/chat` 同一批口径，后者见 `server/index.js:909-922`）：这里原有的
+  //   "最近 30 条窗口 + assistant >4000 字符截断"**已删除**——同一份代码库里两条路径对同一条铁律两种行为，
+  //   而这两种形状**不是只追加**：窗口每滑一轮就换掉前缀的头一条、截断把历史中段换成另一串字节。
+  //   以前它只是"没人看得见"；2026-09-16 补上组装侧跨轮账（`server/prefix-assemble.js`）之后，
+  //   它当场暴露成**每轮一行** `prefix:invalidate`（`src=headless`，C4 非预期）。这是真改写，不是误报。
+  // **不在这里发明新的窗口/阈值**：要压体积就用既有机制——`agent.js` 的 `maybeCollapseEarly`
+  //   （段边界**整段替换一次**，落 `prefix:collapse`、不计 C4）与工具结果 spill（§4.4.1 规则4），
+  //   它们是"允许的那一次改写"，与"每次组装都改写"是两件事。
+  // 当前这条用户消息刚落库，所以它天然在最后一条。
+  const rows = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conv.id]);
+  for (const m of rows) {
     // hist 与 messages 收**同一批对象**：两者若各拼一份，将来改了其中一处就会出现
     // "账上记的 ≠ 真发出去的"（那正是这套机检要防的事，机检自己先不能犯）。
-    const one = { role: m.role, content: c };
+    const one = { role: m.role, content: String(m.content || '') };
     hist.push(one);
     messages.push(one);
   }
@@ -380,7 +384,7 @@ export async function runHeadless({
   // （`server/prefix-assemble.js`），落同一本账（`audit_log` 的 `prefix:assemble` / `prefix:invalidate`）。
   // 位置：与 /api/chat 同口径 —— **参数全部定型之后、请求发给模型之前**（不会把没发出去的请求记成账）。
   // 与 /api/chat **如实不同的两点**（不假装三端一模一样）：
-  //   ① `hist` 传的是**真正拼进请求的那段历史**（上面 assembleMessages 的窗口），不是 DB 全文；
+  //   ① `hist` 现在是**全量历史**（2026-09-16 去窗口之后与 `/api/chat` 同口径：调什么就记什么，都是"真发出去的那串"）；
   //   ② `shellKey`/`shellSchema` 是 null —— headless 不装壳 schema（理由见文件头"刻意不做的事"）；
   //      `enabledTools` 是它本来就读到的那个启用集（工具面与平台同源，lane 才不会无故分叉）。
   try {
