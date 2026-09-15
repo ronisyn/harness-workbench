@@ -41,6 +41,20 @@ export const FAIL = {
   LLM_NETWORK: { retryable: true, note: '网络/空闲超时类失败' },
   LLM_STREAM_BROKEN: { retryable: false, note: '流式帧损坏 → 走非流式兜底（那是另一种机制，不是重试）' },
   LLM_UNKNOWN: { retryable: false, note: '未分类失败（按不可重试处理）' },
+  // ---------- HTTP 对外接口侧（2026-09-16，D4/RA-42） ----------
+  // 这几条是**响应体里的机器可读码**（`{ok:false, code}`），不走工具失败分类，但同表登记——理由与上面一样：
+  // 码表是唯一出处，夹具的"源码里出现的码都在表里"交叉核对才拦得住改名/漏登记。
+  // retryable 在这里的含义是"调用方原样重试是否有意义"（与工具侧同义）。
+  PARAM_MISSING: { retryable: false, note: '请求参数缺失（调用方改参数，重试无效）' },
+  CONV_NOT_FOUND: { retryable: false, note: '会话不存在或不属于本账号' },
+  CONCURRENCY_LIMIT: { retryable: true, note: '同账号并发对话已达上限；槽位何时释放取决于别人的对话，故服务端**不给** Retry-After，调用方按指数退避重试' },
+  IDEMPOTENT_IN_PROGRESS: { retryable: true, note: '同一幂等键的上一次请求仍在进行中；稍后用同一个键重试即可（不会重复执行）' },
+  IDEMPOTENT_KEY_REUSED: { retryable: false, note: '同一幂等键对应的请求体与上次不同；换键或原样重发上次的请求' },
+  STOPPED_BY_USER: { retryable: false, note: '用户点了停止（投递记为 failed，同一个键可重发）' },
+  CLIENT_DISCONNECTED: { retryable: true, note: '调用方在收到 done 之前断连 ⇒ 服务端已中止本轮；同一个键重发即重做' },
+  EXPORT_FAILED: { retryable: false, note: '会话导出失败（看 message）' },
+  IMPORT_FAILED: { retryable: false, note: '会话导入失败（格式版本/校验/事务回滚，看 message）' },
+  INTERNAL: { retryable: true, note: '服务端未预期异常；已记堆栈，调用方可退避重试' },
 };
 
 /**

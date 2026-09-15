@@ -146,6 +146,34 @@ export const VERSIONS = [
       INDEX idx_events_arch_time (created_at)
     )`],
   },
+  {
+    id: '0005_deliveries', note: '外部投递记录（幂等键 + 死信落点，D4/RA-42）',
+    // 2026-09-16（D4 拍板 D5/D6）：外部调用一次一行。为什么**不**复用 events：那是只追加的事实账本，
+    // 它值钱的地方正是"唯一写入点 / 只追加 / 投影源"三条口径（server/eventlog.js），塞进状态机会污染它；
+    // 它也没有"谁调用的、试了几次、怎么重放"这三样。也**不**复用 task_contracts：那是任务契约语义，
+    // 与"一次外部调用"的寿命和归属都不同。
+    // `idem_key` 可空（不带幂等键的调用照记），唯一键只在"账号 + 幂等键"上——MySQL 允许多行 NULL。
+    // **不设自动死信阈值**（D6）：state 只有 pending|running|succeeded|failed，failed 就是死信落点，
+    // 重放＝同一个幂等键重发 POST /api/chat（不另造重放 API）。
+    statements: [`CREATE TABLE IF NOT EXISTS deliveries (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      account_id INT NULL,
+      conversation_id INT NULL,
+      idem_key VARCHAR(200) NULL,
+      request_hash VARCHAR(64) NULL,
+      state VARCHAR(16) NOT NULL DEFAULT 'running',
+      attempts INT NOT NULL DEFAULT 1,
+      message_id BIGINT NULL,
+      run_id BIGINT NULL,
+      response_json JSON NULL,
+      last_error VARCHAR(500) NULL,
+      last_error_code VARCHAR(32) NULL,
+      created_at DATETIME DEFAULT NOW(),
+      updated_at DATETIME DEFAULT NOW(),
+      UNIQUE KEY uk_deliveries_idem (account_id, idem_key),
+      INDEX idx_deliveries_state (state, id)
+    )`],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -967,6 +967,35 @@
         }
       ],
       "note": "**2026-09-16 落地主体（D2′，背景见冲突登记 C-33）**：平台原先照\"部署在 /srv 下的 Linux 机器\"写，换到客户机（Windows Server）时不会报错、只会**悄悄走错分支**。两个真根因已按结构修掉：① 用 `RW_FS_ROOT`（平台所在盘的盘根）替掉兼作\"无边界\"哨兵的根斜杠字符串，`inside()` 改用 `path.relative`（顺带修掉\"根下任何路径都判在外\"的既有错）；② 新增 `server/shell.js` 作为\"命令串怎么执行\"的唯一出处（Linux `bash -c` / Windows `powershell.exe -Command` + UTF-8 前言——**选型是实测的**：`cmd.exe /c` 会吞掉内层引号、返回空输出且 code=0，而 PowerShell 的引号/中文/emoji/退出码都对），`run_command`/`run_test`/`run_long_task`/契约验收钩子/MCP 全部走它。另：环境事实由代码位置推导（平台目录＝`server/` 的上级、工作区＝兄弟目录，**与现行 /srv 部署逐字节相同**）；临时目录用 `os.tmpdir()` 并留 `RW_JOBS_DIR`（Windows 会清 %TEMP%，KB4506040）；`RW_RESTART_CMD` 让 Windows 侧的重启可配（WinSW 的 `restart!` 是唯一为\"进程内自我重启\"设计的入口，`sc stop`/`nssm stop` 会把服务停死）；安全网（系统区写入/危险命令）补齐 Windows 判据（原先只认 Unix 路径 ⇒ 在客户机是空网）。**已在真机验证的**（本机 Windows + 部署后的 Linux 服务器）：env 的三条推导（两边都核对了推导值与旧字面量逐字节相同）、shell 的引号/中文/emoji/管道/含空格路径/退出码/命令不存在、restartPlan 四条臂、**\"本机没有可用的自动重启方式\"时经真实 reload_platform 工具如实报错**（`scheduled:false` + 给出 WinSW 的正确填法，不假装重启过）、后台任务链路端到端（起进程→日志落 RW_JOBS_DIR→按 jobId 读回→taskkill 收树）、边界判据五种形态、安全网在 Windows 形态下确实拦得住、write 级白名单不可被连接符绕过。夹具共 11 条（`test/portability.test.mjs`）。**部署时撞见并已修的一个真 bug（值得记）**：给启动行加环境事实日志时用了 `RW_PLATFORM_DIR` 却没 import，本地 365 项夹具全绿、部署后 journalctl 才看见 `uncaughtException: ReferenceError`（全局兜底让服务没崩，selfcheck/agent-smoke 照过 12/12，所以差点漏掉）⇒ 补 import，并**新增一条静态核对**（server/ 下每个文件代码里用到的 RW_* 必须在本文件 import 过；反向核对过：去掉 import 即报红）。**尚未验证的（如实记）**：① 真正的 Windows Server 上的端到端启动（客户端验证进行中，见下）；② `scripts/windows/` 的安装/升级/卸载脚本只做过 PowerShell 5.1 解析器语法校验 + `-WhatIfOnly` 干跑，**没有真装过服务、没下载 WinSW、没动防火墙**，`restart!` 在 LocalSystem 身份下的自我重启要按手册 §4.2 实测一次；③ 除 `selfcheck.mjs`/`agent-smoke.mjs`/`kpi.mjs` 外的运维脚本未在 Windows 上验证（手册已如实列为\"未交付能力\"）。"
+    },
+    {
+      "id": "RA-56",
+      "title": "回调入口来源校验（飞书签名校验 + 未配置时如实告警）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/channels/feishu-webhook.js",
+          "pattern": "export function feishuSignature"
+        },
+        {
+          "file": "server/channels/feishu-webhook.js",
+          "pattern": "timingSafeEqual"
+        },
+        {
+          "file": "server/channels/feishu-webhook.js",
+          "pattern": "不校验来源"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "req.rawBody = buf"
+        },
+        {
+          "file": "test/feishu-webhook.test.mjs",
+          "pattern": "加密模式下的网址校验"
+        }
+      ],
+      "note": "**2026-09-16 落地（RA-42 的 HMAC 那一半；另两半\"幂等键/死信\"待拍板）**。缺口是真的：`POST /api/feishu/webhook` 是全仓**唯一没有 requireAuth 的写入路由**，原实现\"先看 challenge、没有就当真事件\"⇒ 未配加密策略时任何人 POST 一个 `im.message.receive_v1` 就能让平台真跑一轮 Agent（花模型费 + 让机器人往它指定的 chat_id 发消息）；配了 Encrypt Key 时 challenge 是加密下发的，而原代码在**解密之前**看 `body.challenge`，网址校验永远失败（这条不是安全问题是功能坏了）。修法**照飞书开放平台官方文档**（逐条核对原文，不是自己拍规范）：配 Encrypt Key ⇒ 签名校验 `sha256(X-Lark-Request-Timestamp + X-Lark-Request-Nonce + encrypt_key + 原始请求体)`，官方明确 body 要在反序列化**之前**取 ⇒ `express.json` 的 verify 钩子留一份 rawBody；只配 Verification Token ⇒ 比对事件里的 token；都没配 ⇒ 不阻断但启动时明确告警\"本入口不校验来源\"。challenge 官方口径**不在签名校验范围**，单独按 token 比对且必须先解密。顺序照 DSH 的 GitHub webhook 适配器（解析 JSON 之前验签、失败 401）。**真机验证**（服务器上，用本机真实密钥算签名、不打印密钥）：未带凭证 → 401「缺少签名头」；正确签名 → 200 `{ok:true}`；签名错一位 → 401「签名校验失败」；selfcheck 12/12。夹具 4 条起真 express + 真 HTTP；**反向核对过**：把签名与 token 两处判定短路 → 对应用例立刻报红。"
     }
   ]
 }

@@ -265,6 +265,25 @@ const SCHEMA = [
     archived_at DATETIME DEFAULT NOW(),
     INDEX idx_events_arch_time (created_at)
   )`,
+  // ---- 2026-09-16 D4/RA-42：外部投递记录（幂等键 + 死信落点）。与 migrations.js 的 0005 同一形状 ----
+  `CREATE TABLE IF NOT EXISTS deliveries (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NULL,
+    conversation_id INT NULL,
+    idem_key VARCHAR(200) NULL,
+    request_hash VARCHAR(64) NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'running',
+    attempts INT NOT NULL DEFAULT 1,
+    message_id BIGINT NULL,
+    run_id BIGINT NULL,
+    response_json JSON NULL,
+    last_error VARCHAR(500) NULL,
+    last_error_code VARCHAR(32) NULL,
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW(),
+    UNIQUE KEY uk_deliveries_idem (account_id, idem_key),
+    INDEX idx_deliveries_state (state, id)
+  )`,
   `CREATE TABLE IF NOT EXISTS price_table (
     id INT AUTO_INCREMENT PRIMARY KEY,
     provider_id INT,

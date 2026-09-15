@@ -45,6 +45,8 @@ import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
 import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from './env.js';
 import { SHELL_CN } from './shell.js';
+import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
+import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
 
 const app = express();
 // verify：留一份**原始请求体字节**。飞书回调的来源校验要对"原始 body"算 HMAC（官方明确"不要在反序列化后计算"），
@@ -426,6 +428,40 @@ app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
 });
 function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
 
+// D4（拍板 D7）：`/export`（上面那条 JSONL）**冻结不动**——它已有形状是别人在依赖的；
+// 带版本、可导入的自描述格式走**新端点**（`session-export.js` 那份实现此前零调用方，是"留给人的决策"）。
+// 两条并存、各说各的用途：要审计/回放用 JSONL，要搬家/长期保存用带 formatVersion 的这份。
+app.get('/api/conversations/:id/export-full', requireAuth, async (req, res) => {
+  try {
+    const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    if (!conv) return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' });
+    const pack = await exportConversation(Number(req.params.id));
+    res.json({ ok: true, filename: 'rw-session-' + req.params.id + '.json', content: pack });
+  } catch (e) { res.status(400).json({ ok: false, code: 'EXPORT_FAILED', message: e.message }); }
+});
+
+// 导入：**默认 dry-run**（只校验、不写库），要真写必须显式 `?dryRun=0`；一个事务整份落地，绝不覆盖源会话。
+app.post('/api/conversations/import', requireAuth, async (req, res) => {
+  const dryRun = String(req.query.dryRun ?? '1') !== '0';
+  try {
+    const pack = (req.body || {}).content ?? req.body;
+    const out = await importConversation(pack, { dryRun });
+    res.json({ ok: true, dryRun, ...out });
+  } catch (e) {
+    res.status(400).json({ ok: false, code: 'IMPORT_FAILED', message: e.message });
+  }
+});
+
+// D4/RA-42 死信落点：失败的投递记录（`state=failed`）＝"没做完的外部调用"。只读、不自动重试——
+// 重放＝用同一个 Idempotency-Key 重发 POST /api/chat（不另造重放 API，避免两套入口两套语义）。
+app.get('/api/deliveries', requireAuth, async (req, res) => {
+  try {
+    const state = req.query.state ? String(req.query.state) : null;
+    const rows = await listDeliveries({ state, limit: req.query.limit });
+    res.json({ ok: true, deliveries: rows });
+  } catch (e) { res.status(500).json({ ok: false, code: 'INTERNAL', message: e.message }); }
+});
+
 // ---------- A9 审计（§8.10）：过滤器（时间/动作分类/壳/关键词）+ 按会话回溯 + 90 天归档 ----------
 const AUDIT_CATS = {
   tool: ['tool:%'],
@@ -700,9 +736,9 @@ function resolveRoute(content, provider, model, defOverrides) {
 
 app.post('/api/chat', requireAuth, async (req, res) => {
   let { conversationId, content, provider, model } = req.body || {};
-  if (!conversationId || !content) return res.status(400).json({ ok: false, message: '参数缺失' });
+  if (!conversationId || !content) return res.status(400).json({ ok: false, code: 'PARAM_MISSING', message: '参数缺失' });
   const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id, face_full FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
-  if (!convs.length) { return res.status(404).json({ ok: false, message: '会话不存在' }); }
+  if (!convs.length) { return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' }); }
   const convProvider = (convs[0].provider === 'auto') ? null : (convs[0].provider || null);
   const convModel = (convs[0].model === '__auto__') ? null : (convs[0].model || null);
   // C4 显式模型绝对锁（2026-09 批3）：解析优先级 = ①body 显式传的 provider/model（用户本轮刚切换）→
@@ -793,8 +829,32 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 同账号同时在跑的对话超过上限则拒绝（先于写库），提示当前排在前面的对话数（队列可见）。
   const maxConcurrent = Number(await getSetting('max_concurrent_chats', 5)) || 0;
   const curInflight = inflight.get(req.user.id) || 0;
+  // D4/RA-42 幂等门：位置很要紧——参数已校验、并发槽还没占、库还没写：这是"还没有任何副作用"的最后时点。
+  // 语义见 server/deliveries.js（同一键返回**原始接受结果**；进行中 409；失败可重发；换参数即拒）。
+  const idemKey = String(req.get('Idempotency-Key') || '').trim().slice(0, IDEM_KEY_MAX) || null;
+  let deliveryId = null;
+  if (idemKey) {
+    const begun = await beginDelivery({
+      accountId: req.user.id, conversationId, idemKey,
+      hash: requestHash({ conversationId, content, provider: wantProvider || provider || null, model: wantModel || model || null }),
+    });
+    if (begun.conflict === 'in_progress') {
+      return res.status(409).json({ ok: false, code: 'IDEMPOTENT_IN_PROGRESS', message: '同一个 Idempotency-Key 的上一次请求仍在进行中：请稍后用它重试（重复的请求不会被执行两次），或换一个键发起新请求。' });
+    }
+    if (begun.conflict === 'key_reused') {
+      return res.status(409).json({ ok: false, code: 'IDEMPOTENT_KEY_REUSED', message: '同一个 Idempotency-Key 上次对应的请求体与本次不同：幂等键必须对应同一个请求。请换一个键，或原样重发上次那个请求。' });
+    }
+    if (begun.replay) {
+      // 回放的是**非流式**的接受结果：流不可重放。调用方要事件就按 messageId 走 /messages 与 /stream 补。
+      return res.json({ ok: true, replayed: true, ...begun.replay });
+    }
+    deliveryId = begun.id;
+  }
   if (maxConcurrent > 0 && curInflight >= maxConcurrent) {
-    return res.status(429).json({ ok: false, message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
+    await finishDelivery(deliveryId, { state: 'failed', error: '并发对话已达上限', errorCode: 'CONCURRENCY_LIMIT' });
+    // 故意**不给 Retry-After**：槽位何时释放取决于别人的对话跑多久，服务端给不出真值，编一个数只会误导调用方。
+    // 契约里写明：客户端按《接口规范》§七 的指数退避重试。
+    return res.status(429).json({ ok: false, code: 'CONCURRENCY_LIMIT', message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
   }
   inflight.set(req.user.id, curInflight + 1);
   const permission = convs[0].permission || 'full';
@@ -1232,6 +1292,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
       // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
       send({ type: 'done', usage, messageId: savedMsgId, runId: agentRunId, totals: runOutcome.usageTotals || null });
+      // D4/RA-42：把这次"接受结果"落进投递记录——同一个幂等键再来时**回放它**，不再跑一轮。
+      await finishDelivery(deliveryId, {
+        state: 'succeeded', messageId: savedMsgId, runId: agentRunId,
+        response: { messageId: savedMsgId, runId: agentRunId, content: answer, usage },
+      });
       // RA-37：run_end 是"本次执行的账已落定"的回执——只在落库之后发，带持久化 id 与全量用量。
       // 与 done 的区别：done 是**流终结**（老客户端只看它，字段保持向后兼容）；run_end 是**一致性回执**，
       // 客户端拿它做"事件流重建结果 vs 服务端事实"的校验，也拿它做断线后"这一段是否已落定"的判定。
@@ -1272,6 +1337,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           reasonText: why, messageId: placeholderId, totals: runOutcome && runOutcome.usageTotals ? runOutcome.usageTotals : null,
           capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)),
         });
+        // 投递记录：中断/断连算 failed（没有可回放的结果）——同一个幂等键因此**允许重发**，
+        // 这正是"调用方在 done 前断线后重试"该走的路（不会因为这次没做完就永远拒绝它）。
+        const stopReason = (actrl.signal && actrl.signal.reason === 'user') ? 'user' : 'disconnect';
+        await finishDelivery(deliveryId, { state: 'failed', messageId: placeholderId, runId: agentRunId, error: why, errorCode: stopReason === 'user' ? 'STOPPED_BY_USER' : 'CLIENT_DISCONNECTED' });
       } catch { /* 忽略 */ }
     }
   } catch (e) {
@@ -1296,6 +1365,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     } catch { /* 忽略 */ }
     send({ type: 'error', message: e.message });
     send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId, capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)) });
+    // 投递记录：异常也是 failed（带内部失败码）——同一个幂等键允许重发
+    await finishDelivery(deliveryId, { state: 'failed', messageId: errPlaceholderId, runId: agentRunId, error: String(e.message || e).slice(0, 300), errorCode: 'INTERNAL' });
     // 自审补：异常路径同样落观测（该轮真实消耗已入 usage_stats，观测表须同口径有行）
     if (recordTelemetry) { try { await recordTelemetry(); } catch { /* 观测落表失败不影响收尾 */ } }
     if (agentRunId) { try { await markRun(agentRunId, 'interrupted', '执行出错: ' + e.message.slice(0, 200)); } catch { /* ignore */ } }
