@@ -58,6 +58,109 @@ if (!SRC || !/^rw_mig_rehearsal_[0-9]+_[a-z0-9]+$/.test(TMP) || TMP === SRC) {
 // 无法从迁移语句倒推的手工倒推项：旧类型不在 ALTER 文本里，只能写死一处（**新增 MODIFY 类迁移时必须来这里补**）
 const EXTRA_UNDO_COLS = [['shell_tools', 'mode', 'varchar(8)']];
 
+// ── 从迁移链**倒推**旧形状（纯函数，**在连库之前**，可用 `--plan-undo` 单独跑）────────────────────────
+// 为什么倒推而不是手抄"历史形状"：见文件头。这里的纪律是**每一条链语句都必须有归宿**——要么能倒推，
+// 要么被显式列为"不需要倒推"（如 DROP TABLE），要么进 unresolved 让前置断言**报红**；**不许静默跳过**。
+// 2026-09-16 补索引（C-57 / 0007 真机翻车）：倒推此前只认"加列/建表"，而 `CREATE TABLE … LIKE 源库表`
+// **会把索引一起复制过来** ⇒ 链里的 `CREATE FULLTEXT INDEX ft_kb_text`（0007）在旧形状里已经存在，
+// 迁移报 `Duplicate key name` 并停在该步。现在 `ADD … KEY/INDEX` 与 `CREATE … INDEX … ON …` 都倒推成 `DROP INDEX`。
+/** 把一个语句分类（纯函数）。返回 {kind,table,name} 或 {kind:'unresolved',reason}——reason 要说清"手工项该加什么" */
+function classifyStatement(sql) {
+  const s = String(sql).trim();
+  let m;
+  // ① 加列
+  if ((m = /^ALTER TABLE\s+`?(\w+)`?\s+ADD COLUMN\s+`?(\w+)`?/i.exec(s))) return { kind: 'column', table: m[1], name: m[2] };
+  // ② 加索引（ALTER 形式：ADD [UNIQUE|FULLTEXT|SPATIAL] KEY|INDEX <名字>）
+  if ((m = /^ALTER TABLE\s+`?(\w+)`?\s+ADD\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?(?:KEY|INDEX)\s+`?(\w+)`?/i.exec(s))) return { kind: 'index', table: m[1], name: m[2] };
+  // ③ 加索引（CREATE 形式：CREATE [UNIQUE|FULLTEXT|SPATIAL] INDEX <名字> ON <表>）——0007 就是这一种
+  if ((m = /^CREATE\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?/i.exec(s))) return { kind: 'index', table: m[2], name: m[1] };
+  // ④ 建表
+  if ((m = /^CREATE TABLE(?:\s+IF NOT EXISTS)?\s+`?(\w+)`?/i.exec(s))) return { kind: 'table', table: m[1] };
+  // ⑤ 删表：**不需要倒推**（旧形状里本就可能没有；后置核对会断言它确实不在），但要显式识别，不当"没归宿"
+  if ((m = /^DROP TABLE(?:\s+IF EXISTS)?\s+`?(\w+)`?/i.exec(s))) return { kind: 'table-drop', table: m[1] };
+  // ⑥ 改列：旧类型不在语句里 ⇒ 只能靠 EXTRA_UNDO_COLS 手工项兜底（找不到就必须 unresolved）
+  if ((m = /^ALTER TABLE\s+`?(\w+)`?\s+MODIFY COLUMN\s+`?(\w+)`?/i.exec(s))) return { kind: 'modify-column', table: m[1], name: m[2] };
+  return {
+    kind: 'unresolved',
+    reason: '推导不出倒推动作，也没被显式豁免：' + s.replace(/\s+/g, ' ').slice(0, 90)
+      + '（要么给倒推逻辑加一条分类，要么进 EXTRA_UNDO_COLS 手工项——**不许静默放过**）',
+  };
+}
+
+/** 倒推动作的 DDL 文本（人读 + 夹具断言用；实际执行走下面那段"只在目标存在时才动"的代码） */
+function undoDdl(op) {
+  if (op.kind === 'column') return 'ALTER TABLE ' + op.table + ' DROP COLUMN ' + op.name;
+  if (op.kind === 'index') return 'DROP INDEX ' + op.name + ' ON ' + op.table;
+  if (op.kind === 'modify-column') return null; // 旧类型不在语句里（靠 EXTRA_UNDO_COLS 手工项，见 resolveStatement）
+  return 'DROP TABLE IF EXISTS ' + op.table;
+}
+
+/**
+ * 一条语句在"倒推"这件事上的**归宿**（纯函数；`chainUndo` 与 `--classify` 共用同一份判断，不许两处判得不一样）：
+ *   {kind:'op', op}            → 能倒推，op 里带 undo DDL
+ *   {kind:'exempt', reason}    → 显式识别、确实不需要倒推（如 DROP TABLE）
+ *   {kind:'unresolved', reason}→ **没归宿**：调用方必须报红，reason 说清"手工项该加什么"
+ */
+function resolveStatement(sql) {
+  const c = classifyStatement(sql);
+  if (c.kind === 'table-drop') return { kind: 'exempt', classify: c, reason: '删表：不需要倒推（旧形状里本就可能没有；后置核对断言它确实不在）' };
+  if (c.kind === 'unresolved') return { kind: 'unresolved', classify: c, reason: c.reason };
+  if (c.kind === 'modify-column') {
+    // 旧类型不在 ALTER 文本里 ⇒ 只能靠手工项；**找不到就必须 unresolved**（这是"不许静默放过"的关键一条）
+    const hit = EXTRA_UNDO_COLS.find(([t, col]) => t === c.table && col === c.name);
+    if (!hit) return { kind: 'unresolved', classify: c, reason: '改列（MODIFY COLUMN ' + c.table + '.' + c.name + '）：旧类型不在语句里 ⇒ EXTRA_UNDO_COLS 里补 [\'' + c.table + '\',\'' + c.name + '\',\'<旧类型>\']' };
+    return { kind: 'exempt', classify: c, reason: '改列：由 EXTRA_UNDO_COLS 手工项还原为 ' + hit[2] };
+  }
+  return { kind: 'op', classify: c, op: { ...c, undo: undoDdl(c) } };
+}
+
+/**
+ * 从迁移链**倒推**旧形状（纯函数，默认倒推真实的 VERSIONS）。
+ * 返回 {ops, exempt, unresolved}：ops 已按**倒推顺序**（链的反序）排好；exempt 是"显式识别但不需要倒推"的；
+ * unresolved 非空 ⇒ 调用方**必须报红**（前置断言），不许放过。
+ */
+function chainUndo(versions = VERSIONS) {
+  const ops = [];
+  const exempt = [];
+  const unresolved = [];
+  for (const v of [...versions].reverse()) for (const sql of [...(v.statements || [])].reverse()) {
+    const r = resolveStatement(sql);
+    if (r.kind === 'op') ops.push(r.op);
+    else if (r.kind === 'exempt') exempt.push({ sql, reason: r.reason });
+    else unresolved.push({ sql, reason: r.reason });
+  }
+  return { ops, exempt, unresolved };
+}
+
+/** 从迁移链**推导**它改过结构的表（唯一事实源=链本身；手抄一份必然随链漂移）。只被 DROP 的表不算。 */
+function chainTables() {
+  const out = new Set();
+  for (const v of VERSIONS) for (const sql of v.statements || []) {
+    const c = classifyStatement(sql);
+    if (c.kind === 'column' || c.kind === 'index' || c.kind === 'table' || c.kind === 'modify-column') out.add(c.table);
+  }
+  return [...out];
+}
+
+// `--plan-undo` / `--classify`：**不连库**的 dry-run（夹具与排障用；也是"倒推对索引不再瞎"的可核验出口）
+//   node scripts/migration-rehearsal.mjs --plan-undo            # 打印整条链的倒推计划（有 unresolved 即 exit 1）
+//   node scripts/migration-rehearsal.mjs --classify "<一条 SQL>"  # 单条语句怎么倒推（同上）
+if (process.argv.includes('--plan-undo') || process.argv.includes('--classify')) {
+  const at = process.argv.indexOf('--classify');
+  const out = at >= 0
+    ? (() => {
+        const sql = process.argv[at + 1] || '';
+        const r = resolveStatement(sql);
+        return { sql, verdict: r.kind, classify: r.classify, undo: r.op ? r.op.undo : null, reason: r.reason || '', unresolved: r.kind === 'unresolved' ? [r.reason] : [] };
+      })()
+    : (() => {
+        const { ops, exempt, unresolved } = chainUndo();
+        return { head: HEAD, ops, exempt, unresolved };
+      })();
+  console.log(JSON.stringify(out, null, 2));
+  process.exit(out.unresolved.length ? 1 : 0);
+}
+
 const admin = await mysql.createConnection({ host: config.db.host, port: config.db.port, user: config.db.user, password: config.db.pass, connectTimeout: 8000 });
 let work = null; // 建库之后才有（显式绑定一次性库）
 const mq = async (sql, params) => (await admin.query(sql, params))[0]; // admin：元数据 / 库生命周期
@@ -68,29 +171,8 @@ const colOf = async (t, c) => (await mq('SELECT COLUMN_TYPE, IS_NULLABLE FROM in
 const colsOf = async (t) => mq('SELECT COLUMN_NAME, DATA_TYPE, COLUMN_KEY, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION', [TMP, t]);
 const countOf = async (t) => Number((await q('SELECT COUNT(*) c FROM `' + t + '`'))[0].c);
 const pkOf = async (t) => (await mq("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_KEY='PRI' ORDER BY ORDINAL_POSITION", [TMP, t])).map((r) => r.COLUMN_NAME);
-
-/** 从迁移链**推导**它改过结构的表（唯一事实源=链本身；手抄一份必然随链漂移）。只被 DROP 的表不算。 */
-function chainTables() {
-  const out = new Set();
-  for (const v of VERSIONS) for (const sql of v.statements || []) {
-    const m = /^\s*(?:ALTER TABLE|CREATE TABLE(?:\s+IF NOT EXISTS)?)\s+(\w+)/i.exec(sql);
-    if (m) out.add(m[1]);
-  }
-  return [...out];
-}
-
-/** 从迁移链**倒推**旧形状（ADD COLUMN→DROP COLUMN、CREATE TABLE→DROP TABLE）。倒推不了的语句要报出来。 */
-function chainUndo() {
-  const ops = [];
-  const skipped = [];
-  for (const v of [...VERSIONS].reverse()) for (const sql of [...(v.statements || [])].reverse()) {
-    let m;
-    if ((m = /^\s*ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i.exec(sql))) ops.push({ kind: 'column', table: m[1], name: m[2] });
-    else if ((m = /^\s*CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(\w+)/i.exec(sql))) ops.push({ kind: 'table', table: m[1] });
-    else skipped.push(sql.replace(/\s+/g, ' ').slice(0, 70));
-  }
-  return { ops, skipped };
-}
+/** 一次性库里某个索引在不在（倒推索引与前置断言共用） */
+const indexOf = async (t, name) => Number((await mq('SELECT COUNT(*) c FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND INDEX_NAME=?', [TMP, t, name]))[0].c) > 0;
 
 let verdict = { ok: false, checks: [], note: '未跑完' };
 let dropped = false;
@@ -123,23 +205,29 @@ try {
     await mq(`CREATE TABLE \`${TMP}\`.\`${t}\` LIKE \`${SRC}\`.\`${t}\``);
     copied.push(t);
   }
-  const { ops, skipped } = chainUndo();
+  const { ops, exempt, unresolved } = chainUndo();
   let undone = 0;
   for (const op of ops) {
+    // 口径一致："只在目标存在时才动"（源库可能已经是旧形状，或这条根本还没应用过）
     if (op.kind === 'table') { await q(`DROP TABLE IF EXISTS \`${op.table}\``); undone++; }
-    else if (await colOf(op.table, op.name)) { await q(`ALTER TABLE \`${op.table}\` DROP COLUMN \`${op.name}\``); undone++; }
+    else if (op.kind === 'index' && await indexOf(op.table, op.name)) { await q(`DROP INDEX \`${op.name}\` ON \`${op.table}\``); undone++; }
+    else if (op.kind === 'column' && await colOf(op.table, op.name)) { await q(`ALTER TABLE \`${op.table}\` DROP COLUMN \`${op.name}\``); undone++; }
   }
   for (const [t, c, oldType] of EXTRA_UNDO_COLS) {
     if (await colOf(t, c)) { await q(`ALTER TABLE \`${t}\` MODIFY COLUMN \`${c}\` ${oldType} NOT NULL`); undone++; }
   }
-  say(`   复制 ${copied.length} 张表结构，倒推 ${undone} 处（链里已算过 ${ops.length} 处，手工项 ${EXTRA_UNDO_COLS.length} 处）`);
-  if (skipped.length) say('   （链里非"加列/建表"的语句，倒推不了、也不需要倒推：' + skipped.length + ' 条，如 ' + skipped.slice(0, 2).join(' / ') + '…）');
+  say(`   复制 ${copied.length} 张表结构，倒推 ${undone} 处（链里已算过 ${ops.length} 处——列/索引/表，手工项 ${EXTRA_UNDO_COLS.length} 处）`);
+  if (exempt.length) say('   （链里显式识别、不需要倒推的语句 ' + exempt.length + ' 条：' + exempt.map((e) => e.reason.split('：')[0]).join(' / ') + '）');
 
   say('== 3. 前置断言：旧形状**确实**是旧的（否则演练会变成假绿）==');
   const pre = [];
   const preCheck = (name, ok, detail) => { pre.push({ name, ok: !!ok, detail }); say(`   ${ok ? '✅' : '❌'} ${name}${detail ? '：' + detail : ''}`); };
+  // 倒推不出来的语句 ⇒ **在这里报红**（不许静默放过）：链新增了一种 DDL，倒推逻辑就必须同步长出来
+  preCheck('链里每条语句都能倒推或被显式豁免（' + (ops.length + exempt.length) + '/' + (ops.length + exempt.length + unresolved.length) + '）',
+    unresolved.length === 0, unresolved.map((u) => u.reason).join('；'));
   for (const op of ops) {
     if (op.kind === 'table') preCheck('旧形状没有 ' + op.table + ' 表', !(await tableExists(TMP, op.table)));
+    else if (op.kind === 'index') preCheck('旧形状没有索引 ' + op.name + '（表 ' + op.table + '）', !(await indexOf(op.table, op.name)));
     else preCheck('旧形状没有 ' + op.table + '.' + op.name, !(await colOf(op.table, op.name)));
   }
   for (const [t, c, oldType] of EXTRA_UNDO_COLS) {
@@ -267,6 +355,16 @@ try {
     if (dr) check('链删的表确实不在：' + dr[1], !(await tableExists(TMP, dr[1])));
   }
   check('链加的列数 > 0（否则上面那圈核对是空的）', added > 0, added + ' 列');
+  // 链里加的**索引**也必须在（与列同口径：清单从链推导）。2026-09-16 补（C-57）：此前只有列被核对，
+  // 索引两头没人管——旧形状没被摘掉（本步迁移直接报 Duplicate key name）、升级后有没有建起来也没人看。
+  let idxAdded = 0;
+  for (const v of VERSIONS) for (const sql of v.statements || []) {
+    const c = classifyStatement(sql);
+    if (c.kind !== 'index') continue;
+    idxAdded++;
+    check('链加的索引在：' + c.name + '（表 ' + c.table + '）', await indexOf(c.table, c.name));
+  }
+  check('链加的索引数 > 0（同上，防空跑）', idxAdded > 0, idxAdded + ' 个');
   // 关键列**有值**：链里声明了字面量 DEFAULT 的列，存量行必须拿到那个默认值（不是 NULL、也不是别的）
   let defChecked = 0;
   for (const v of VERSIONS) for (const sql of v.statements || []) {
