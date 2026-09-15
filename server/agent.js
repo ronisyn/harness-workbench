@@ -155,7 +155,7 @@ export async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive', 'llm_max_retries']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive', 'llm_max_retries', 'collapse_window_ratio']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -174,7 +174,12 @@ export async function agentLimits() {
       collapseChars: pick('collapse_trigger_chars', 0) || 30000,
       collapseInput: pick('collapse_input_chars', 0) || 18000,
       // RA-08 比例制：折叠阈值 = min(绝对阈值, 模型窗口 × 占比 × 1.5 字符/token)；0=只用绝对阈值
-      collapseWindowRatio: (pick('collapse_window_ratio', 0) || 15) / 100,
+      // 2026-09-15 修（C-14）：① 这一项**原来根本不在上面那条 SELECT 的键清单里** ⇒ pick 永远找不到行、
+      //   永远返回默认值，于是 settings 里怎么调都不生效（这正是本文件自己在 failGuardN 上写过的那类错：
+      //   设置项看着存在，实际没接线）。② 原来的 `pick(...,0) || 15` 会把**显式 0** 也变成 15，
+      //   而 schema 明写"0=关闭比例制只用绝对阈值" ⇒ 显式 0 被静默当成 15%。现在缺省走 15、
+      //   显式 0 原样传下去（由 modelwindow.effectiveCollapseChars 解释为"关闭比例制"）。
+      collapseWindowRatio: pick('collapse_window_ratio', 15) / 100,
       // F4 连续失败：schema hint=0 关闭，须与"无行缺省 3"区分（0||3 会把显式 0 变 3——修复）
       // 注：原先另写一个 failPick 完成同样语义，但它引用的 rows 是 try 块内的 const（词法作用域不可见），
       // 必然抛 "rows is not defined" 并让整个护栏读取回退默认值 —— 故直接用同语义的 pick。

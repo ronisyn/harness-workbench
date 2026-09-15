@@ -41,3 +41,23 @@ test('窗口越大阈值越大（单调），且设置里的覆盖表优先于�
   const ov = effectiveCollapseChars('deepseek-v4-flash', 999999, 0.15, { 'deepseek-v4': 8192 });
   assert.equal(ov.chars, Math.floor(8192 * 0.15 * CHARS_PER_TOKEN), '覆盖表生效');
 });
+
+// 2026-09-15（C-14）：settings `collapse_window_ratio` 声明"0=关闭比例制只用绝对阈值"，
+// 而这条语义此前**三层都没实现**（键不在读取清单里 + `pick||15` 把 0 变 15 + 这里把 0 变 0.15）。
+test('比例制可显式关闭：ratio=0 → 只用绝对阈值（不是"按 15% 继续收紧"）', () => {
+  const r = effectiveCollapseChars('deepseek-v4-flash', 30000, 0, null);
+  assert.equal(r.chars, 30000, '关闭后必须用绝对阈值');
+  assert.equal(r.source, 'absolute');
+  assert.match(r.note, /比例制已关闭/);
+  // 关闭是"更保守"：不会比开启时更激进
+  const on = effectiveCollapseChars('deepseek-v4-flash', 30000, 0.15, null);
+  assert.ok(r.chars >= on.chars, '关闭比例制不得让阈值变小（否则就是把"关闭"实现成"更激进"）');
+});
+
+test('ratio=0 与"没传/脏值"必须区分：null/undefined 走默认比例，负数按默认比例兜底', () => {
+  const base = effectiveCollapseChars('deepseek-v3', 999999, 0.15, null).chars;
+  assert.equal(effectiveCollapseChars('deepseek-v3', 999999, null, null).chars, base, 'null＝没传，按默认 15%');
+  assert.equal(effectiveCollapseChars('deepseek-v3', 999999, undefined, null).chars, base, 'undefined＝没传');
+  assert.equal(effectiveCollapseChars('deepseek-v3', 999999, -1, null).chars, base, '负数＝配置错误，按默认兜底（不得把阈值压成 0）');
+  assert.equal(effectiveCollapseChars('deepseek-v3', 999999, 0, null).chars, 999999, '严格 0 才是关闭');
+});

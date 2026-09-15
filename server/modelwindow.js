@@ -34,6 +34,11 @@ export function windowOf(model, overrides) {
  */
 export function effectiveCollapseChars(model, absoluteChars, ratio, overrides) {
   const abs = Number.isFinite(absoluteChars) && absoluteChars > 0 ? absoluteChars : 30000;
+  // ratio === 0 ＝**显式关闭比例制**（settings `collapse_window_ratio` 的 0 语义，schema 已如此声明）：
+  // 只用绝对阈值。必须与"脏值回退默认比例"分开——负数/NaN 是配置错误，按默认 0.15 处理；
+  // 0 是明确意图，必须照办（否则界面上写"0=关闭"，实际仍按 15% 收紧，是静默说谎）。
+  // 只认严格 0：null/undefined（没传）走下面的默认分支，不当成"关闭"。
+  if (ratio === 0) return { chars: abs, source: 'absolute', windowTokens: windowOf(model, overrides), note: '比例制已关闭（collapse_window_ratio=0），只用绝对阈值 ' + abs + ' 字符' };
   const r = Number.isFinite(ratio) && ratio > 0 ? ratio : 0.15;
   const w = windowOf(model, overrides);
   if (!w) return { chars: abs, source: 'absolute', windowTokens: null, note: '模型窗口未知，按绝对阈值（' + abs + ' 字符）' };

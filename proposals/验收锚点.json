@@ -129,10 +129,26 @@
       "anchors": [
         {
           "file": "server/modelwindow.js",
-          "pattern": "export"
+          "pattern": "export function effectiveCollapseChars"
+        },
+        {
+          "file": "server/modelwindow.js",
+          "pattern": "比例制已关闭"
+        },
+        {
+          "file": "server/agent.js",
+          "pattern": "pick('collapse_window_ratio'"
+        },
+        {
+          "file": "test/modelwindow.test.mjs",
+          "pattern": "比例制可显式关闭"
+        },
+        {
+          "file": "test/settings-wiring.test.mjs",
+          "pattern": "设置永远不会生效"
         }
       ],
-      "note": "有效阈值 = min(绝对阈值, 窗口×占比)"
+      "note": "有效阈值 = min(绝对阈值, 窗口×占比)；0=关闭比例制只用绝对阈值。**2026-09-15 修（C-14）：这条设置此前三层都没接线**——键不在 `agentLimits()` 的 SELECT 清单里（pick 永远取默认）、取值时又接了『或 15』的兜底把显式 0 变成 15%、`effectiveCollapseChars` 还把 0 兜成 0.15，于是\"0=关闭\"在界面上写着、实际永远按 15% 收紧（静默说谎）。现在三层都通，并加了两条机检：① `test/settings-wiring.test.mjs` 核对\"凡被 pick 的键必须在读取清单里\"与\"schema 写 0=关闭 的键不得用『或默认值』把 0 吞掉\"；② `test/modelwindow.test.mjs` 锁住 0=关、null/脏值=默认 的区分。真机实测：设 42→0.42、设 0→关闭、删行→0.15。注：本表生成器会把竖线替换成斜杠，故此处不写字面竖线。"
     },
     {
       "id": "RA-09",

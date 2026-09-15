@@ -78,7 +78,12 @@ test('可重试次数来自设置项 llm_max_retries（0=关，默认 1），不
   assert.equal(s.min, 0, '必须允许 0＝关闭');
   assert.ok(SETTINGS_SCHEMA.some((x) => x.key === 'llm_max_retries'));
   assert.match(agentSrc, /pick\('llm_max_retries'/, 'agent.js 必须从 settings 读它');
-  assert.match(agentSrc, /llm_max_retries'\]\)/, 'agent.js 的 SELECT 键清单必须包含它（漏了会永远取默认值）');
+  // 键清单成员判定用**解析**而不是位置正则（第一版写成 /llm_max_retries'\]\)/ 依赖"它是最后一个键"，
+  // 后来往清单里加 collapse_window_ratio 就把自己判红了——测试不该依赖无关的排列顺序）
+  const m = /SELECT skey, svalue FROM settings WHERE skey IN \(([?,]+)\)',\s*\[([^\]]+)\]/.exec(agentSrc);
+  assert.ok(m, '未能在 agent.js 里定位设置读取语句');
+  const keys = [...m[2].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  assert.ok(keys.includes('llm_max_retries'), 'llm_max_retries 必须在 SELECT 键清单里（漏了会永远取默认值）');
 });
 
 // ---------- agent 侧顺序与传参（源级） ----------
