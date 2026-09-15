@@ -1110,43 +1110,41 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // 2026-09-11 自审：抽成 recordTelemetry()，异常路径同调用——原先仅在成功分支落表，
       // 导致"执行出错/工具被壳拦截"的轮次用量在账本中有、观测表缺行（execs 与成本口径不一致）。
       if (recordTelemetry) await recordTelemetry();
-      if (!skipStore) {
-        answer = result.content || '（无输出）';
-        usage = result.usage || {};
-        if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
-        // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不整段重发；
-        // 兜底路径（一次性 fallback / F6a 诚实说明 / guard 文案等生成型内容）仍按 8 字分块模拟
-        if (!result.streamed && answer) {
-          const chunkSize = 8;
-          for (let i = 0; i < answer.length; i += chunkSize) {
-            if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-            send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
-          }
-        } else if (answer) {
-          // RA-37 G1 补流对账：真流路径下，`answer` 可能在流完之后又被后置加工过——
-          // C4 自动续写段、TRUNC_NOTE 截断提示、假完成强制加注前缀、空答兜底摘要。
-          // 这些字节此前**从不经过 delta**，于是"事件流拼出来的正文 ≠ 落库正文"。
-          // 这里只补发"还没发出去的那一段"，不整段重发（否则客户端会重复显示一遍）：
-          //   · 后置追加（续写/截断提示/兜底摘要）→ 拼出的正文是落库正文的前缀 → 补发尾部；
-          //   · 假完成前缀（前置加注）→ 拼出的正文是落库正文的后缀 → 先补前缀，再补尾部。
-          const sentText = String(result.streamedText || '');
-          let head = '', tail = '';
-          if (!sentText) {
-            tail = answer; // 声称流式却没记到任何流式文本（异常路径）→ 整段补发
-          } else if (answer.startsWith(sentText)) {
-            head = ''; tail = answer.slice(sentText.length); // 后置追加：补尾部
-          } else if (answer.endsWith(sentText)) {
-            head = answer.slice(0, answer.length - sentText.length); tail = ''; // 前置加注：补前缀
-          } else if (answer.includes(sentText)) {
-            const at = answer.indexOf(sentText); head = answer.slice(0, at); tail = answer.slice(at + sentText.length);
-          } else {
-            // 对不上账：不静默（宁可多显示一遍，也不让客户端内容与落库不符），并如实告警
-            console.warn('[stream] 事件流正文与落库正文无法对账，已整段补发（conv=' + conversationId + ' streamed=' + sentText.length + ' answer=' + answer.length + '）');
-            tail = answer;
-          }
-          if (head) send({ type: 'delta', delta: head });
-          if (tail) send({ type: 'delta', delta: tail });
+      answer = result.content || '（无输出）';
+      usage = result.usage || {};
+      if (result.finishReason === 'length' && answer) answer += TRUNC_NOTE;
+      // P20：最终正文已在 agent 流式阶段经 delta 事件实时发出（result.streamed=true）→ 不整段重发；
+      // 兜底路径（一次性 fallback / F6a 诚实说明 / guard 文案等生成型内容）仍按 8 字分块模拟
+      if (!result.streamed && answer) {
+        const chunkSize = 8;
+        for (let i = 0; i < answer.length; i += chunkSize) {
+          if (!firstTokenMs) firstTokenMs = Date.now() - t0;
+          send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
         }
+      } else if (answer) {
+        // RA-37 G1 补流对账：真流路径下，`answer` 可能在流完之后又被后置加工过——
+        // C4 自动续写段、TRUNC_NOTE 截断提示、假完成强制加注前缀、空答兜底摘要。
+        // 这些字节此前**从不经过 delta**，于是"事件流拼出来的正文 ≠ 落库正文"。
+        // 这里只补发"还没发出去的那一段"，不整段重发（否则客户端会重复显示一遍）：
+        //   · 后置追加（续写/截断提示/兜底摘要）→ 拼出的正文是落库正文的前缀 → 补发尾部；
+        //   · 假完成前缀（前置加注）→ 拼出的正文是落库正文的后缀 → 先补前缀，再补尾部。
+        const sentText = String(result.streamedText || '');
+        let head = '', tail = '';
+        if (!sentText) {
+          tail = answer; // 声称流式却没记到任何流式文本（异常路径）→ 整段补发
+        } else if (answer.startsWith(sentText)) {
+          head = ''; tail = answer.slice(sentText.length); // 后置追加：补尾部
+        } else if (answer.endsWith(sentText)) {
+          head = answer.slice(0, answer.length - sentText.length); tail = ''; // 前置加注：补前缀
+        } else if (answer.includes(sentText)) {
+          const at = answer.indexOf(sentText); head = answer.slice(0, at); tail = answer.slice(at + sentText.length);
+        } else {
+          // 对不上账：不静默（宁可多显示一遍，也不让客户端内容与落库不符），并如实告警
+          console.warn('[stream] 事件流正文与落库正文无法对账，已整段补发（conv=' + conversationId + ' streamed=' + sentText.length + ' answer=' + answer.length + '）');
+          tail = answer;
+        }
+        if (head) send({ type: 'delta', delta: head });
+        if (tail) send({ type: 'delta', delta: tail });
       }
     }
     if (!skipStore) {
