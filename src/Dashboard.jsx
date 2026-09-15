@@ -132,11 +132,13 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
         )}
         {hitSum && (
           <div style={{ marginBottom: 10, padding: '6px 12px', borderRadius: 8, background: hitSum.alert ? '#fff1f0' : '#f0f7ff', border: '1px solid ' + (hitSum.alert ? '#ffa39e' : '#91caff'), color: hitSum.alert ? '#cf1322' : '#0958d9' }}>
-            {hitSum.alert
-              ? `⚠️ 缓存命中率告警：近7日均值 ${hitSum.avg7}% < 目标 ${hitSum.target}%（今日 ${hitSum.todayRate}%）——进化集已生成建议，可转行动`
-              : (hitSum.target > 0
-                ? `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（目标 ${hitSum.target}%）`
-                : `缓存命中率：今日 ${hitSum.todayRate}% · 近7日均值 ${hitSum.avg7}%（未启用目标——设置→观测组可设阈值告警）`)}
+            {/* 口径双轨（2026-09-15 M1b）：主指标＝单请求命中率的中位/P90（每轮质量）；
+                副指标＝累计比（DSH 右下角那个数就是它，≈1−2/N，随轮数趋近 100%，所以必须带轮数一起读）。 */}
+            {`每请求 中位 ${hitSum.perRequest?.median ?? '-'}% · P90 ${hitSum.perRequest?.p90 ?? '-'}%（近7天真实流量 ${hitSum.perRequest?.rounds ?? 0} 轮）`}
+            {' ｜ '}
+            {`会话累计 ${hitSum.cumulative?.rate ?? '-'}%（DSH 同口径 · ≈1−2/N · ${hitSum.cumulative?.rounds ?? 0} 轮）`}
+            {hitSum.target > 0 ? ` ｜ 目标 ${hitSum.target}%` : '（未启用目标——设置→观测组可设阈值告警）'}
+            {hitSum.alert ? '　⚠️ 累计低于目标——进化集已生成建议，可转行动' : ''}
           </div>
         )}
         {/* 迷你对话 */}

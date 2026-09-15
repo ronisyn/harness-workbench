@@ -29,6 +29,8 @@ import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from 
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
+import { REAL_WHERE } from './cohort.js';      // 复测口径单一来源（首页指标与复跑脚本同一份判据）
+import { checkEpochAndWarm } from './epoch.js'; // M2 换纪元检测与一次预热
 import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
 import { autoTitle } from './autotitle.js';
@@ -1247,27 +1249,59 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
   });
 });
 
-// ---------- 缓存命中率目标摘要（§8.10 cache_hit_rate_target；首页状态带数据源,2026-09-11 A1） ----------
+// ---------- 缓存命中率摘要（§8.10 cache_hit_rate_target；首页状态带数据源,2026-09-11 A1） ----------
+// 2026-09-15 M1b 口径双轨（见 proposals/缓存追平DSH-方案-v1-20260915.md §1、§4-M1）：
+//   · **主指标 perRequest**：单请求命中率的中位/P90 —— 这才是"每轮质量"，也是本平台要守的目标。
+//   · **副指标 cumulative**：命中/输入 的**累计比** —— 这正是 DSH 右下角那个 99.8% 的口径，
+//     它随会话变长单调趋近 100%（只追加历史下 ≈ 1 − 2/N），所以必须与轮数一起看，不能当每轮质量读。
+//   · 两者都限定在**真实流量**与 `kind='round'`（探针/孤儿/预热/折叠/摘要一律不计）。
+//     口径来自 server/cohort.js（与复跑脚本同一份判据，避免首页与脚本各说各话）。
 app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
   try {
     const raw = await db.query('SELECT svalue FROM settings WHERE skey=?', ['cache_hit_rate_target']);
     let target = 0;
     if (raw && raw[0] && raw[0].svalue != null) { const v = Number(raw[0].svalue); target = Number.isFinite(v) && v > 0 ? v : 0; }
     const rows = await db.query(
-      `SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss
-       FROM usage_stats WHERE account_id=? AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+      `SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
+       FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
        GROUP BY DATE(created_at) ORDER BY d`, [req.user.id]);
     const now = new Date(); const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    const sum = (arr) => arr.reduce((s, r) => s + Number(r.hit) + Number(r.miss), 0);
     const rate = (arr) => { const h = arr.reduce((s, r) => s + Number(r.hit), 0); const m = arr.reduce((s, r) => s + Number(r.miss), 0); return (h + m) > 0 ? (100 * h / (h + m)) : null; };
     const todayRow = rows.find((r) => String(r.d).slice(0, 10) === todayStr) || null;
     const f = (x) => (x == null ? null : Number(x.toFixed(1)));
     const todayRate = todayRow && (Number(todayRow.hit) + Number(todayRow.miss)) > 0 ? 100 * Number(todayRow.hit) / (Number(todayRow.hit) + Number(todayRow.miss)) : null;
     const avg7 = rate(rows.slice(-7));
+    // 主指标：近 7 天真实流量的**逐轮**命中率分布（中位/P90）
+    let perRequest = { median: null, p90: null, rounds: 0, convs: 0 };
+    let cumulative = { rate: f(avg7), hit: 0, miss: 0, rounds: 0 };
+    try {
+      const pr = await db.query(
+        `SELECT u.cache_hit_tokens h, u.cache_miss_tokens m, u.conversation_id cid
+           FROM usage_stats u
+          WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+            AND (${REAL_WHERE('u')})`, [req.user.id]);
+      const rates = pr.filter((r) => (Number(r.h) + Number(r.m)) > 0).map((r) => Number(r.h) / (Number(r.h) + Number(r.m)));
+      const q = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); const i = Math.min(s.length - 1, Math.max(0, Math.ceil(p * s.length) - 1)); return s[i]; };
+      perRequest = {
+        median: rates.length ? f(q(rates, 0.5) * 100) : null,
+        p90: rates.length ? f(q(rates, 0.9) * 100) : null,
+        rounds: pr.length,
+        convs: new Set(pr.map((r) => r.cid)).size,
+      };
+      const h = pr.reduce((s, r) => s + Number(r.h), 0), m = pr.reduce((s, r) => s + Number(r.m), 0);
+      cumulative = { rate: (h + m) > 0 ? f(100 * h / (h + m)) : null, hit: h, miss: m, rounds: pr.length };
+    } catch { /* 双轨指标取不到不影响旧字段 */ }
     res.json({
       ok: true, target,
       todayHit: todayRow ? Number(todayRow.hit) : 0, todayMiss: todayRow ? Number(todayRow.miss) : 0,
-      todayRate: f(todayRate), avg7: f(avg7), daily: rows.slice(-30).map((r) => ({ d: String(r.d), hit: Number(r.hit), miss: Number(r.miss) })),
+      todayRate: f(todayRate), avg7: f(avg7),
+      perRequest, cumulative,
+      todayRounds: todayRow ? Number(todayRow.n) : 0, windowRounds: rows.slice(-7).reduce((s, r) => s + Number(r.n || 0), 0),
+      daily: rows.slice(-30).map((r) => ({ d: String(r.d), hit: Number(r.hit), miss: Number(r.miss), rounds: Number(r.n || 0) })),
+      definition: {
+        perRequest: '单请求命中率（近7天真实流量逐轮，中位/P90）——每轮质量',
+        cumulative: '命中/输入的累计比（近7天真实流量）＝DSH 同口径；≈1−2/N，随轮数趋近 100%，须与轮数同看',
+      },
       alert: target > 0 && avg7 != null && avg7 < target,
     });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
@@ -2433,7 +2467,14 @@ async function main() {
       const n = syncMcpExtras(clients);
       console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');
     } catch (e) { console.error('[mcp] 启动连接失败(可稍后配置 mcp_servers):', e.message); }
-  })();
+  })().finally(() => {
+    // M2 换纪元检测 + 一次预热（2026-09-15）：前缀面（系统提示 + 工具面）变了 ⇒ 所有会话的下一次请求
+    // 都要整段重建那 ~10.5k 公共前缀。这里在启动后**主动付掉这一笔**，而不是让接下来第一个真实用户/定时任务承担。
+    // ⚠️ 必须排在上面的 MCP 连接**之后**：`toolDefs` 的输出含 `syncMcpExtras` 填进去的 `mcp_*` 工具，
+    //    早跑会算出一个与真实请求**不一致**的工具面指纹 —— 那样既预热错前缀，又会在下次启动误报"换纪元"。
+    // 异步 fire-and-forget：不阻塞 listen；无变化时**零调用**（只读 settings 比对指纹）。
+    setTimeout(() => { checkEpochAndWarm().catch((e) => console.warn('[epoch] 启动检查异常:', e.message)); }, 2000).unref?.();
+  });
   // P11 MCP 看门狗（2026-09 安全修复随行）：配置了 mcp_servers 时，任一 client 意外退出（进程重启/子进程死亡）
   // 后 60s 内自动重连并同步工具（否则会话静默缺 mcp_* 工具直到手动 reload）
   const mcpWatchdog = setInterval(async () => {

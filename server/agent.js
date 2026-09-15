@@ -6,7 +6,7 @@ import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './ll
 import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
-import { diffCore, isUnexpectedBreak } from './prefix.js';
+import { diffCore, isUnexpectedBreak, prefixHash } from './prefix.js';
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { effectiveCollapseChars } from './modelwindow.js';
 import { spillToolResult } from './tools/spill.js';
@@ -227,6 +227,10 @@ export const ENV_DISCIPLINE = [  '行动原则（务必遵守）：',
 // 兼容导出：默认按 full 身份拼装（供外部引用/无权限上下文使用）；runAgent 内按实际 permission 动态生成
 export const ENV_MAP = [ENV_IDENTITY('full'), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
 
+// 固定前缀面（system 提示）的**单一拼装出口**：runAgent 与 M2 的换纪元预热都必须逐字节一致，
+// 否则预热出来的前缀跟真实请求对不上，等于白花钱（2026-09-15 M1/M2 落地）。
+export const buildEnvFor = (permission = 'full') => [ENV_IDENTITY(permission), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
+
 // 每轮工具结果后的"目标完成度评估"提示（引导模型干完才停，避免过早收手）
 const COMPLETION_HINT = [
   '以上是工具执行结果。请评估用户目标是否已真正完成：',
@@ -236,7 +240,7 @@ const COMPLETION_HINT = [
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
   // P13 三层：按实际会话权限动态拼装身份层（read/write 会话不注入 full 能力暗示），环境+纪律全量
-  const buildEnv = () => [ENV_IDENTITY(permission), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
+  const buildEnv = () => buildEnvFor(permission);
   const msgs = [{ role: 'system', content: buildEnv() }, ...messages];
   // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
   const sysContent = () => {
@@ -485,6 +489,11 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 前缀不变量（缓存三纪律机检之一 · 只追加）：本轮与上轮的**非 system** 消息序列必须逐条同一对象。
     // system 消息都是随轮易变的提示（快照/后台通知/护栏提示/完成度提示），不参与比对；
     // 除"段边界折叠"外任何断链 = 一次非预期前缀改写（C4），如实上报不静默。
+    // M1a 前缀指纹（2026-09-15）：**每轮 LLM 调用前**算一次"这一轮实际发出的前缀面"指纹并落库
+    // （usage_stats.prefix_sys_hash / prefix_tools_hash）。此前 sys/tools 只在 RW_PREFIX_DEBUG 日志里，
+    // 事后查不出"这次冷启动是谁打破了前缀"；落库之后那变成一条 SQL（见方案 §4-M1 判据）。
+    // 放在调用前算：refreshSys() 之后、发请求之前，指纹 = 真实发出的那串字节。
+    const sysHash = prefixHash((msgs[0] && msgs[0].content) || '');
     {
       const core = msgs.filter((m) => m && m.role !== 'system');
       const d = diffCore(prevCore, core);
@@ -497,7 +506,6 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       }
       prevCore = core;
       if (process.env.RW_PREFIX_DEBUG === '1') {
-        const sysHash = createHash('sha256').update(String((msgs[0] && msgs[0].content) || '')).digest('hex').slice(0, 12);
         console.log('[prefix-debug] conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1)
           + ' sys=' + sysHash + ' tools=' + toolsHash + ' core=' + core.length);
       }
@@ -526,8 +534,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     try {
       const u = res.usage || {};
       const cost = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokens_in || 0) - (u.cache_hit || 0), out: u.tokens_out || 0 });
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?)',
-        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs, ctx.shellId ?? null]);
+      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id, prefix_sys_hash, prefix_tools_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?,?,?)',
+        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs, ctx.shellId ?? null, sysHash, toolsHash]);
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += cost;
       cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
     } catch { /* 计量失败不影响执行 */ }
@@ -564,8 +572,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const u = contRes;
           const costSeg = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokensIn || 0) - (u.cache_hit || 0), out: u.tokensOut || 0 });
           try {
-            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?)',
-              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0, ctx.shellId ?? null]);
+            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id, prefix_sys_hash, prefix_tools_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?,?,?)',
+              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0, ctx.shellId ?? null, sysHash, toolsHash]);
             cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
             cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
           } catch { /* 计量失败不影响续写 */ }
