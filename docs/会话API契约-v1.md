@@ -11,7 +11,7 @@
 
 **覆盖**：§3 端点表里的 16 条端点（鉴权、会话执行与停止、续订、消息、两种导出 + 导入、审批/问询、活动、投递）。平台另有 118 条带 `requireAuth` 的路由、125 处路由注册（本文件用 `grep -c` 数出），**不在本契约内**——它们只服务自带前端，随时可能变。
 
-**流协议版本**：`v:1`，落在帧里，不在 URL 里。已带 `v` 的是 `run_start`（`server/index.js:1145`）与三处 `run_end`（`:1304`/`:1335`/`:1367`）。**`stream_hello` 不带 `v`**（`:1458` 只发 `{type, conversationId, after, ts}`）——D4-3 拍板说它会带，**属未落地**，见 §7。
+**流协议版本**：`v:1`，落在帧里，不在 URL 里。带 `v` 的是 `run_start`、三处 `run_end` 与 `stream_hello`（续订握手也声明版本）。
 
 **为什么不加 `/api/v1` 路径**（如实登记的偏离：`规范/04-接口规范.md:25` 要求版本放路径）：
 - 既有事实：118 条路由带 `requireAuth`（本文件 §3 那 16 条是其中子集），静态前端与 SPA 兜底都在同一套 `/api` 下（`server/index.js:2599-2603`）。
@@ -153,7 +153,7 @@
 | `IDEMPOTENT_KEY_REUSED` | 同 key 换了请求体 | `:845` | 不重试；换一个新 key，或原样重发上次那个请求 |
 | `INTERNAL` | 服务端未预期异常 | `:462`、`:1369` | 可退避重试；持续失败报障 |
 
-**落地范围（别当成"所有 4xx 都带 code"）**：目前只有 §3.2/§3.6/§3.8 那几条路径带 `code`。**没有 `code` 的**：鉴权 401/500（`server/auth.js:68,70,74`）、登录/建会话/停止/续订/消息/活动/审批/问询的 4xx（§3 各处已标注）、以及 `:2608` 的 **Express 兜底 500**（只给 `message`，**没有 `INTERNAL`**）。本批另有两个**未列入 D4-2 那六个**的码：`EXPORT_FAILED`、`IMPORT_FAILED`（§3.6）。**与 `server/failures.js` 的关系（没有打通）**：`server/failures.js:15-44` 的码表（`TOOL_*`/`LLM_*`）只用于**工具与 LLM 内部**结果 `{error, code}`（`:50-54`），**从不进 HTTP 响应**——两套码不通用，看到 `TOOL_PERMISSION_DENIED` 的地方不会是 4xx 响应体。
+**落地范围（别当成"所有 4xx 都带 code"）**：带 `code` 的是会话 API 的主力路径 + **鉴权** —— `/api/chat`、`/export-full`、`/import`、`/deliveries`、`requireAuth` 的 401/500（`UNAUTHORIZED`/`TOKEN_EXPIRED`/`INTERNAL`）、以及 Express 兜底 500（`INTERNAL`）。**暂时没有 `code` 的**：登录/停止/续订/消息/活动/审批/问询的 4xx（§3 各处已标注）。本批另有 `EXPORT_FAILED`、`IMPORT_FAILED`。**与 `server/failures.js` 的关系**：HTTP 响应里的码**全部登记**在 `server/failures.js` 的 FAIL 表（同一张表是"码的唯一出处"，夹具 `test/failures.test.mjs` 交叉核对"源码里出现的码都在表里"）；表里的 `TOOL_*`/`LLM_*` 只用于工具与 LLM 的内部结果 `{error, code}`，**不进 HTTP 响应**——两套码共用一张表，不共用出口。
 
 ---
 
@@ -174,7 +174,7 @@
 - **死信不自动重试**：`deliveries` 只记 `state=failed` + `attempts`，**没有重试引擎**，没人看列表就不会有人重放（§3.8、§5.1）。
 - **审批/问询队列在内存里**：`server/approval.js:4`、`server/asks.js:4` 都是进程内 `Map`——**进程重启即全部丢失**；超时分别 5 分钟（`server/approval.js:17`）与 10 分钟（`server/asks.js:17`）。两个列表端点**不按账号过滤**，任何已登录账号都能看到全部待批项。
 - **`events` 账本只写不读**：`server/eventlog.js:57` 的 `readEvents` **零调用方**（全仓 grep 只命中定义）；对外也没有读事件的端点。
-- **续订的物理边界**：事件环 300 条 / 结束 60s 回收 / `seq` 进程内存值 / 跟播上限 10 分钟（§4）。注释里写的 `stream_gap` 帧**未实现**（`:1413`）；**`stream_hello` 还没带 `v`**（`:1458`）——D4-3 说要带，属未落地。
+- **续订的物理边界**：事件环 300 条 / 结束 60s 回收 / `seq` 进程内存值 / 跟播上限 10 分钟（§4）。注释里写的 `stream_gap` 帧**未实现**——续订只按 `seq > after` 补发，客户端拿不到"你接丢了一段"的信号。
 - **`GET .../messages` 不带执行归属**：没有 `runId`/`seq`（§3.5）；**`code` 只覆盖部分路径**（§5.3）；429 **故意不给 `Retry-After`**（§5.2）。
 - **`GET /api/deliveries` 没有分页游标**：只有 `limit`（≤100）与 `state` 过滤（`server/deliveries.js:98-102`），行数涨上去后翻不动。
 
