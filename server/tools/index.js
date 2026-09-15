@@ -12,7 +12,7 @@ import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
-import { planRead, noteServed, repeatNotice, partialNotice } from '../readcache.js';
+import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepServed, grepRepeatNotice, markWritten } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
@@ -24,6 +24,9 @@ import { readSpill } from './spill.js';
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
 // guard 会话调用它们不弹审批卡（曾误写文档为 7 项已改回 5 项，现按契约档位补全为 7 项）。
 const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits']);
+// 会改动**文件系统内容**的工具：成功后让本会话已记录的搜索结果作废（见 execTool 里的 markWritten 调用点）。
+// 故意不含 run_command —— 它可能改文件也可能不改，而多作废一次的代价只是"搜索结果多给一遍"，方向安全。
+const MUTATING_FILES = new Set(['write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint']);
 
 // —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
 // "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
@@ -134,6 +137,50 @@ function planOf(ctx) {
   return plans.get(key);
 }
 
+// 搜索结果整形（2026-09-15，压每轮新增）：**导航优先**——
+// 模型搜东西通常是想知道"在哪些文件里"，其次才看具体行。旧实现把最多 100 条命中行全倒出来（每行 200 字符），
+// 实测均值 1,284 字节/次，其中大部分信息用不上；真要看上下文它该用 read_file_range。
+// 现在：files + 每文件命中数 counts 打头，命中行默认每文件 ≤3 条、总计 ≤30 条，**并如实说明省略了多少**。
+// 这是"少给但说清楚"，不是"悄悄截断"——模型看到省略量就知道该按需再取。
+function grepShape(matches, counts, totalHits, totalCap, perFileCap) {
+  const files = Object.keys(counts);
+  // `files` 与 `counts` 是同一份路径清单的两种写法 —— 只留 counts（它的键就是文件清单），省掉一半重复路径。
+  // 探针实测：两者都留时，49 个文件的路径被列了两遍，输出 9,990 字节（整形等于没做）。
+  const out = { counts, matches, totalHits, fileCount: files.length, shownMatches: matches.length };
+  const omitted = totalHits - matches.length;
+  if (omitted > 0) {
+    out.omitted = omitted;
+    out.hint = '共命中 ' + totalHits + ' 处、' + files.length + ' 个文件（counts 的键就是文件清单，按命中数排序即可定位），'
+      + '这里只列了 ' + matches.length + ' 条命中行（每文件 ≤' + perFileCap + '）；还有 ' + omitted + ' 条未列出。'
+      + '要看上下文用 read_file_range {path, fromLine, toLine}；确实需要更多命中行可加大 maxMatches 重搜（带 force:true）。';
+  }
+  return out;
+}
+
+// 大目录汇总（2026-09-15）：条目多时**先给"有什么、各多少"**，再给前若干条名字。
+// 旧实现最多倒 200 条名字（实测均值 787 字节）；对一个几百条的目录，模型真正需要的是"这里有没有我要的那类文件"。
+function listShape(entries, dir) {
+  const dirs = entries.filter((e) => e.type === 'dir');
+  const files = entries.filter((e) => e.type === 'file');
+  if (entries.length <= 40) return { path: dir, entries, dirs: dirs.length, files: files.length };
+  const byExt = {};
+  for (const f of files) {
+    const m = /\.([A-Za-z0-9]+)$/.exec(f.name);
+    const k = m ? '.' + m[1].toLowerCase() : '(无扩展名)';
+    byExt[k] = (byExt[k] || 0) + 1;
+  }
+  const topExt = Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => k + '×' + n);
+  const shown = [...dirs, ...files].slice(0, 30);
+  return {
+    path: dir, dirs: dirs.length, files: files.length, byExt,
+    entries: shown,
+    omitted: entries.length - shown.length,
+    hint: '目录较大（' + dirs.length + ' 个目录 / ' + files.length + ' 个文件；按类型：' + topExt.join(' ')
+      + '），这里按"目录优先"只列前 ' + shown.length + ' 条。要精确找文件用 find_file {name}，要搜内容用 grep_search。',
+  };
+}
+export const __shapeTestables = { grepShape, listShape };
+
 // 实现侧清单：**只声明"怎么做"**（name/description/params/permission/run）；
 // "暴露与否/档位/提示/集合"等策略一律在 tools/manifest.js 声明，由 tools/registry.js 一次性装配校验。
 const RAW_TOOLS = [
@@ -176,9 +223,12 @@ const RAW_TOOLS = [
       fs.writeFileSync(a.path, updated, 'utf8');
       return { edited: true, diff: '- ' + String(a.old).slice(0, 500) + '\n+ ' + String(a.new ?? '').slice(0, 500) };
     } },
-  { name: 'list_dir', description: '列出目录内容', permission: 'read',
+  { name: 'list_dir', description: '列出目录内容。小目录直接给条目；条目多时给"目录/文件数 + 按扩展名汇总 + 前若干条（目录优先）"，并用 hint 说明省略了多少', permission: 'read',
     params: { path: { type: 'string', required: false, desc: '默认工作区' } },
-    run: async (a, ctx) => { const p = a.path || ctx.root; return { entries: fs.readdirSync(p, { withFileTypes: true }).map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' })).slice(0, 200) }; } },
+    run: async (a, ctx) => {
+      const p = a.path || ctx.root;
+      return listShape(fs.readdirSync(p, { withFileTypes: true }).map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' })), p);
+    } },
   { name: 'mkdir', description: '创建目录', permission: 'write',
     params: { path: { type: 'string', required: true } },
     run: async (a, ctx) => { if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区'); fs.mkdirSync(a.path, { recursive: true }); return { created: true }; } },
@@ -196,31 +246,79 @@ const RAW_TOOLS = [
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else if (it.name.includes(a.name)) out.push(f); } };
       walk(root); return { matches: out.slice(0, 100) };
     } },
-  { name: 'grep_search', description: '在路径(目录或单文件)中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）', permission: 'read',
-    params: { path: { type: 'string', required: false }, pattern: { type: 'string', required: true } },
+  { name: 'grep_search', description: '在路径(目录或单文件)中按正则搜索文件内容。返回：命中文件清单 files（含每文件命中数 counts，定位首选）+ 前若干条命中行 matches（默认每文件最多 3 条、总计最多 30 条）+ 如实说明还有多少没列出。要上下文用 read_file_range {fromLine,toLine}。同一会话内重复搜同一路径同一正则会返回极短回执（结果已在上文；本会话有写操作即自动作废）；确需重搜传 force=true', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '目录或单个文件路径' }, pattern: { type: 'string', required: true, desc: '正则表达式' }, force: { type: 'boolean', desc: 'true=即使本会话已搜过也重新给出' }, maxPerFile: { type: 'number', desc: '每个文件最多列几条命中行（默认 3）' }, maxMatches: { type: 'number', desc: '总计最多列几条命中行（默认 30）' } },
     run: async (a, ctx) => {
-      const root = a.path || ctx.root; const re = new RegExp(a.pattern); const matches = []; const files = [];
+      const root = a.path || ctx.root;
+      // 同会话重复搜索去重（2026-09-15）：实测真实长会话里 grep 是调用最多的工具（conv=185：43 次/71 轮、均值 1,284 字节）
+      const plan = planGrep({ cid: ctx && ctx.conversationId, root, pattern: String(a.pattern), force: !!a.force });
+      if (plan.duplicate) return { content: grepRepeatNotice(root, a.pattern, plan.times), deduped: true };
+      const re = new RegExp(a.pattern);
+      const perFileCap = Number(a.maxPerFile) > 0 ? Number(a.maxPerFile) : 3;
+      // 命中越散，越只给"地图"：文件数 >10 时命中行降到 10 条（此时模型该按 counts 选文件去读，而不是翻 30 条行）
+      const totalCap = Number(a.maxMatches) > 0 ? Number(a.maxMatches) : 30;
+      const matches = []; const counts = {}; let totalHits = 0;
       // 2026-09-08 自我进化: 单文件支持（原实现仅目录可搜，path=文件时 readdirSync 抛错被 catch 吞掉→恒空，连续 3 日复现）
       const searchFile = (f) => {
         if (!/\.(js|ts|jsx|tsx|md|json|yaml|yml|txt|html|css)$/.test(f)) return;
-        try { const lines = fs.readFileSync(f, 'utf8').split('\n'); let fileHit = false;
-          for (let i = 0; i < lines.length; i++) { if (re.test(lines[i])) { if (matches.length < 100) matches.push({ file: f, line: i + 1, text: lines[i].slice(0, 200) }); fileHit = true; } }
-          if (fileHit && files.length < 100) files.push(f); } catch { }
+        try {
+          const lines = fs.readFileSync(f, 'utf8').split('\n');
+          let perFile = 0;
+          for (let i = 0; i < lines.length; i++) {
+            if (!re.test(lines[i])) continue;
+            totalHits++;
+            perFile++;
+            if (perFile <= perFileCap && matches.length < totalCap) matches.push({ file: f, line: i + 1, text: lines[i].trim().slice(0, 160) });
+          }
+          if (perFile) counts[f] = perFile;
+        } catch { }
       };
       let st = null; try { st = fs.statSync(root); } catch { /* 路径不存在 → 与原来一致返回空 */ }
-      if (st && st.isFile()) { searchFile(root); return { matches, files }; }
+      const finish = (m, c, hits, cap) => {
+        const out = grepShape(m, c, hits, cap, perFileCap);
+        // 记录"这次给了多少字节" —— 去重门槛据此判定（太小就别去重，回执本身比结果还长）
+        const bytes = Buffer.byteLength(JSON.stringify(out), 'utf8');
+        noteGrepServed({ cid: ctx && ctx.conversationId, root, pattern: String(a.pattern), bytes });
+        return out;
+      };
+      if (st && st.isFile()) { searchFile(root); return finish(matches, counts, totalHits, totalCap); }
       const walk = (d) => { let items = []; try { items = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else searchFile(f); } };
-      walk(root); return { matches, files };
+      walk(root);
+      // 命中散落在很多文件里 ⇒ 只给地图 + 少量样例行（见 grepShape 注释）
+      const cap2 = Object.keys(counts).length > 10 ? Math.min(totalCap, 10) : totalCap;
+      if (cap2 < totalCap && matches.length > cap2) matches.length = cap2;
+      return finish(matches, counts, totalHits, cap2);
     } },
-  { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true', permission: 'read',
-    params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' }, force: { type: 'boolean', desc: 'true=即使已读过该段也重新给出' } },
+  { name: 'read_file_range', description: '分段读取文件。两种定位方式：**按行** fromLine/toLine（推荐——grep_search 给的就是行号，read_file 截断提示里给的也是行号），或按字符 offset/length。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true', permission: 'read',
+    params: {
+      path: { type: 'string', required: true },
+      fromLine: { type: 'number', desc: '起始行号（1 起，含）；与 toLine 配对使用，优先于 offset/length' },
+      toLine: { type: 'number', desc: '结束行号（含）' },
+      offset: { type: 'number', desc: '字符偏移（与 length 配对）' },
+      length: { type: 'number', desc: '字符长度（默认 10000）' },
+      force: { type: 'boolean', desc: 'true=即使已读过该段也重新给出' },
+    },
     run: async (a, ctx) => {
       const c = readTxt(a.path);
-      const off = a.offset == null ? 0 : Number(a.offset);
-      const len = a.length == null ? 10000 : Number(a.length);
-      if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + a.offset);
-      if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + a.length);
+      // 按行定位（2026-09-15）：grep_search 返回行号、read_file 截断提示也给行号，
+      // 而此前只能按字符偏移取——模型得自己换算，实际就变成"再整读一遍文件"。按行取的直接收益是**少整读**。
+      const byLine = a.fromLine != null || a.toLine != null;
+      let off, len, lineFrom = null, lineTo = null;
+      if (byLine) {
+        const lines = c.split('\n');
+        let f = Math.max(1, Math.floor(Number(a.fromLine) || 1));
+        let t = Math.min(lines.length, Math.floor(Number(a.toLine) || (f + 200)));
+        if (!Number.isFinite(f) || !Number.isFinite(t) || t < f) throw new Error('fromLine/toLine 非法：需满足 1 ≤ fromLine ≤ toLine');
+        off = lines.slice(0, f - 1).reduce((n, l) => n + l.length + 1, 0);
+        len = lines.slice(f - 1, t).reduce((n, l) => n + l.length + 1, 0);
+        lineFrom = f; lineTo = t;
+      } else {
+        off = a.offset == null ? 0 : Number(a.offset);
+        len = a.length == null ? 10000 : Number(a.length);
+        if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + a.offset);
+        if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + a.length);
+      }
       const abs = path.resolve(String(a.path || ''));
       let st = null;
       try { st = fs.statSync(abs); } catch { /* ignore */ }
@@ -236,9 +334,13 @@ const RAW_TOOLS = [
         // 只输出"未覆盖"的部分；被覆盖的部分不再重复给（这是省 token 的关键）
         const body = plan.gaps.map(([s, e]) => `…[已跳过上文给出过的 ${s > off ? s - off : 0} 字符]…\n` + c.slice(s, e)).join('\n');
         const prefix = plan.coveredChars > 0 ? partialNotice('read_file_range', abs, { span: [off, end], coveredChars: plan.coveredChars }) : '';
-        return { content: prefix + body, offset: off, length: len, total: c.length, servedChars: plan.gaps.reduce((x, [s, e]) => x + (e - s), 0) };
+        const out = { content: prefix + body, offset: off, length: len, total: c.length, totalLines: c.split('\n').length, servedChars: plan.gaps.reduce((x, [s, e]) => x + (e - s), 0) };
+        if (lineFrom != null) { out.fromLine = lineFrom; out.toLine = lineTo; }
+        return out;
       }
-      return { content: c.slice(off, off + len), offset: off, length: len, total: c.length };
+      const out = { content: c.slice(off, off + len), offset: off, length: len, total: c.length };
+      if (lineFrom != null) { out.fromLine = lineFrom; out.toLine = lineTo; }
+      return out;
     } },
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
@@ -1276,6 +1378,12 @@ export async function execTool(name, args, ctx) {
       // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
       try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
       result = await tool.run(args, eff);
+      // 写操作成功后让本会话的**搜索结果记录**整体作废（2026-09-15）：grep 的结果依赖"文件此刻的内容"，
+      // 与其去算哪些文件被改了，不如整体作废——宁可多给一次搜索结果，也不能给一份过期的。
+      // 只对"改文件"的工具做，且只在本会话内（跨会话不串用）。
+      if (MUTATING_FILES.has(name) && result && !result.error && eff.conversationId) {
+        try { markWritten(eff.conversationId); } catch { /* 作废失败只是可能多给一次旧结果，不影响执行 */ }
+      }
       // P1-1 hooks after（观察/审计；不阻断已完成的执行，stop 仅留痕到 result.hookAfter）
       try {
         const ha = await emitHooks('after', name, { args, result, ctx: eff });

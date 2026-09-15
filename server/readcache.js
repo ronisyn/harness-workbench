@@ -107,6 +107,60 @@ export function partialNotice(tool, absPath, info) {
 
 export function clearReadCache(cid) { state.delete(String(cid == null ? 'g' : cid)); }
 
+// ── 搜索结果去重（2026-09-15）────────────────────────────────────────────────────────────
+// 与"重复读同一文件"是同一个毛病的另一面：实测真实长会话里 `grep_search` 是**调用次数最多**的工具
+// （conv=185：43 次/71 轮、均值 1,284 字节），其中不少是同一目录下反复搜相近的正则。
+// 口径比读去重更保守：**只要本会话发生过一次成功的写操作，全部搜索结果作废**——
+// 搜索结果正确性依赖"文件此刻的内容"，与其去算哪些文件被改了，不如整体作废（宁可多给一次）。
+// 键 = (会话, 路径, 正则)；命中即回极短回执，并提示可用 force 重搜。
+//
+// ⚠️ 门槛（2026-09-15 探针实测踩到）：**回执必须比它替代的结果短**，否则"省空间"的动作反而更占空间。
+//    第一次实现没设门槛，实测一个 82 字节的小结果被换成 308 字节的回执（压缩比 0.3×）。
+//    现在：只对"上次给出 ≥ GREP_DEDUP_MIN 字节"的搜索做去重；小结果直接重给（本来就便宜）。
+const grepState = new Map(); // cid -> { epoch, seen: Map<key, bytes> }
+export const GREP_DEDUP_MIN = 800;
+
+function grepBucket(cid) {
+  const c = String(cid == null ? 'g' : cid);
+  if (!grepState.has(c)) grepState.set(c, { epoch: 0, seen: new Map() });
+  return grepState.get(c);
+}
+
+/** 写操作成功后调用：让本会话已记录的搜索结果整体作废 */
+export function markWritten(cid) { grepBucket(cid).epoch += 1; return grepBucket(cid).epoch; }
+
+/**
+ * 规划一次搜索：重复（同会话、同路径、同正则、期间无写操作、且上次结果够大）⇒ 建议回极短回执。
+ * @param {{cid:any, root:string, pattern:string, force?:boolean}} p
+ */
+export function planGrep(p) {
+  const b = grepBucket(p.cid);
+  if (p.force) return { duplicate: false, epoch: b.epoch };
+  const key = b.epoch + '|' + String(p.root) + '|' + String(p.pattern);
+  const bytes = b.seen.get(key);
+  // 太小就别去重：回执本身要一百多字节，换掉一个更小的结果纯属倒亏
+  if (bytes == null || bytes < GREP_DEDUP_MIN) return { duplicate: false, epoch: b.epoch, small: bytes != null };
+  return { duplicate: true, times: bytes, epoch: b.epoch };
+}
+
+/** 记录"这次搜索确实给出去了"（bytes = 本次输出的字节数，供上面的门槛判定） */
+export function noteGrepServed(p) {
+  const b = grepBucket(p.cid);
+  const key = b.epoch + '|' + String(p.root) + '|' + String(p.pattern);
+  b.seen.set(key, Number(p.bytes) || 0);
+  if (b.seen.size > 500) { const k = b.seen.keys().next().value; b.seen.delete(k); } // 防无界
+  return b.seen.get(key);
+}
+
+/** 搜索重复时的极短回执（必须说明"结果在上文"，否则模型会以为搜失败而重试） */
+export function grepRepeatNotice(root, pattern, servedBytes) {
+  return `（grep_search 已跳过重复搜索：本会话已就「${root}」搜过 /${pattern}/，结果就在上文（约 ${servedBytes} 字节），`
+    + `且此后本会话没有改动过文件。需要重搜（例如怀疑有外部改动）请带 force:true。）`;
+}
+
+/** 测试用：看某会话记录了几条搜索 */
+export function _grepsOf(cid) { return grepBucket(cid).seen.size; }
+
 /** 测试用：看某会话已记录的文件数 */
 export function _filesOf(cid) { const b = state.get(String(cid == null ? 'g' : cid)); return b ? b.size : 0; }
 /** 测试用：看某文件已覆盖的区间 */

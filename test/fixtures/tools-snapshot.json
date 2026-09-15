@@ -466,18 +466,33 @@
     },
     {
       "name": "grep_search",
-      "description": "在路径(目录或单文件)中按正则搜索文件内容，返回 file:行号: 命中行 片段（matches），并附命中的文件路径列表（files）\n何时用：按正则搜文件内容（代码/文本文件）\n勿用：按文件名用 find_file；查库用 db_query\n例：grep_search {path, pattern:\"ensureRun\"}",
+      "description": "在路径(目录或单文件)中按正则搜索文件内容。返回：命中文件清单 files（含每文件命中数 counts，定位首选）+ 前若干条命中行 matches（默认每文件最多 3 条、总计最多 30 条）+ 如实说明还有多少没列出。要上下文用 read_file_range {fromLine,toLine}。同一会话内重复搜同一路径同一正则会返回极短回执（结果已在上文；本会话有写操作即自动作废）；确需重搜传 force=true\n何时用：按正则搜文件内容（代码/文本文件）\n勿用：按文件名用 find_file；查库用 db_query\n例：grep_search {path, pattern:\"ensureRun\"}",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "目录或单个文件路径"
           },
           "pattern": {
-            "type": "string"
+            "type": "string",
+            "description": "正则表达式"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "true=即使本会话已搜过也重新给出"
+          },
+          "maxPerFile": {
+            "type": "number",
+            "description": "每个文件最多列几条命中行（默认 3）"
+          },
+          "maxMatches": {
+            "type": "number",
+            "description": "总计最多列几条命中行（默认 30）"
           }
         },
         "required": [
+          "path",
           "pattern"
         ]
       }
@@ -650,7 +665,7 @@
     },
     {
       "name": "list_dir",
-      "description": "列出目录内容\n何时用：列目录看结构、确认路径存在\n勿用：递归找文件用 find_file\n例：list_dir {path}",
+      "description": "列出目录内容。小目录直接给条目；条目多时给\"目录/文件数 + 按扩展名汇总 + 前若干条（目录优先）\"，并用 hint 说明省略了多少\n何时用：列目录看结构、确认路径存在\n勿用：递归找文件用 find_file\n例：list_dir {path}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -771,18 +786,28 @@
     },
     {
       "name": "read_file_range",
-      "description": "分段读取大文件（offset 字符偏移）。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
+      "description": "分段读取文件。两种定位方式：**按行** fromLine/toLine（推荐——grep_search 给的就是行号，read_file 截断提示里给的也是行号），或按字符 offset/length。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
             "type": "string"
           },
+          "fromLine": {
+            "type": "number",
+            "description": "起始行号（1 起，含）；与 toLine 配对使用，优先于 offset/length"
+          },
+          "toLine": {
+            "type": "number",
+            "description": "结束行号（含）"
+          },
           "offset": {
-            "type": "number"
+            "type": "number",
+            "description": "字符偏移（与 length 配对）"
           },
           "length": {
-            "type": "number"
+            "type": "number",
+            "description": "字符长度（默认 10000）"
           },
           "force": {
             "type": "boolean",
@@ -1581,11 +1606,25 @@
       "params": {
         "path": {
           "type": "string",
-          "required": false
+          "required": true,
+          "desc": "目录或单个文件路径"
         },
         "pattern": {
           "type": "string",
-          "required": true
+          "required": true,
+          "desc": "正则表达式"
+        },
+        "force": {
+          "type": "boolean",
+          "desc": "true=即使本会话已搜过也重新给出"
+        },
+        "maxPerFile": {
+          "type": "number",
+          "desc": "每个文件最多列几条命中行（默认 3）"
+        },
+        "maxMatches": {
+          "type": "number",
+          "desc": "总计最多列几条命中行（默认 30）"
         }
       }
     },
@@ -1814,11 +1853,21 @@
           "type": "string",
           "required": true
         },
+        "fromLine": {
+          "type": "number",
+          "desc": "起始行号（1 起，含）；与 toLine 配对使用，优先于 offset/length"
+        },
+        "toLine": {
+          "type": "number",
+          "desc": "结束行号（含）"
+        },
         "offset": {
-          "type": "number"
+          "type": "number",
+          "desc": "字符偏移（与 length 配对）"
         },
         "length": {
-          "type": "number"
+          "type": "number",
+          "desc": "字符长度（默认 10000）"
         },
         "force": {
           "type": "boolean",
