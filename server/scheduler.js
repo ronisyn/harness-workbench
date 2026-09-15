@@ -7,6 +7,11 @@ import { runAgent } from './agent.js';
 import { summarizeConversation } from './tools/index.js';
 import { config } from './config.js';
 import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
+// 编排面（v0.3 §4.5）：定时档的**源**就在这个 cron 循环里——每轮扫描触发一次 `schedule`，
+// 手动跑一次（`__manual`，入口是 `POST /api/tasks/:id/run`）触发一次 `manual`。
+// handler 归使用方写（本文件一个都不注册）；投递走 `fireSafely`：**fire-and-forget 且永不抛错**
+// ⇒ 触发面坏一次不许打断本轮扫描，更不许把一次定时执行变成失败。
+import { fireSafely } from './triggers.js';
 
 export function cronToNext(cron, from = new Date()) {
   const parts = String(cron).trim().split(/\s+/);
@@ -44,11 +49,12 @@ export function isCronDue(task, now = new Date()) {
   return new Date(task.next_run) <= now;
 }
 
-export async function computeNextRuns() {
-  const tasks = await db.query('SELECT id, cron FROM scheduled_tasks WHERE enabled=1 AND next_run IS NULL');
+/** 给"该有 next_run 却没有"的任务补算下次运行时刻（`database` 可注入：夹具用假库驱动一轮扫描） */
+export async function computeNextRuns(database = db) {
+  const tasks = await database.query('SELECT id, cron FROM scheduled_tasks WHERE enabled=1 AND next_run IS NULL');
   for (const t of tasks) {
     const next = cronToNext(t.cron);
-    if (next) await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
+    if (next) await database.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
   }
 }
 
@@ -112,6 +118,13 @@ export async function executeScheduledTask(task) {
       // 于是所有定时任务都被当成受限会话、一律被围栏限制在 RW_WORKSPACE 内，与 permission=full 不符）。
       const effectivePermission = task.permission || 'full';
       const ctx = taskExecContext(task, conv.id, conv, accessRules);
+      // 编排面（v0.3 §4.5）**手动档的源**：`task.__manual` 只有一条路能置上——`server/index.js:1964`
+      // 的 `POST /api/tasks/:id/run`（任务列表的 ▶ 跑一次）。它本来就是"人主动触发一次执行"，
+      // 与 `schedule` 档（cron 到点）是两件事，所以在这里分清后再投递。
+      // 载荷只带排障要用的标识（任务 id / 名字 / 会话 id），**不带 prompt 正文、不带任何凭据**。
+      fireSafely(task.__manual ? 'manual' : 'schedule',
+        { taskId: task.id, name: task.name, conversationId: conv.id },
+        { source: task.__manual ? 'http' : 'cron' });
       const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt + goalLines }], permission: effectivePermission, ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）
@@ -147,33 +160,71 @@ let schedulerRunning = 0;
 // （如 09-15 05:00:49 与 05:01:49），#3 两次运行也都是双跑。真实浪费。
 const inFlight = new Set();
 export function isTaskInFlight(id) { return inFlight.has(Number(id)); }
+
+/**
+ * **一轮扫描**（原先是 `startScheduler` 里 `setInterval` 的回调体，2026-09-16 原样抽出）：
+ * 补算 next_run → 取到期任务 → 逐个推后 next_run 并发起执行。
+ * 抽出来的唯一理由：编排面（v0.3 §4.5）的**定时档源**就在这一轮里，而"源接线了没有"
+ * 必须能被夹具驱动一次真扫描确证——`setInterval` 的回调体在夹具里够不着，抽成一个具名函数即可
+ * （`db` 是既有单例、可参数注入：夹具传假库驱动一轮，**不需要**在本文件里加任何测试专用分支）。
+ *
+ * 行为与抽出前**逐字一致**（单轮防重入、并发上限 2、推进量钳制三处一个字没动）：
+ * 唯一新增的是真的发起执行时往编排面投递一次 `schedule`（载荷＝任务 id/名字/名字/本轮到期数/本轮总数，
+ * **不带 prompt 与凭据**）；投递是 fire-and-forget，且**内部已兜住一切异常**
+ * ⇒ 它既不改变本轮的推进决定，也不会让扫描提前结束。
+ *
+ * @param {{db?:{query:Function}, runner?:(task:object) => Promise<any>}} [deps]
+ *   `db`：数据库单例（默认本文件的既有依赖）；`runner`：单个任务的执行器（默认 `executeScheduledTask`）
+ * @returns {Promise<{scanned:number, due:number, started:number, failed:number}>} 本轮读数（观测用）
+ */
+export async function runSchedulerTick({ db: database = db, runner = executeScheduledTask } = {}) {
+  const out = { scanned: 0, due: 0, started: 0, failed: 0 };
+  // 扫描计数只用于触发载荷（"这一轮一共在看多少条"）：它单独一次查询，**不改** computeNextRuns 里那条
+  // 既有查询；不用 `due.length` 冒充"任务总数"——那会把载荷写成一句听起来对、其实说错的读数。
+  const all = await database.query('SELECT COUNT(*) AS n FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL');
+  out.scanned = Number((all[0] && all[0].n) || 0);
+  await computeNextRuns(database);
+  const due = await database.query('SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run <= NOW()');
+  out.due = due.length;
+  for (const t of due) {
+    if (schedulerRunning >= 2) break;
+    if (inFlight.has(t.id)) { console.log(`[scheduler] 任务 ${t.id} 仍在执行中，跳过本轮（防双跑）`); continue; }
+    // 防重入：先把 next_run 推后，避免并发重复执行
+    // 2026-09-09 修复：cronToNext 在 cron 分钟（如 05:00:xx）内被调用时返回"当前已过/当前"时刻
+    // （循环从 from+0 开始且不强制未来），导致 next_run 推进后仍 <= NOW → 下一轮 60s 检查再次入队。
+    // 钳制：推进值必须 ≥ 当前+60s。
+    // 2026-09-15 补：推进值必须**真正跨过本次排程点**，且据"已决定的推进值"计算下一轮，
+    // 而不是再据 now 算一次（否则仍会落回本分钟）。两者合起来才保证"一次排程只跑一次"。
+    let next = cronToNext(t.cron);
+    if (!next || next.getTime() <= Date.now() + 60000) next = new Date(Date.now() + 60000);
+    const anchor = new Date(Math.max(next.getTime(), Date.now() + 60000));
+    const nextAfterAnchor = cronToNext(t.cron, new Date(anchor.getTime() + 60000));
+    next = nextAfterAnchor && nextAfterAnchor.getTime() > anchor.getTime() ? nextAfterAnchor : anchor;
+    await database.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
+    schedulerRunning += 1;
+    inFlight.add(t.id);
+    out.started += 1;
+    // 编排面（v0.3 §4.5）**定时档的源**：本轮真的发起执行时投递一次 `schedule`。
+    // 载荷只带排障要的四格（任务 id / 名字 / 本次推进到的 next_run / 本轮读数），**不带 prompt、不带凭据**。
+    fireSafely('schedule',
+      { taskId: t.id, name: t.name, nextRun: next.toISOString(), due: out.due, scanned: out.scanned },
+      { source: 'cron', due: out.due, scanned: out.scanned });
+    // `Promise.resolve().then(...)` 不是为了好看：`runner` 若**同步抛错**（夹具注入的执行器、或将来某个
+    // 非 async 的实现），直接 `runner(t).catch(...)` 会在挂 `.catch` 之前就抛出，于是这一轮的
+    // `schedulerRunning` 与 `inFlight` **永久留一条**（此后并发上限被吃掉一格，任务再也排不满）。
+    // 包一层之后"同步抛"变成"拒绝"，`.finally` 一定会跑，两个计数一定会回落。
+    Promise.resolve().then(() => runner(t))
+      .catch((e) => { out.failed += 1; console.error('[scheduler] 执行异常:', e.message); })
+      .finally(() => { schedulerRunning = Math.max(0, schedulerRunning - 1); inFlight.delete(t.id); });
+  }
+  return out;
+}
+
 export function startScheduler() {
   setInterval(async () => {
-    try {
-      await computeNextRuns();
-      const due = await db.query('SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run <= NOW()');
-      for (const t of due) {
-        if (schedulerRunning >= 2) break;
-        if (inFlight.has(t.id)) { console.log(`[scheduler] 任务 ${t.id} 仍在执行中，跳过本轮（防双跑）`); continue; }
-        // 防重入：先把 next_run 推后，避免并发重复执行
-        // 2026-09-09 修复：cronToNext 在 cron 分钟（如 05:00:xx）内被调用时返回"当前已过/当前"时刻
-        // （循环从 from+0 开始且不强制未来），导致 next_run 推进后仍 <= NOW → 下一轮 60s 检查再次入队。
-        // 钳制：推进值必须 ≥ 当前+60s。
-        // 2026-09-15 补：推进值必须**真正跨过本次排程点**，且据"已决定的推进值"计算下一轮，
-        // 而不是再据 now 算一次（否则仍会落回本分钟）。两者合起来才保证"一次排程只跑一次"。
-        let next = cronToNext(t.cron);
-        if (!next || next.getTime() <= Date.now() + 60000) next = new Date(Date.now() + 60000);
-        const anchor = new Date(Math.max(next.getTime(), Date.now() + 60000));
-        const nextAfterAnchor = cronToNext(t.cron, new Date(anchor.getTime() + 60000));
-        next = nextAfterAnchor && nextAfterAnchor.getTime() > anchor.getTime() ? nextAfterAnchor : anchor;
-        await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
-        schedulerRunning += 1;
-        inFlight.add(t.id);
-        executeScheduledTask(t)
-          .catch((e) => console.error('[scheduler] 执行异常:', e.message))
-          .finally(() => { schedulerRunning = Math.max(0, schedulerRunning - 1); inFlight.delete(t.id); });
-      }
-    } catch (e) { /* 调度循环容错 */ }
+    // 容错口径**保持原样**（原先那个空 catch 就是"调度循环容错"）：本轮任何异常只记一行，
+    // 60s 后照常进入下一轮。触发面的异常到不了这里（`fireSafely` 自己已兜住）。
+    try { await runSchedulerTick(); } catch (e) { console.error('[scheduler] 扫描异常（下轮照常）:', (e && e.message) || e); }
   }, 60000);
   console.log('[scheduler] 定时任务调度器已启动（每分钟检查，并发≤2）');
   // WS5e P2 自动归档：每 10 分钟扫"24h 无消息且消息数>60 且摘要落后于最后活动"的会话，自动 summarizeConversation（最多 3 个/轮）

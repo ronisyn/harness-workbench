@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { db } from './db.js';
 import { config } from './config.js';
+import { storage } from './storage/index.js'; // v0.3 §4.1「存储走接口」：登录链走接口，不再直接发 SQL
 
 export function hashPwd(p) { return bcrypt.hashSync(p, 10); }
 export function checkPwd(p, h) { return bcrypt.compareSync(p, h); }
@@ -12,39 +13,34 @@ export function newToken() { return crypto.randomBytes(24).toString('hex'); }
 export async function ensureAdmin() {
   const { user, pass } = config.admin;
   if (!user || !pass) return;
-  const rows = await db.query('SELECT id FROM accounts WHERE username=?', [user]);
-  if (rows.length === 0) {
-    await db.query('INSERT INTO accounts (username, pass_hash, role, created_at) VALUES (?,?,?,NOW())', [user, hashPwd(pass), 'admin']);
+  const exist = await storage.accounts.findByUsername(user);
+  if (!exist) {
+    await storage.accounts.create({ username: user, passHash: hashPwd(pass), role: 'admin' });
     console.log('[auth] 管理员已初始化:', user);
   }
 }
 
 export async function login(username, password) {
-  const rows = await db.query('SELECT id, username, pass_hash, role FROM accounts WHERE username=?', [username]);
-  if (!rows.length) throw new Error('账号不存在');
-  const a = rows[0];
-  if (!checkPwd(password, a.pass_hash)) throw new Error('密码错误');
+  const a = await storage.accounts.findByUsername(username);
+  if (!a) throw new Error('账号不存在');
+  if (!checkPwd(password, a.passHash)) throw new Error('密码错误');
   const token = newToken();
-  await db.query(
-    'INSERT INTO sessions (token, account_id, created_at, expires_at) VALUES (?,?,NOW(),DATE_ADD(NOW(), INTERVAL ? DAY))',
-    [token, a.id, config.session.days]
-  );
+  await storage.sessions.create({ token, accountId: a.id, days: config.session.days });
   return { token, user: { id: a.id, username: a.username, role: a.role } };
 }
 
 export async function me(token) {
   if (!token) return null;
-  const rows = await db.query(
-    `SELECT a.id, a.username, a.role FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=? AND s.expires_at > NOW()`,
-    [token]
-  );
-  return rows[0] || null;
+  return storage.sessions.findValid(token);
 }
 
 export async function logout(token) {
-  await db.query('DELETE FROM sessions WHERE token=?', [token]);
+  await storage.sessions.remove(token);
 }
 
+// 邀请码（`invites` 表）：**未迁**——`invites` 不在存储接口的实体清单里，且这两个函数全仓零调用方
+// （只有本文件导出，`server/index.js` 没有注册端点）。本轮按"只碰必须碰的"原样留着走 `db`，
+// 待 `invites` 进接口时一起迁（已登记在迁移清单里，不是漏掉）。
 export async function createInvite(accountId) {
   const code = crypto.randomBytes(4).toString('hex');
   await db.query('INSERT INTO invites (code, created_by) VALUES (?,?)', [code, accountId]);

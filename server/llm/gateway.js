@@ -2,6 +2,7 @@
 // 护栏标准（参照 3080）：模型 API 调用超时 60-90s；流式连接 60s
 import { findProvider } from './providers.js';
 import { FAIL } from '../failures.js'; // 失败码表只此一处（工具侧与 LLM 侧同表，见 server/failures.js）
+import { capabilitiesOf, canDo, imagesOf, visionRefusalMessage } from '../modelcaps.js'; // §4.3 模型能力声明（视觉/工具/思考三维的唯一判定）
 
 // 真实计费价目（元/M tokens，三档 hit/miss/out）
 // deepseek 档=2026-09 真实账单加权有效单价（平台两档价并存，按用量加权：hit≈0.086/miss≈2.30/out≈8.0）；
@@ -37,6 +38,39 @@ function resolve(providerId, keys) {
   const key = keys[p.keyEnv];
   if (!key) throw new Error(`厂商「${p.name}」未配置 API Key`);
   return { ...p, key };
+}
+
+// ---------------------------------------------------------------------------
+// §4.3 模型能力声明的**消费点**（2026-09-17）：三维里"工具"与"视觉"在这里落地。
+//
+// 为什么放在网关：这是全平台**唯一**把 messages/tools 真正序列化发给厂商的地方——工具（`ocr_image` /
+//   `view_image`）也把这个网关当出口。放在这里，就不可能出现"某条路径漏判"。
+// 为什么判在**发送前**：视觉要求"发图前就如实拒绝，别等模型侧失败"；工具要求"不要把工具面发给它"。
+//   两者都必须是"请求还没出门"的时刻，所以判定点在 fetch 之前。
+// 判定本身**不在这里**（唯一实现在 `server/modelcaps.js`）：这里只做"未声明 ⇒ 维持改造前行为"的默认值。
+/**
+ * 发图前闸门：模型**声明不支持**图像 ⇒ 抛错，绝不把图发出去。
+ * 三态语义（`server/modelcaps.js`）：`null`（未声明）⇒ **照发**（与改造前一致，不因缺声明就禁止）；
+ *   `true` ⇒ 照发；只有显式 `false` 才拒绝。
+ * ⚠️ 与 `server/index.js` 的 `VISION_RE`（按消息**文本**猜路由）无关：这里判的是消息**结构**里的图 part，
+ *   不猜文本，也不改自动路由。
+ */
+function gateVision(resolved, model, messages) {
+  const caps = capabilitiesOf(resolved.id, model || resolved.defaultModel);
+  if (canDo(caps, 'vision') !== false) return;
+  const img = imagesOf(messages);
+  if (img.hasImage) throw new Error(visionRefusalMessage(caps, img.parts));
+}
+/**
+ * 发工具面前闸门：模型**声明不支持工具调用** ⇒ 返回空工具面（调用方据此不发 tools），并记下事实。
+ * 返回 `{tools, pruned, caps}`：`pruned=true` 表示"因声明而收窄"（调用方要如实上报，不许静默）。
+ * 未声明 ⇒ 原样返回（维持现状）。
+ */
+function gateTools(resolved, model, tools) {
+  const list = Array.isArray(tools) ? tools : [];
+  const caps = capabilitiesOf(resolved.id, model || resolved.defaultModel);
+  if (canDo(caps, 'tool') !== false || !list.length) return { tools: list, pruned: false, caps };
+  return { tools: [], pruned: true, caps };
 }
 
 // 非流式调用（工具场景/测试用）
@@ -200,11 +234,15 @@ export function cancellableDelay(delayMs, signal) {
 // 用户按停止是无效的（真实洞，2026-09-15 统一口径时修）。厂商自带超时与外部 signal 取并集。
 export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 0.4, opts = {}) {
   const p = resolve(providerId, keys);
+  // §4.3 能力声明消费（视觉：发图前拒绝；工具：按声明收窄工具面）——判据全在 server/modelcaps.js
+  gateVision(p, model, messages);
+  const gated = gateTools(p, model, tools);
+  if (gated.pruned) opts.capNote = { kind: 'tool-face-pruned', provider: p.id, model: model || p.defaultModel, note: '模型声明不支持工具调用（capabilities 无 tool）⇒ 本轮工具面不发出去' };
   // 工具名去重防御（2026-09 批5）：外部源（MCP server）工具可能与本地/自身重复 → deepseek 报
   // "Tool names must be unique" 400。发送前按 name 去重（保留首个），并记录重名供诊断。
   const seen = new Set();
   const uniqTools = [];
-  for (const t of tools || []) {
+  for (const t of gated.tools) {
     const nm = t && t.function && t.function.name;
     if (!nm) continue;
     if (seen.has(nm)) { console.warn('[gateway] 工具名重复已去重: ' + nm); continue; }
@@ -291,7 +329,7 @@ export function finalizeToolCalls(acc) {
   return out;
 }
 
-// 流式工具轮调用：返回 { content, reasoning, toolCalls, finishReason, usage }
+// 流式工具轮调用：返回 { content, reasoning, toolCalls, finishReason, usage, toolFacePruned, reasoningDeclared }
 // opts：{ temperature, signal(外部中止, A5), onThink(思考块), onContent(正文增量), firstByteMs, idleMs, maxTokens }
 // [test-hook] `chatStreamWithTools.impl`：仅给"端到端实测"注入厂商桩（RA-37 的 scripts/ra37-rebuild.mjs）。
 // 目的是让实测能跑**真的** HTTP/SSE/agent 循环/落库/事件环，只把"字节从模型来"这一步换掉；
@@ -299,9 +337,16 @@ export function finalizeToolCalls(acc) {
 export async function chatStreamWithTools(providerId, model, messages, tools, keys, opts = {}) {
   if (typeof chatStreamWithTools.impl === 'function') return chatStreamWithTools.impl(providerId, model, messages, tools, keys, opts);
   const p = resolve(providerId, keys);
+  // §4.3 能力声明消费：视觉（发图前拒绝）/ 工具（按声明收窄工具面）/ 思考（只按声明转发思考增量）
+  gateVision(p, model, messages);
+  const gated = gateTools(p, model, tools);
+  const caps = gated.caps;
+  const reasoningOn = canDo(caps, 'reasoning') !== false; // 未声明 ⇒ 照转（维持改造前行为）
+  let reasoningPruned = 0; // 声明"不支持思考"却真收到 reasoning 增量 ⇒ 不转发并计数（回来的 res 里如实带出去，不静默丢）
+  if (gated.pruned) opts.capNote = { kind: 'tool-face-pruned', provider: p.id, model: model || p.defaultModel, note: '模型声明不支持工具调用（capabilities 无 tool）⇒ 本轮工具面不发出去' };
   const uniqTools = [];
   const seen = new Set();
-  for (const t of tools || []) {
+  for (const t of gated.tools) {
     const nm = t && t.function && t.function.name;
     if (!nm) continue;
     if (seen.has(nm)) { console.warn('[gateway] 工具名重复已去重: ' + nm); continue; }
@@ -380,7 +425,12 @@ export async function chatStreamWithTools(providerId, model, messages, tools, ke
         const delta = (ch && ch.delta) || {};
         if (ch && ch.finish_reason) finishReason = ch.finish_reason;
         const think = delta.reasoning_content || delta.reasoning || '';
-        if (think) { reasoning += think; if (opts.onThink) opts.onThink(think); }
+        // §4.3 思考维：模型**声明不支持 reasoning** 时，不把思考增量当"它在思考"透出去（避免"没声明思考却在报思考"）。
+        // 未声明/声明支持 ⇒ 照旧转发。丢弃**不静默**：计数后随返回值带出去（见 reasoningPruned）。
+        if (think) {
+          if (!reasoningOn) reasoningPruned += think.length;
+          else { reasoning += think; if (opts.onThink) opts.onThink(think); }
+        }
         if (typeof delta.content === 'string' && delta.content) {
           content += delta.content;
           if (opts.onContent) opts.onContent(delta.content);
@@ -405,7 +455,13 @@ export async function chatStreamWithTools(providerId, model, messages, tools, ke
   let toolCalls = [];
   try { toolCalls = finalizeToolCalls(acc); }
   catch (e) { const err = new Error(String(e.message || e)); err.needFallback = true; throw err; }
-  return { content, reasoning, toolCalls, finishReason, usage };
+  return {
+    content, reasoning, toolCalls, finishReason, usage,
+    // §4.3 消费痕迹（调用方据此如实上报，不必自己再判一次能力）：
+    toolFacePruned: gated.pruned,               // 因"声明不支持工具"收窄了工具面
+    reasoningDeclared: canDo(caps, 'reasoning'), // true/false/null(未声明)
+    reasoningPruned,                            // 被丢弃的 reasoning 字符数（0=没丢；>0 只可能发生在显式 false 时）
+  };
 }
 
 // 拉取厂商模型列表（模型市场「加载模型」按钮用）

@@ -189,6 +189,29 @@ function makeApi(r) {
       async touch(id) {
         await r.exec('UPDATE conversations SET updated_at=NOW() WHERE id=?', [id]);
       },
+      /** 会话在不在（`server/index.js:1147` 的孤儿守卫 `SELECT 1 FROM conversations WHERE id=?`）。 */
+      async exists(id) {
+        const row = await r.one('SELECT 1 AS ok FROM conversations WHERE id=? LIMIT 1', [id]);
+        return Boolean(row);
+      },
+      /** 删会话（`DELETE /api/conversations/:id` 里那句 `DELETE FROM conversations WHERE id=?`，归属已在路由里判过）。 */
+      async remove(id) {
+        const res = await r.exec('DELETE FROM conversations WHERE id=?', [id]);
+        return Number((res && res.affectedRows) || 0);
+      },
+      /**
+       * 读**指定的那几列**（`server/index.js:779` 的 Web 只读会话读八列：`id, permission, mode, preset,
+       * project, provider, model, shell_id, face_full`）。为什么不直接用 `get`：那会多读 content 之外的一堆列，
+       * "读哪些列"是调用方的行为，接口不该替它改成另一种。未知键**当场抛**（拼错列名不许静默少一个字段）。
+       */
+      async getAs(id, keys) {
+        const wanted = Array.isArray(keys) ? keys : [];
+        const map = COLS.conversations;
+        for (const k of wanted) if (!map[k]) throw new Error(`conversations 没有字段 ${k}（可选：${Object.keys(map).join(', ')}）`);
+        if (!wanted.length) return null;
+        const row = await r.one(`SELECT id, ${wanted.map((k) => map[k]).join(', ')} FROM conversations WHERE id=? LIMIT 1`, [id]);
+        return toRecord('conversations', row);
+      },
     },
 
     messages: {
@@ -222,6 +245,53 @@ function makeApi(r) {
         const row = await r.one(`SELECT COUNT(*) c FROM messages WHERE ${where}`, params);
         return Number((row && row.c) || 0);
       },
+      /**
+       * **上下文口径**的历史读法（`server/index.js:928` 的 `/api/chat` 组装处、以及 HEADLESS/渠道两条入口）：
+       * 只要 `id, role, content` 三个字段、按 id 升序、**全量不裁剪**（v0.3 §4.4.1 规则1：只追加 ⇒ 读全量）。
+       * `content` 用 `?? ''` 与调用方那句 `String(m.content || '')` 同义（NULL 与 undefined 都成空串）——
+       * 否则两个实现下（MySQL 的 NULL vs JSON 缺字段）模型看到的历史会差一点字节，前缀逐字节比对当场分叉。
+       */
+      async history(conversationId) {
+        const rows = await r.many('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
+        return rows.map((row) => ({ id: row.id, role: row.role, content: row.content ?? '' }));
+      },
+      /**
+       * 带**孤儿守卫**的追加（介质原语）：`INSERT … SELECT …,? FROM conversations WHERE id=?` ——
+       * 会话不在就一行都不写、返回 `{ id: 0 }`（`insertId` 恒为 0，调用方据此跳过后续回填）。
+       * 这是 `server/index.js:1370/1446` 与 `server/channels/run-turn.js:255` 三条语句的**逐字搬家**；
+       * 为什么不让调用方"先查后写"：那不是同一条语句，删会话与落库并发时的行为会变（守卫当场作废）。
+       */
+      async guardAppend(fields) {
+        assertFields('messages', fields);
+        const map = COLS.messages;
+        // 只写调用方真的给了的字段：`undefined` 一律不带（照它原来那句列少几个就是少几个）
+        const keys = Object.keys(fields).filter((k) => fields[k] !== undefined);
+        const cols = keys.map((k) => map[k]);
+        const res = await r.exec(
+          `INSERT INTO messages (${cols.join(', ')}) SELECT ${keys.map(() => '?').join(',')} FROM conversations WHERE id=?`,
+          [...keys.map((k) => enc(map[k], fields[k])), fields.conversationId]);
+        return { id: Number(res.insertId) || 0 };
+      },
+      /**
+       * 按工具名数调用次数（`server/index.js:1005` 的 kb 注入判定：`COUNT(*) … tool_name IN ("kb_search","kb_add","kb_del")
+       * AND created_at > NOW() - INTERVAL 7 DAY`）。窗口下推到 SQL；`tools` 空数组＝不查（`IN ()` 是非法 SQL）。
+       * 只回一个数：这条查的用途是"够不够触发注入档位"，把明细带回来是另一种行为（老代码也只取 `c`）。
+       */
+      async countByTool(conversationId, { tools = [], days } = {}) {
+        const list = (Array.isArray(tools) ? tools : []).filter((t) => t !== undefined && t !== null);
+        if (!list.length) return 0;
+        const params = [conversationId, ...list];
+        let where = `conversation_id=? AND tool_name IN (${list.map(() => '?').join(',')})`;
+        const d = Number(days);
+        if (Number.isInteger(d) && d > 0) { where += ' AND created_at > NOW() - INTERVAL ? DAY'; params.push(d); }
+        const row = await r.one(`SELECT COUNT(*) c FROM tool_calls WHERE ${where}`, params);
+        return Number((row && row.c) || 0);
+      },
+      /** 清掉某会话的全部消息（`DELETE /api/conversations/:id` 的级联里那句 `DELETE FROM messages WHERE conversation_id=?`）。 */
+      async removeByConversation(conversationId) {
+        const res = await r.exec('DELETE FROM messages WHERE conversation_id=?', [conversationId]);
+        return Number((res && res.affectedRows) || 0);
+      },
     },
 
     toolCalls: {
@@ -229,6 +299,32 @@ function makeApi(r) {
         assertFields('toolCalls', fields);
         const { sql, params } = insertOf('toolCalls', fields);
         return { id: (await r.exec(sql, params)).insertId };
+      },
+      /**
+       * 按会话升序读回（`server/index.js:441` 的导出那条：`SELECT … FROM tool_calls WHERE conversation_id=? ORDER BY id`）。
+       */
+      async list(conversationId, limit) {
+        const rows = await r.many(`SELECT * FROM tool_calls WHERE conversation_id=? ORDER BY id${limitClause(limit)}`, [conversationId]);
+        return rows.map((row) => toRecord('toolCalls', row));
+      },
+      /** 最近 N 条（**倒序**，与调用点 SQL 一致）：`/api/conversations/:id/toolcalls` 那条 `ORDER BY id DESC LIMIT 100`。 */
+      async recent(conversationId, { limit } = {}) {
+        const rows = await r.many(`SELECT * FROM tool_calls WHERE conversation_id=? ORDER BY id DESC${limitClause(limit)}`, [conversationId]);
+        return rows.map((row) => toRecord('toolCalls', row));
+      },
+      /**
+       * 把本会话**尚未归属**的工具调用挂到刚落的这条 assistant 消息上（`server/index.js:1410` 的轨迹回填：
+       * `UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL`）。
+       * `message_id IS NULL` 是并发闸门的一部分（只认领没人认领过的），逐字保留。
+       */
+      async attachToMessage(conversationId, messageId) {
+        const res = await r.exec('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [messageId, conversationId]);
+        return Number((res && res.affectedRows) || 0);
+      },
+      /** 清掉某会话的全部工具调用（`DELETE /api/conversations/:id` 的级联里那句）。 */
+      async removeByConversation(conversationId) {
+        const res = await r.exec('DELETE FROM tool_calls WHERE conversation_id=?', [conversationId]);
+        return Number((res && res.affectedRows) || 0);
       },
     },
 

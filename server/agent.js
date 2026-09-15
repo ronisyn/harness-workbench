@@ -14,9 +14,15 @@ import { PREFIX_LEDGER } from './prefix-participants.js';
 import { newProgressState, judgeRound, stallMessage, fuseDecision } from './progress.js';
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { effectiveCollapseChars } from './modelwindow.js';
+// §4.3 模型能力声明：agent 侧只取"工具面被收窄"这条事实名（三维判定与闸门都在 modelcaps.js + llm/gateway.js）。
+// ⚠️ 刻意**不** import RA-31 的能力清单模块（`./capabilities` + '.js'）：test/capabilities.test.mjs 里有一条
+//   **源码级**结构锁——"能力清单模块（给人看的声明面）不得被系统提示/agent 侧引用"，因为那份"给人看的实话"
+//   一旦被 agent 侧引用，迟早会溜进模型上下文。本行连注释都刻意不写出那个文件名（那条锁是子串匹配）。
+import { USED_TOOL_FACE_PRUNED } from './modelcaps.js';
 import { spillToolResult } from './tools/spill.js';
 import { clearReadCache } from './readcache.js';
 import { db } from './db.js';
+import { storage } from './storage/index.js'; // v0.3 §4.1「存储走接口」：护栏/策略设置读走接口
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
 import { LIGHT_TOOLSET } from './tools/registry.js';
@@ -170,11 +176,13 @@ export async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive', 'llm_max_retries', 'collapse_window_ratio']);
+    // 护栏现值走存储接口的按键批量读（`getMany`：存在的键才出现）；值的解析口径不变
+    // （原来是 `Number(JSON.parse(r.svalue))`，接口回来的已是解析后的值 ⇒ 直接 Number，语义等价）
+    const map = await storage.settings.getMany(['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive', 'llm_max_retries', 'collapse_window_ratio']);
     const pick = (k, d) => {
-      const r = rows.find((x) => x.skey === k);
-      if (!r) return d;
-      try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
+      if (!Object.prototype.hasOwnProperty.call(map, k)) return d;
+      const n = Number(map[k]);
+      return Number.isFinite(n) && n >= 0 ? n : d;
     };
     limitsCache = {
       budgetMin: pick('time_budget_min', def.budgetMin), roundCap: pick('round_cap', def.roundCap),
@@ -313,6 +321,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   let loopWarned = false;  // soft 换策略提示只发一次
   const repeatReminded = new Set(); // RA-39：第 3/5 次重复的提醒各发一次（提醒≠阻止）
   let fakeWarnCount = 0;   // B6 假完成检测打回计数（回复声称完成但本轮无工具调用）
+  let toolFacePrunedLogged = false; // §4.3：工具面因"模型声明不支持工具"被收窄这一事实，本 run 只记一次
   let consecutiveFail = 0; // F4 连续失败轮计数（本轮工具全失败累计；任一成功清零）
   let failWarned = false;  // F4 软提示只发一次（到 N 次后提示换策略，再 N 次才挂起）
   const t0 = Date.now();
@@ -834,6 +843,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           }),
         });
       });
+    }
+    // §4.3「工具」维的**逐次如实上报**（2026-09-17）：网关发现"该模型声明不支持工具调用"时，
+    // 本轮的 tools 字段根本没发出去（`res.toolFacePruned`，判定在 server/modelcaps.js）。
+    // 这里把它记成 toolLog 里的一条**事实**（不是工具名），于是它自动经 run_end.capabilities.used 带出去
+    // ——用的是现成出口，既不新造事件类型、也不动 server/index.js 的事件白名单/前端契约。
+    // 只记一次（本 run 内）：工具面一旦按声明收窄，整段都一样，每轮重复只是噪音。
+    if (res.toolFacePruned && !toolFacePrunedLogged) {
+      toolFacePrunedLogged = true;
+      toolLog.push({ name: USED_TOOL_FACE_PRUNED, args: {}, status: 'pruned', code: null, durationMs: 0, seq: ++dispSeq, note: (res.capNote && res.capNote.note) || ('模型 ' + provider + '(' + (model || provider) + ') 声明不支持工具调用 ⇒ 工具面未发出') });
+      console.warn('[modelcaps] 工具面按能力声明收窄并如实记账：provider=' + provider + ' model=' + (model || provider) + '（声明无 tool ⇒ tools 字段未发出）');
     }
     // 技能：本轮若通过 skill_load 新载入了技能，**追加到历史之后**（不是改节点 0）。
     // 放在工具结果之后：位置=这一轮真正发生的位置，且它前面的历史仍然命中。

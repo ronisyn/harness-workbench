@@ -24,6 +24,7 @@
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
 import { TOOL_META, PLATFORM_EXEMPT } from './registry.js';
 import { db } from '../db.js';
+import { storage } from '../storage/index.js'; // v0.3 §4.1「存储走接口」：策略键读取走接口（getMany）
 import { execArgv } from '../exec/index.js';
 const registry = [];
 const MAX_HOOKS = 128;
@@ -255,7 +256,11 @@ registerHook('before', '*', 'enabled_tools_guard', ({ args, ctx }) => {
   if (!name) return {};
   // P24(O-21)：MCP 工具（mcp_*）由管理员在 settings mcp_servers 配置信任（动态命名无法进静态启用集），豁免启用集门禁；
   // 但仍受权限(checkPerm write 级)/只读意图/审计约束（已并入 execTool 主通道）。
-  if (name.startsWith('mcp_')) return {};
+  // v0.3 §4.2「连接器=带凭证的执行后端」：连接器的 HTTP 动作工具（conn_*，server/connectors.js）同属**管理员声明的
+  // 外部后端**、同样是动态命名 ⇒ 同一豁免（否则每个连接器工具都要手工进启用集，实际结果是一条也调不动）。
+  // ⚠️ 这三处（本行 / 下面只读意图守卫 / tools/index.js 的 isExternalSource）都按前缀字面量判"外部工具"；
+  //    新增外部来源种类时三处都要认它——把判据收成一处（依赖少的公共判据模块）是后续的清理项，本批只增不改。
+  if (name.startsWith('mcp_') || name.startsWith('conn_')) return {};
   if (ctx.__enabledTools && !ctx.__enabledTools.has(name) && !PLATFORM_EXEMPT.includes(name)) {
     return { stop: true, reason: `工具 ${name} 未在工具启用集内（默认 28 项）。可在 设置→工具 勾选启用后重试，或改用已启用工具完成。` };
   }
@@ -278,10 +283,11 @@ for (const m of READONLY_MUTATING) {
     return {};
   }, { builtin: true, failure: 'open' });
 }
-// P24(O-21/O-23)：MCP 外部工具（动态命名）同样受只读意图约束——管理员信任 ≠ 只读轮可执行外部副作用
+// P24(O-21/O-23)：MCP 外部工具（动态命名）同样受只读意图约束——管理员信任 ≠ 只读轮可执行外部副作用。
+// v0.3 §4.2：连接器的 HTTP 动作工具（conn_*）同一条约束（它们一律按 write 级评估，见 server/connectors.js）。
 registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
   const name = ctx?.__toolName;
-  if (ctx?.__readonlyIntent && name && name.startsWith('mcp_')) {
+  if (ctx?.__readonlyIntent && name && (name.startsWith('mcp_') || name.startsWith('conn_'))) {
     return { stop: true, reason: '只读规划意图（本轮）：MCP 外部工具 ' + name + ' 已被禁用。规划阶段只用只读工具；把方案作为回答展示，等用户批准后再执行。' };
   }
   return {};
@@ -462,8 +468,10 @@ export function policyWriteDetail({ kind, keys, from, to, ctx = {}, result, sql,
 /** 读策略键的当前值（只读）。失败返回 null，由账本如实标成 `from:null`，不假装读到了。 */
 async function readPolicyValues(keys) {
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (' + keys.map(() => '?').join(',') + ')', keys);
-    return Object.fromEntries(rows.map((r) => [r.skey, r.svalue]));
+    // 走存储接口的按键批量读（v0.3 §4.1）：**返回形状与迁移前那条 SELECT 逐字对齐**——
+    // 存在的键才出现、值是**库里的原样文本**（不是解析后的对象），因为账本的 `from` 字段是拿它做留痕的。
+    const map = await storage.settings.getMany(keys);
+    return Object.fromEntries(Object.entries(map).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
   } catch { return null; }
 }
 

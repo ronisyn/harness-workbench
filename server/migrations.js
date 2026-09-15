@@ -204,6 +204,56 @@ export const VERSIONS = [
     // 新库路径由 db.js 的 SCHEMA 建到最终形状（含本索引），两条路径一起改。
     statements: [`CREATE FULLTEXT INDEX ft_kb_text ON knowledge (title, body) WITH PARSER ngram`],
   },
+  {
+    id: '0008_indexes_of_baseline_tables', note: '补齐 SCHEMA 声明、而升级库缺的索引（C-48 收口；只增不删）',
+    // 2026-09-16（登记 C-48：「迁移链只加列、不补索引 ⇒ 升级来的库一直在悄悄丢索引」）：
+    // 机理是**两条建库路径对索引的口径不对称**——新库走 db.js 的 SCHEMA，建表语句里声明的索引一次建全；
+    // 而存量库走这条链，链里的 CREATE TABLE 只建过 events/events_archive/deliveries/contract_events 四张，
+    // 其余表的索引**从来没有一条语句建过**。于是凡是"先有表、后加索引"的那类索引（表在改造前就存在 ⇒
+    // 链里只有 ALTER；索引是后来才写进 SCHEMA 的），升级来的库上**永远不存在**。这不是推演：只读探针实测
+    // 真库 `rw_test` 就缺 5 条（`audit_log.idx_audit_time` / `idx_audit_conv`、`usage_stats.idx_usage_time` /
+    // `idx_usage_conv`、`knowledge.idx_kb_shell`），而"照 SCHEMA 新建"的库 67 条索引一条不少。
+    //
+    // **纪律（本轮改用这一条，替换掉前一版的"按表整片补"，原因见下）**：每条索引在链里
+    // **有且只有一条语句建它**。所以本步只建"链里任何 `CREATE TABLE` 都没声明过"的那些索引：
+    //   · `audit_log` / `audit_log_archive` / `usage_stats` 三张存量表（链只 ALTER 过，索引 0 声明）；
+    //   · `knowledge` 的 `idx_kb_scope` 与 `idx_kb_shell`（同因：链只 ALTER 过它，`ft_kb_text` 由 0007 单独建）。
+    // 为什么不补 `contract_events.idx_ce_contract`（它也在 SCHEMA 里、链里也没有）——**它不是本轮的形态**：
+    // `contract_events` 是**链之前就存在**的表（链对它是 `ALTER`：0006 只加列加唯一键），那张表诞生时的建表
+    // 语句里就带着 `idx_ce_contract`（真库只读探针：在）。这与 `messages`/`reviews` 同类——"先有表、后加索引"
+    // 的漂移只发生在**索引是后来才写进 SCHEMA** 的列上（audit_log / usage_stats / knowledge 都是这种）。
+    // 另外它也**不归本步**：`test/contract-events-source.test.mjs` 刻意锁着"涉及 contract_events 的迁移只有一条"
+    // （再加一条就得有人问为什么）。口径写在 `test/schema-sync.test.mjs` 的 BASE 名单里，机检也照那个口径走。
+    // ⚠️ 前一版错在哪（如实记，避免下一个人重蹈）：前一版按"链碰过的表"整片补，把 0007 已建的 `ft_kb_text`、
+    // 以及 0005 建表段**已经声明过**的 `idx_deliveries_state` 又建了一遍——真升级库上会 `ER_DUP_KEYNAME`
+    // 卡住整条链（**正是 C-57 的形态**，只不过那次是演练的倒推漏了索引、这次是迁移步自己重复建）。
+    // **重复建不是"幂等"，是把链卡住的 bug。**本步 8 条与链里任何一步建的索引**两两不同名**，可脚本复核：
+    // 名字取自 db.js 的 SCHEMA，与"链里已声明过的索引名集合"求差集（不手抄清单）。
+    //
+    // tolerate 为什么仍要写（**不是**给"重复建"开的后门）：这几条在升级来的库上**可能在、也可能不在**
+    // （取决于该库当年建表时的那版 db.js 有没有声明它；真库 `rw_test` 实测：`idx_arch_time` 在、
+    // `idx_audit_time` 不在）。所以"确保它在"这件事只能写成"建一次 + 容忍已存在"（MySQL 没有
+    // `CREATE INDEX IF NOT EXISTS`）。容忍数计在 runMigrations 的 `tolerated` 里（不静默、有读数）；
+    // **其余任何错误一律判失败**，包括列不存在、表不存在、磁盘/锁超时。
+    //
+    // 运维代价（如实记，不发明阈值）：`CREATE INDEX` 在存量表上会**短暂锁表**（MySQL 8 普通二级索引走
+    // ONLINE DDL，允许并发读写，但收尾阶段会短暂取 MDL 排他锁）。真库当前体量：`audit_log` 13.5k 行、
+    // `usage_stats` 万级、`knowledge` 千级 ⇒ 秒级抖动，与 0007 建 `ft_kb_text` 同一量级、同一类影响。
+    // 只增不删：只建索引，不动列、不动行、不删任何东西。
+    // 新库路径不必改：db.js 的 SCHEMA 本来就声明了这些索引（这些索引的口径就取自那里）。
+    // 判据由 `test/schema-sync.test.mjs` 机检（定义域＝链产生过索引的表；SCHEMA 声明的索引集合必须逐条相等）。
+    tolerate: /Duplicate key name/i,
+    statements: [
+      'CREATE INDEX idx_audit_time ON audit_log (created_at)',
+      'CREATE INDEX idx_audit_conv ON audit_log (conversation_id)',
+      'CREATE INDEX idx_arch_time ON audit_log_archive (created_at)',
+      'CREATE INDEX idx_arch_conv ON audit_log_archive (conversation_id)',
+      'CREATE INDEX idx_usage_time ON usage_stats (created_at)',
+      'CREATE INDEX idx_usage_conv ON usage_stats (conversation_id)',
+      'CREATE INDEX idx_kb_scope ON knowledge (account_id, scope)',
+      'CREATE INDEX idx_kb_shell ON knowledge (shell_id)',
+    ],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (

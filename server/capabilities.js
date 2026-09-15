@@ -24,6 +24,14 @@
 import { listHooks, hookPolicySummary } from './tools/hooks.js';
 import { toolDefs } from './tools/index.js';
 import { TOOL_META } from './tools/registry.js';
+// §4.3 模型能力声明（视觉/工具/思考三维）：**只读**判定模块（纯函数、不碰 DB/进程），
+// 理由：清单里若不写这一维，读清单的人（与用户）根本看不出"这个模型支持什么"——
+// 而改造前它确实一个字都没有（只有 tools.total 那种"平台给了几个工具"，不是"模型能不能用工具"）。
+import { capabilitiesOf, canDo, capabilitiesReport, CAP_CONSUMERS } from './modelcaps.js';
+// §4.3「工具」这一维的**逐次上报**事实名：取值与理由定义在 modelcaps.js（三维判定的唯一出处）。
+// ⚠️ 刻意**不**从本文件转给 agent.js：`test/capabilities.test.mjs` 有一条结构锁——"能力清单模块不得被
+//   系统提示/agent 侧引用"（省前缀那件事要有结构保证）。要记这条账的 agent.js 从 modelcaps.js 取。
+import { USED_TOOL_FACE_PRUNED } from './modelcaps.js';
 
 export const ENFORCEMENT_VALUES = ['full', 'partial', 'none'];
 
@@ -183,6 +191,11 @@ export function capabilityManifest(ctx = {}, extra = {}) {
     tiers[t && tiers[t] !== undefined ? t : 'unknown']++;
   }
   const hooks = hookPolicySummary();
+  // §4.3：这次会话绑的是哪个模型、它**声明**了哪三维能力（视觉/工具/思考），照实写出来。
+  // 绑定信息由调用方通过 ctx.provider / ctx.model 传入（`/api/agent/capabilities` 今天不传 —— 不传就如实写
+  // "本次清单未绑定模型/厂商"，**不猜**：猜一个默认模型写上去就是假声明）。
+  // 注意这里报的是"声明"，不是"实测"：声明与真实不符属于厂商的事，平台只保证"按声明判、并把它写出来"。
+  const modelCaps = capabilitiesOf(ctx.provider || null, ctx.model || null);
   return {
     version: 1,
     enforcement,
@@ -194,6 +207,27 @@ export function capabilityManifest(ctx = {}, extra = {}) {
     },
     promptInjection: PROMPT_INJECTION, // 候选 D：用户可见的诚实性字段（不进模型上下文）
     dataEgress: DATA_EGRESS, // D3/OP-01：数据出口的边界同样如实写出来（同样不进模型上下文）
+    // §4.3 模型能力声明（2026-09-17）：三维各自的**取值 + 一句实话**。取值三态：
+    //   true=声明支持 / false=**显式声明不支持**（唯一来源＝专用字段 capabilitiesDeclared 写 false；网关据此
+    //   拒发图、收工具面、不转思考） / null=**未声明**（按改造前行为）。
+    //   ⚠️ `capabilities` 标签数组**只能产生 true/null，永远不产生 false**——它是产品/UI 功能标签，
+    //      "标签里没写"不等于"不支持"（deepseek/ark 没有 'tool' 标签但一直在用工具，详见 server/modelcaps.js 文件头）。
+    model: {
+      provider: ctx.provider || null,
+      model: ctx.model || null,
+      bound: Boolean(ctx.provider || ctx.model),
+      note: (ctx.provider || ctx.model)
+        ? '本次清单绑定了模型：下面是该厂商的**声明**（不是实测）。三维只有"显式声明不支持"（capabilitiesDeclared 写 false）才会改变行为；'
+          + '未声明一律按改造前行为处理。标签数组（capabilities）只作正向提示，缺标签不算不支持。'
+        : '本次清单**未绑定模型/厂商**（调用方没传 ctx.provider/ctx.model）——不猜默认模型，三维能力请按 models 表逐模型读',
+      declarationSource: 'server/llm/providers.js：正向 `capabilities` 标签数组（入库 models.capabilities，出口 /api/models）；'
+        + '显式否定 `capabilitiesDeclared: {vision?,tool?,reasoning?}`（可选，今天无厂商使用）',
+      explicitNegations: modelCaps.negated, // 被显式声明为 false 的维（空数组＝今天没有厂商声明"不支持"）
+      capabilities: capabilitiesReport(modelCaps),
+      consumers: CAP_CONSUMERS,
+      toolFaceNote: '三维里"工具"这一维的**逐次**上报：网关按显式否定收窄工具面时，会在 run_end 的 capabilities.used 里多一条 '
+        + USED_TOOL_FACE_PRUNED + '（如实记账，不是工具名）——不新造事件类型、不改对外契约，出口就是现成的那个。',
+    },
     session: {
       permission: ctx.permission || 'full',
       preset: ctx.preset || 'all',

@@ -1,5 +1,14 @@
 // server/llm/providers.js - 多厂商配置（全部 OpenAI 兼容）
 // 每项：id（唯一）/ name / base（OpenAI 兼容 base URL）/ keyEnv（config.keys 里的键名）/ defaultModel / capabilities / chatModels
+// capabilities：该厂商的能力**标签**（产品/菜单维度：chat / code / reasoning / tool / vision / image / video / ocr）——
+//   供 /api/models 与前端菜单展示，**不是排他性的能力全集**。
+//   ⚠️ 因此它**不产生"不支持"的语义**：标签里没有 'tool' 不等于不支持工具调用。实测（2026-09-17）：
+//   deepseek 标签是 ['chat','code','reasoning']（无 'tool'）却一直在调工具；ark（无 'tool'）同理。
+//   三维（视觉/工具/思考）的**显式否定**必须写在专用可选字段里（唯一来源，判定见 server/modelcaps.js）：
+//     capabilitiesDeclared: { vision?: boolean, tool?: boolean, reasoning?: boolean }
+//       · 写 false ⇒ 平台认定"该厂商显式声明不支持这一维"：网关据此**在发送前**拒发图 / 不把工具面发出去 /
+//         不把思考增量透给界面（今日**无厂商**使用该字段 ⇒ 三维行为与改造前逐字相同）。
+//       · 写 true / 不写 ⇒ 不产生否定（正向支持仍以 capabilities 标签为准）。
 // chatModels：该厂商「主对话模型」菜单清单——以 2026-09 各厂商带 key 实测 GET /models 返回为准，
 // 人工剔除 embedding/rerank/视频/图像/音频/OCR/3D/过旧版本等非纯对话模型，保留主流对话模型供模型菜单可选。
 export const PROVIDERS = [

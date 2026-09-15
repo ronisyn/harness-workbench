@@ -1,14 +1,15 @@
 // server/autotitle.js
 import { db } from './db.js';
+import { storage } from './storage/index.js'; // v0.3 §4.1「存储走接口」：会话/消息读走接口
 import { findProvider } from './llm/providers.js';
 import { calcCost } from './llm/gateway.js';
 import { config } from './config.js';
 export async function autoTitle(id, acc, force) {
-  const c = (await db.query('SELECT title,provider,model FROM conversations WHERE id=? AND account_id=?', [id, acc]))[0];
+  const c = await storage.conversations.findOwned(id, acc);
   if (!c) return { ok: false };
   if (c.title && c.title !== '新对话' && !force) return { ok: true, skipped: true };
   // 取最近 12 条非工具消息并按时间正序拼 prompt（截断单条防超长内容撑爆上下文/烧钱）
-  const rows = await db.query('SELECT role,content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 12', [id]);
+  const rows = await storage.messages.recent(id, { limit: 12, roles: ['user', 'assistant'] });
   const lines = rows.map((r) => (r.role === 'user' ? '用户：' : '助手：') + String(r.content || '').replace(/\s+/g, ' ').trim().slice(0, 300)).reverse();
   const prov = c.provider && c.provider !== 'auto' ? c.provider : 'deepseek';
   const p = findProvider(prov);
@@ -41,6 +42,6 @@ export async function autoTitle(id, acc, force) {
     t = String(first && first.role === 'user' ? first.content : lines.join(' ')).replace(/\s+/g, ' ').trim().slice(0, 24);
   }
   if (!t) return { ok: false, message: '无内容可命名' };
-  await db.query('UPDATE conversations SET title=?, updated_at=NOW() WHERE id=? AND account_id=?', [t, id, acc]);
+  await storage.conversations.updateOwned(id, acc, { title: t });
   return { ok: true, title: t };
 }

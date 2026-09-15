@@ -57,7 +57,9 @@ import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
 import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR, RW_VERSION } from './env.js';
 import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
-import { STORAGE_UNSUPPORTED } from './storage/index.js'; // v0.3 §7.1 ⑦：存储实现"能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）
+import { STORAGE_UNSUPPORTED, storage } from './storage/index.js'; // v0.3 §7.1 ⑦：存储接口（单一选择点）——
+// "能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）＋登录/会话/消息/设置这条链的读写入口。
+// `storage.impl` 是**当前实现名**（'mysql' | 'jsonfile'），下面"要不要连库"就按它判（理由见 main() 里的门）。
 import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
 import { execArgv, spawnArgv } from './exec/index.js'; // ⑯：起进程一律经执行后端（argv 级动词；平台判据与沙箱都在那一层）
 import { wrapAsyncHandlers } from './asyncwrap.js'; // Express 4 的 async 处理器兜底（出错 500，不再挂住请求）
@@ -325,9 +327,29 @@ app.post('/api/skills/:name/smoke', requireAuth, async (req, res) => {
 
 // ---------- 会话 ----------
 app.get('/api/conversations', requireAuth, async (req, res) => {
-  const rows = await db.query(
-    'SELECT c.id, c.channel, c.permission, c.preset, c.title, c.provider, c.model, c.project, c.shell_id, s.skey AS shell_key, s.name AS shell_name, c.created_at, c.updated_at FROM conversations c LEFT JOIN shells s ON s.id = c.shell_id WHERE c.account_id=? OR (c.channel != "web" AND c.account_id IS NULL) ORDER BY c.updated_at DESC', [req.user.id]);
-  res.json({ ok: true, conversations: rows });
+  const rows = await storage.conversations.listByAccount(req.user.id);
+  // 壳展示列（shell_key/shell_name）仍走 shells 表那条 LEFT JOIN 的**直读**：`shells` 不在存储接口的实体
+  // 清单里（v0.3 符合性核对 §2.1 第 2 条点名的六类不含它，接口注释里也写着这一条），本轮不把它拉进来。
+  // 与 LEFT JOIN 同义：查不到的壳 ⇒ 两个字段都是 null（不是少两个键）。空列表时不查库（`IN ()` 非法 SQL）。
+  const shellById = new Map();
+  const shellIds = [...new Set(rows.map((r) => r.shellId).filter((v) => v !== null && v !== undefined))];
+  if (shellIds.length) {
+    const sr = await db.query(
+      `SELECT id, skey AS shell_key, name AS shell_name FROM shells WHERE id IN (${shellIds.map(() => '?').join(',')})`, shellIds);
+    for (const s of sr) shellById.set(s.id, s);
+  }
+  // 字段名与顺序**保持迁移前那条 SELECT 的原样**（前端 web/dist 读的是 shell_key/created_at 这些蛇形键，
+  // 存储接口回的是中性驼峰名 ⇒ 在这一层还原成对外契约的形状，不外泄接口的内部命名）
+  const conversations = rows.map((r) => {
+    const sh = shellById.get(r.shellId) || {};
+    return {
+      id: r.id, channel: r.channel, permission: r.permission, preset: r.preset, title: r.title,
+      provider: r.provider, model: r.model, project: r.project, shell_id: r.shellId ?? null,
+      shell_key: sh.shell_key ?? null, shell_name: sh.shell_name ?? null,
+      created_at: r.createdAt ?? null, updated_at: r.updatedAt ?? null,
+    };
+  });
+  res.json({ ok: true, conversations });
 });
 
 app.post('/api/conversations', requireAuth, async (req, res) => {
@@ -345,26 +367,28 @@ app.post('/api/conversations', requireAuth, async (req, res) => {
     const sr = (await db.query('SELECT id FROM shells WHERE skey=? AND status="enabled"', [String(shell)]))[0];
     shellId = sr ? sr.id : null;
   }
-  const r = await db.query('INSERT INTO conversations (account_id, title, permission, preset, provider, model, project, shell_id) VALUES (?,?,?,?,?,?,?,?)',
-    [req.user.id, title || '新对话', perm, ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
-      provider || null, model || null, proj, shellId]);
-  res.json({ ok: true, id: r.insertId, shellId });
+  const r = await storage.conversations.create({
+    accountId: req.user.id, title: title || '新对话', permission: perm,
+    preset: ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all',
+    provider: provider || null, model: model || null, project: proj, shellId,
+  });
+  res.json({ ok: true, id: r.id, shellId });
 });
 
 app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   const { title, permission, preset, provider, model, project, shell } = req.body || {};
-  const set = [], params = [];
-  if (title !== undefined) { set.push('title=?'); params.push(title); }
+  const patch = {};
+  if (title !== undefined) patch.title = title;
   if (permission !== undefined) {
     if (!['read', 'write', 'guard', 'full'].includes(String(permission))) {
       return res.status(400).json({ ok: false, message: 'permission 需为 read|write|guard|full' });
     }
-    set.push('permission=?'); params.push(permission);
+    patch.permission = permission;
   }
-  if (project !== undefined) { set.push('project=?'); params.push(String(project).replace(/[\\/.]/g, '_').slice(0, 60) || 'default'); }
-  if (preset !== undefined) { set.push('preset=?'); params.push(['all', 'standard', 'minimal'].includes(preset) ? preset : 'all'); }
-  if (provider !== undefined) { set.push('provider=?'); params.push(provider || null); }
-  if (model !== undefined) { set.push('model=?'); params.push(model || null); }
+  if (project !== undefined) patch.project = String(project).replace(/[\\/.]/g, '_').slice(0, 60) || 'default';
+  if (preset !== undefined) patch.preset = ['all', 'standard', 'minimal'].includes(preset) ? preset : 'all';
+  if (provider !== undefined) patch.provider = provider || null;
+  if (model !== undefined) patch.model = model || null;
   // A2 会话挂壳：shell=''/'default'/null → 摘下（NULL=默认壳语义）；否则需为启用中的非 default 壳
   if (shell !== undefined) {
     const s = shell === null || shell === undefined || String(shell) === '' || String(shell) === 'default' ? '' : String(shell).trim();
@@ -374,12 +398,14 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
       if (!sr) return res.status(400).json({ ok: false, message: '壳不存在或不可挂载（需为启用中的非 default 壳）' });
       shellId = sr.id;
     }
-    set.push('shell_id=?'); params.push(shellId);
+    patch.shellId = shellId;
   }
-  if (!set.length) return res.json({ ok: true });
-  params.push(req.params.id, req.user.id);
-  const r = await db.query(`UPDATE conversations SET ${set.join(',')}, updated_at=NOW() WHERE id=? AND account_id=?`, params);
-  if (!r.affectedRows) return res.status(404).json({ ok: false, message: '会话不存在或无权修改' }); // E：与 DELETE 同口径
+  if (!Object.keys(patch).length) return res.json({ ok: true });
+  // `affectedRows` 判据（"改到 0 行 ⇒ 404"）在接口上是"更新前后都读一次、比一比"——
+  // 原有的 `WHERE id=? AND account_id=?` 两条条件在这两次读里逐字保留，对外行为不变。
+  const before = await storage.conversations.get(req.params.id);
+  if (!before || before.accountId !== req.user.id) return res.status(404).json({ ok: false, message: '会话不存在或无权修改' }); // E：与 DELETE 同口径
+  await storage.conversations.updateOwned(req.params.id, req.user.id, patch);
   if (shell !== undefined) {
     const detail = shell === undefined || shell === '' || shell === 'default' || shell === null ? 'detach' : 'attach=' + String(shell).trim();
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'conv:shell', 'conv=' + req.params.id + ' ' + detail]);
@@ -395,17 +421,21 @@ app.post('/api/conversations/:id/autotitle', requireAuth, async (req, res) => {
 app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   // P0-2 修复（2026-09 全面体检）：① 先校验会话归属，防越权删他人会话子表数据（原实现删 messages 无归属校验）
   // ② 级联清理全部子表：原实现只删 messages，遗留 tool_calls/usage_stats/agent_runs 等孤儿（实测 tool_calls 77% 为孤儿），污染用量统计口径
-  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+  const own = await storage.conversations.findOwned(req.params.id, req.user.id);
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权删除' });
   // 孤儿防护（终审）：先中止该会话仍在执行的 agent（SSE 断连 abort 已发、但收尾落库可能与删除并发）——
   // 中止后 agent 收尾走 stopped 路径，配合落库前会话存在校验（原子 INSERT…SELECT WHERE EXISTS），杜绝"先删后写"孤儿
   try { stopTurn({ conversationId: req.params.id, accountId: req.user.id, reason: 'delete' }); } catch { /* 忽略 */ }
   // 先删 conversations 行再清子表：会话行消失即向并发迟到写"关门"（存在校验即刻为假），随后子表删除按 id 全清
-  await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
+  // （会话/消息/工具调用三张表都在存储接口里 ⇒ 走接口删，jsonfile 实现下也真的删得掉；
+  //   其余子表（usage_stats/agent_runs/…）不在接口范围内，仍走 SQL —— 见冲突登记 C-61）
+  await storage.conversations.remove(Number(req.params.id));
+  await storage.messages.removeByConversation(Number(req.params.id));
+  await storage.toolCalls.removeByConversation(Number(req.params.id));
   clearReadCache(req.params.id); // RA-35 措施②：重复读去重状态随会话一起清掉（不长期占内存）
   // 契约事件（contract_events 挂在 task_contracts 下、无 conversation_id）须先按其所属契约清理，避免孤儿
   try { await db.query('DELETE FROM contract_events WHERE contract_id IN (SELECT id FROM task_contracts WHERE conv_id=?)', [req.params.id]); } catch { /* 表未建则跳过 */ }
-  for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
+  for (const t of ['usage_stats', 'agent_runs', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {
     try {
       await db.query(`DELETE FROM ${t} WHERE ${t === 'task_contracts' ? 'conv_id' : 'conversation_id'}=?`, [req.params.id]);
     } catch { /* 个别表未建则跳过 */ }
@@ -419,11 +449,17 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
 // 默认响应**逐字节不变**（不带 `events` 字段）：老调用方看不见新东西。`afterId` 是增量游标（账本行 id）。
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   // P0 归属校验：本人 或 渠道共享会话(account_id NULL 且非 web)——与会话列表口径一致，防枚举他人会话读消息
-  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))', [req.params.id, req.user.id]))[0];
+  const c0 = await storage.conversations.get(req.params.id);
+  const own = c0 && (c0.accountId === req.user.id || (String(c0.channel) !== 'web' && (c0.accountId ?? null) === null));
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
   const withEvents = String(req.query.events ?? '') !== '' && String(req.query.events ?? '') !== '0';
   if (!withEvents) {
-    const rows = await db.query(MESSAGES_SQL, [req.params.id]);
+    // 形状与顺序保持迁移前那条 `MESSAGES_SQL` 的原样（前端 web/dist 与《会话API契约-v1》§3.5 读的是
+    // created_at 这些蛇形键；存储接口回中性驼峰名 ⇒ 在这一层还原成对外契约的形状）
+    const rows = (await storage.messages.list(req.params.id)).map((m) => ({
+      id: m.id, role: m.role, content: m.content ?? null, reasoning: m.reasoning ?? null,
+      model: m.model ?? null, provider: m.provider ?? null, created_at: m.createdAt ?? null,
+    }));
     return res.json({ ok: true, messages: rows });
   }
   const scene = await replayConversation(req.params.id, { afterId: req.query.afterId, db });
@@ -435,17 +471,20 @@ app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
 // 已删除服务端 markdown 生成——人工可读导出唯一实现=对话页「⬇ 导出」；本端点只留机器可读（jsonl）能力。
 app.get('/api/conversations/:id/export', requireAuth, async (req, res) => {
   try {
-    const conv = (await db.query('SELECT title, provider, model FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    const conv = await storage.conversations.findOwned(req.params.id, req.user.id);
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
-    const ms = await db.query('SELECT id, role, content, reasoning, model, provider, tokens_in, tokens_out, created_at FROM messages WHERE conversation_id=? ORDER BY id', [req.params.id]);
-    const tc = await db.query('SELECT message_id, tool_name, args, result_summary, status, duration_ms FROM tool_calls WHERE conversation_id=? ORDER BY id', [req.params.id]);
+    const ms = await storage.messages.list(req.params.id);
+    const tc = (await storage.toolCalls.list(req.params.id)).map((t) => ({
+      message_id: t.messageId ?? null, tool_name: t.toolName, args: t.args ?? null,
+      result_summary: t.resultSummary ?? null, status: t.status ?? null, duration_ms: t.durationMs ?? 0,
+    }));
     const byMsg = {};
     for (const t of tc) if (t.message_id) (byMsg[t.message_id] = byMsg[t.message_id] || []).push(t);
     const rows = ms.map((m) => ({
       type: 'message', id: m.id, role: m.role, content: m.content,
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-      ...(m.model ? { model: m.model, provider: m.provider || null, tokens_in: m.tokens_in || 0, tokens_out: m.tokens_out || 0 } : {}),
-      created_at: m.created_at,
+      ...(m.model ? { model: m.model, provider: m.provider || null, tokens_in: m.tokensIn || 0, tokens_out: m.tokensOut || 0 } : {}),
+      created_at: m.createdAt ?? null,
       tool_calls: (byMsg[m.id] || []).map((t) => ({ tool: t.tool_name, args: safeJson(t.args), result: safeJson(t.result_summary), status: t.status, duration_ms: t.duration_ms || 0 })),
     }));
     res.json({ ok: true, filename: (conv.title || '对话') + '.jsonl', content: rows.map((r) => JSON.stringify(r)).join('\n') });
@@ -458,7 +497,7 @@ function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
 // 两条并存、各说各的用途：要审计/回放用 JSONL，要搬家/长期保存用带 formatVersion 的这份。
 app.get('/api/conversations/:id/export-full', requireAuth, async (req, res) => {
   try {
-    const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
+    const conv = await storage.conversations.findOwned(req.params.id, req.user.id);
     if (!conv) return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' });
     const pack = await exportConversation(Number(req.params.id));
     res.json({ ok: true, filename: 'rw-session-' + req.params.id + '.json', content: pack });
@@ -548,11 +587,25 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })), categories: Object.keys(AUDIT_CATS) });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
+// 会话归属的**唯一一处**判据（迁存储接口时收口：原先同一个条件在 7 条路由里各写一遍 SQL，
+// 现在只读一次会话记录、按同一套条件比 —— 语义与各路由原来那条 WHERE **逐字对应**）：
+//   · 'own'    = `id=? AND account_id=?`（本人）
+//   · 'shared' = `id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))`（本人 ∪ 渠道共享会话）
+// 注意 `account_id=?` 遇到 NULL 在 SQL 里恒不成立（`NULL = ?` 不是 TRUE）⇒ 'own' 档对渠道共享会话**不放行**，
+// 这正是迁移前那几个端点的行为（`/api/activity`、`/stream`、`/export`、`/export-full` 都是 404）。
+async function convAccess(id, accountId, mode = 'own') {
+  const c = await storage.conversations.get(id);
+  if (!c) return null;
+  if (c.accountId === accountId) return c;
+  if (mode === 'shared' && (c.accountId ?? null) === null && String(c.channel) !== 'web') return c;
+  return null;
+}
+
 // 按会话回溯（§8.10：从某会话看它全部动作，tool_calls 轨迹与 audit 联动；对话页可跳审计页）
 app.get('/api/conversations/:id/trace', requireAuth, async (req, res) => {
   try {
     const cid = Number(req.params.id) || 0;
-    const own = (await db.query('SELECT id, title, shell_id FROM conversations WHERE id=? AND (account_id=? OR (channel!="web" AND account_id IS NULL))', [cid, req.user.id]))[0];
+    const own = await convAccess(cid, req.user.id, 'shared');
     if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
     const audit = await db.query(
       'SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=? OR detail LIKE ? ORDER BY id DESC LIMIT 200',
@@ -560,7 +613,7 @@ app.get('/api/conversations/:id/trace', requireAuth, async (req, res) => {
     const tools = await db.query('SELECT id, tool_name, status, duration_ms, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 200', [cid]);
     const usage = (await db.query('SELECT COUNT(*) n, COALESCE(SUM(cost),0) cost, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout FROM usage_stats WHERE conversation_id=?', [cid]))[0] || {};
     res.json({
-      ok: true, conversation: { id: own.id, title: own.title, shell_id: own.shell_id },
+      ok: true, conversation: { id: own.id, title: own.title, shell_id: own.shellId ?? null },
       audit: audit.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })),
       toolCalls: tools, usage: { calls: Number(usage.n || 0), cost: Number(usage.cost || 0), tokensIn: Number(usage.tin || 0), tokensOut: Number(usage.tout || 0) },
     });
@@ -586,17 +639,20 @@ app.post('/api/audit/archive', requireAuth, async (req, res) => {
 
 // 会话轨迹（工具调用记录）
 app.get('/api/conversations/:id/toolcalls', requireAuth, async (req, res) => {
-  const own = (await db.query('SELECT id FROM conversations WHERE id=? AND (account_id=? OR (channel != "web" AND account_id IS NULL))', [req.params.id, req.user.id]))[0];
+  const own = await convAccess(req.params.id, req.user.id, 'shared');
   if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
-  const rows = await db.query('SELECT id, tool_name, args, result_summary, duration_ms, status, message_id, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 100', [req.params.id]);
+  const rows = (await storage.toolCalls.recent(req.params.id, { limit: 100 })).map((t) => ({
+    id: t.id, tool_name: t.toolName, args: t.args ?? null, result_summary: t.resultSummary ?? null,
+    duration_ms: t.durationMs ?? null, status: t.status ?? null, message_id: t.messageId ?? null, created_at: t.createdAt ?? null,
+  }));
   res.json({ ok: true, toolcalls: rows });
 });
 
 // 会话活动增量（事件环轮询：旁观/断连页面实时性；after=上次 seq）
 app.get('/api/conversations/:id/activity', requireAuth, async (req, res) => {
   try {
-    const own = await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
-    if (!own.length) return res.status(404).json({ ok: false, message: '会话不存在' });
+    const own = await convAccess(req.params.id, req.user.id);
+    if (!own) return res.status(404).json({ ok: false, message: '会话不存在' });
     const after = Number(req.query.after) || 0;
     const r = activitySince(req.params.id, after);
     res.json({ ok: true, ...r });
@@ -677,11 +733,11 @@ async function generateSummary(provider, earlyText, conversationId) {
     // P25(O-27)：长对话摘要属旁路 LLM 消耗，入账（kind=summary），此前绕过 usage_stats
     try {
       const u = (j && j.usage) || {};
-      const cowner = (await db.query('SELECT account_id FROM conversations WHERE id=?', [conversationId]))[0];
+      const cowner = await storage.conversations.get(conversationId);
       const miss = u.prompt_cache_miss_tokens != null ? u.prompt_cache_miss_tokens : Math.max(0, (u.prompt_tokens || 0) - (u.prompt_cache_hit_tokens || 0));
       const cost = calcCost(provider, { hit: u.prompt_cache_hit_tokens || 0, miss, out: u.completion_tokens || 0 });
       await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"summary")',
-        [cowner ? cowner.account_id : null, conversationId, provider, findProvider(provider)?.defaultModel || '', u.prompt_tokens || 0, u.completion_tokens || 0, u.prompt_cache_hit_tokens || 0, miss, cost, 0]);
+        [cowner ? cowner.accountId : null, conversationId, provider, findProvider(provider)?.defaultModel || '', u.prompt_tokens || 0, u.completion_tokens || 0, u.prompt_cache_hit_tokens || 0, miss, cost, 0]);
     } catch { /* 计量失败不影响 */ }
     if (summary) {
       await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, summary]);
@@ -693,9 +749,8 @@ async function generateSummary(provider, earlyText, conversationId) {
 // ---------- 设置读写（settings 表） ----------
 async function getSetting(key, def) {
   try {
-    const r = await db.query('SELECT svalue FROM settings WHERE skey=?', [key]);
-    if (!r[0]) return def;
-    try { return JSON.parse(r[0].svalue); } catch { return r[0].svalue; } // 兼容已 JSON 序列化与裸文本
+    const v = await storage.settings.get(key);
+    return v === null || v === undefined ? def : v; // 兼容已 JSON 序列化与裸文本（接口已把两种都解析回来）
   } catch { return def; }
 }
 /**
@@ -713,10 +768,12 @@ async function setSetting(key, val, noBump, actor) {
   const isPolicy = POLICY_SETTINGS_KEYS.includes(key);
   let before = null;
   if (isPolicy) {
-    // 只对策略键多读一次旧值（账本要能回答"改前是什么"）；读失败如实标 null，不假装读到
-    try { const r = await db.query('SELECT svalue FROM settings WHERE skey=?', [key]); before = r[0] ? r[0].svalue : null; } catch { /* 见下：留痕时如实标 null */ }
+    // 只对策略键多读一次旧值（账本要能回答"改前是什么"）；读失败如实标 null，不假装读到。
+    // 写法与迁移前那句 `r[0] ? r[0].svalue : null` 同义（读库里的原样文本）；介质差异：接口回来的已是
+    // 解析后的值 ⇒ 对象类策略键在账本里是 `{"a":1}` 而不是 `"{\"a\":1}\""`（字符串类键两种写法一致）。
+    try { const r0 = await storage.settings.get(key); before = r0 === null || r0 === undefined ? null : (typeof r0 === 'string' ? r0 : JSON.stringify(r0)); } catch { /* 见下：留痕时如实标 null */ }
   }
-  await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
+  await storage.settings.set(key, val);
   if (!noBump) await bumpPolicyRev(); // 政策版本自增：仅护栏/政策类键（运行时快照提示模型"规则已更新"）；普通参数高频调整不应使版本抖动
   if (isPolicy) {
     try {
@@ -776,10 +833,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 无论块怎么套、哪条分支，都拿得到同一个值（它本来就是个常量）。
   const ws = RW_WORKSPACE;
   if (!conversationId || !content) return res.status(400).json({ ok: false, code: 'PARAM_MISSING', message: '参数缺失' });
-  const convs = await db.query('SELECT id, permission, mode, preset, project, provider, model, shell_id, face_full FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]);
-  if (!convs.length) { return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' }); }
-  const convProvider = (convs[0].provider === 'auto') ? null : (convs[0].provider || null);
-  const convModel = (convs[0].model === '__auto__') ? null : (convs[0].model || null);
+  // `accountId` 必须一并读出来：归属判据（原 `WHERE id=? AND account_id=?`）要用它，漏读＝恒不相等＝一律 404
+  //（这条是端到端实测当场撞出来的：漏了它，建完会话第一轮对话就 404 CONV_NOT_FOUND）
+  const convRow = await storage.conversations.getAs(conversationId, ['accountId', 'permission', 'mode', 'preset', 'project', 'provider', 'model', 'shellId', 'faceFull']);
+  if (!convRow || convRow.accountId !== req.user.id) { return res.status(404).json({ ok: false, code: 'CONV_NOT_FOUND', message: '会话不存在' }); }
+  const convProvider = (convRow.provider === 'auto') ? null : (convRow.provider || null);
+  const convModel = (convRow.model === '__auto__') ? null : (convRow.model || null);
   // C4 显式模型绝对锁（2026-09 批3）：解析优先级 = ①body 显式传的 provider/model（用户本轮刚切换）→
   // ②会话已保存的 provider/model（用户此前选择，persist 在会话）→ ③档案→壳默认→全局默认（B3/F1）。
   // 关键修复：原实现只读 body（缺省默认 deepseek），完全忽略会话保存值 → 用户切 GLM 后若 body 丢参即静默回 deepseek=冒充（O-14）。
@@ -795,7 +854,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   try { const dm = await getSetting('default_models', null); if (dm && typeof dm === 'object') defOverrides = dm; } catch { defOverrides = null; }
   // B1：解析会话所属壳（NULL=默认壳语义；非 default 且带 persona 时按总方案 §5.5 扩展语境——旧编号 v2.6 §1，2026-09-10 治理改指；不改内核自述）
   // 一次读取壳全字段：persona/domain/intent_rules/task_profiles/model_policy/tools —— 路由三级(档案/壳默认)与预算共用，避免多查询
-  const convShellId = convs[0].shell_id || null;
+  const convShellId = convRow.shellId || null;
   let convShellCtx = null;
   let shellIntentRules = null;
   let shellTaskProfiles = null;
@@ -896,14 +955,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     return res.status(429).json({ ok: false, code: 'CONCURRENCY_LIMIT', message: `并发对话已达上限(${maxConcurrent})，当前另有 ${curInflight} 个对话在跑（可点"停止"结束其一，或调大 设置→运行护栏→并发对话上限）。` });
   }
   inflight.set(req.user.id, curInflight + 1);
-  const permission = convs[0].permission || 'full';
-  const convMode = convs[0].mode || 'chat';
-  const convPreset = ['all', 'standard', 'minimal'].includes(convs[0].preset) ? convs[0].preset : 'all';
-  const convProject = convs[0].project || 'default';
+  const permission = convRow.permission || 'full';
+  const convMode = convRow.mode || 'chat';
+  const convPreset = ['all', 'standard', 'minimal'].includes(convRow.preset) ? convRow.preset : 'all';
+  const convProject = convRow.project || 'default';
 
   // 存用户消息
-  await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conversationId, 'user', content]);
-  await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conversationId]);
+  await storage.messages.append({ conversationId, role: 'user', content });
+  await storage.conversations.touch(conversationId);
   // P25(O-24)：不再用首条消息 24 字符截断占位标题（曾致 LLM 自动标题恒 skip）——标题保持「新对话」，
   // 由回复完成后的 LLM 自动标题生成；LLM 失败时 autotitle.js 内兜底截断（见 autotitle.js）
 
@@ -925,7 +984,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   //   prefix-participants 的 `history-early-summary` 有登记）。它只在"刚生成"那一次让前缀分叉一次，
   //   此后摘要内容恒定 ⇒ 前缀稳定；这条稳定性**不靠自觉**，由上面的跨轮指纹账本判（见本轮组装末尾）。
   //   注意摘要只生成一次（conv_summaries 有行即不再生成），所以它不会每轮变——这正是它能留在前缀里的理由。
-  let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
+  let hist = await storage.messages.history(conversationId);
   const earlySummaryRow = hist.length > 40
     ? (await db.query('SELECT summary FROM conv_summaries WHERE conversation_id=?', [conversationId]))[0]
     : null;
@@ -1002,8 +1061,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   //   explicit=本轮明确在问知识/记忆 → 标题+前5条摘要 | index=本会话此前实际用过 kb_* → 只给标题 | none=不注入。
   // 模型侧入口始终可用（kb_search 自带"何时搜"描述，不依赖注入做发现）。
   try {
-    const u = await db.query('SELECT COUNT(*) c FROM tool_calls WHERE conversation_id=? AND tool_name IN ("kb_search","kb_add","kb_del") AND created_at > NOW() - INTERVAL 7 DAY', [conversationId]);
-    const kbMode = kbInjectMode(content, Number((u[0] || {}).c || 0));
+    const u = await storage.messages.countByTool(conversationId, { tools: ['kb_search', 'kb_add', 'kb_del'], days: 7 });
+    const kbMode = kbInjectMode(content, u);
     if (kbMode !== 'none') {
       const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
       const v = kbVisibleWhere({ accountId: req.user.id, shellId: kbShellId, conversationId });
@@ -1144,7 +1203,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 孤儿防护（2026-09 终审）：客户端断连后 agent 收尾（assistant/telemetry 落库）与"删会话"并发时，
   // 迟到写会在级联删除之后插入 → 孤儿行。落库前校验会话仍存在，已被删则跳过（删除即用户放弃该现场）。
   const convAlive = async () => {
-    try { const r = await db.query('SELECT 1 FROM conversations WHERE id=?', [conversationId]); return !!(r && r.length); }
+    try { return await storage.conversations.exists(conversationId); }
     catch { return true; } // 校验失败不阻塞主流程（宁可多写不丢回复）
   };
   const TRUNC_NOTE = '\n\n> ⚠️ 本段输出达到模型单次长度上限（已截断）。需要完整内容的话，告诉我"继续"，我会接着分段输出。';
@@ -1171,11 +1230,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     //   于是同一个会话在"闲聊"与"干活"之间切换时工具面来回翻 —— 轻量面 5,130 tokens / 全量面 14,731 tokens，
     //   翻一次整段前缀作废（落库指纹当场抓到：同会话两轮出现两种 tools 指纹）。这与架构硬约束**真冲突**，
     //   现已按"单向粘滞"收口：**会话一旦用过全量面，此后固定全量面**（最多翻转一次，且只朝更宽的方向）。
-    const faceFull = Number(convs[0].face_full || 0) === 1;
+    const faceFull = Number(convRow.faceFull || 0) === 1;
     const light = !needsTools(content) && !faceFull;
     if (!light && !faceFull) {
       // 标记本会话已进入全量面（单向，不可回退）；写失败不影响本轮（下次再写）
-      db.query('UPDATE conversations SET face_full=1 WHERE id=?', [conversationId])
+      storage.conversations.update(conversationId, { faceFull: 1 })
         .catch(() => { /* 标记失败只是下次可能多翻一次，不影响正确性 */ });
     }
     let answer = '';
@@ -1367,11 +1426,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       let savedMsgId = null;
       try {
         // 存 assistant 消息（reasoning=思考过程，历史回看可见）；原子守卫防"删会话与落库并发"产生孤儿消息
-        const r = await db.query('INSERT INTO messages (conversation_id, role, content, reasoning, model, provider, tokens_in, tokens_out) SELECT ?,?,?,?,?,?,?,? FROM conversations WHERE id=?',
-          [conversationId, 'assistant', answer, thinkBuf ? String(thinkBuf).slice(0, 20000) : null, model || provider, provider, usage.tokens_in || 0, usage.tokens_out || 0, conversationId]);
-        savedMsgId = (r && r.insertId) || null;
+        const r = await storage.messages.guardAppend({
+          conversationId, role: 'assistant', content: answer,
+          reasoning: thinkBuf ? String(thinkBuf).slice(0, 20000) : null,
+          model: model || provider, provider, tokensIn: usage.tokens_in || 0, tokensOut: usage.tokens_out || 0,
+        });
+        savedMsgId = (r && r.id) || null;
         // 轨迹回填：本轮执行产生的未关联工具调用归属到该 assistant 消息（历史回看用）
-        if (savedMsgId) await db.query('UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL', [savedMsgId, conversationId]);
+        if (savedMsgId) await storage.toolCalls.attachToMessage(conversationId, savedMsgId);
       } catch (e) { console.warn('[chat] assistant 落库失败（已如实告知客户端）：' + ((e && e.message) || e)); }
       // 用量统计：统一通道已由 agent.js 每轮 LLM 调用计量（kind=round，含 light 问答单轮）；
       // 此处不再按"普通路径 request"二次计费（P1 删双路径后无独立无工具请求路径）。
@@ -1410,9 +1472,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         const why = (actrl.signal && actrl.signal.reason === 'user') ? '用户点击停止' : '连接断开（页面刷新/网络中断）';
         let placeholderId = null;
         if (await convAlive()) {
-          const pr = await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)',
-            [conversationId, 'assistant', '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）']);
-          placeholderId = (pr && pr.insertId) || null;
+          const pr = await storage.messages.guardAppend({ conversationId, role: 'assistant', content: '（任务中断：' + why + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）' });
+          placeholderId = (pr && pr.id) || null;
         }
         // RA-37 G5：中断/异常也要有**带原因**的终结事件，且同样在落库之后发。
         send({
@@ -1443,9 +1504,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           prog = '｜已执行 ' + (rr.rounds || 0) + ' 轮' + (cText ? '（' + cText + '）' : '') + (rr.last_step ? '；最后步骤：' + String(rr.last_step).slice(0, 200) : '');
         }
       }
-      const er = await db.query('INSERT INTO messages (conversation_id, role, content) SELECT ?,?,? FROM conversations WHERE id=?',
-        [conversationId, 'assistant', '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）', conversationId]);
-      errPlaceholderId = (er && er.insertId) || null;
+      const er = await storage.messages.guardAppend({
+        conversationId, role: 'assistant',
+        content: '（本轮执行失败：' + String(e.message || e).slice(0, 300) + '。现场已保存' + prog + '；回复"继续任务"可基于现场恢复推进，或给我新指令。）',
+      });
+      errPlaceholderId = (er && er.id) || null;
     } catch { /* 忽略 */ }
     send({ type: 'error', message: e.message });
     send({ type: 'run_end', v: 1, conversationId, runId: agentRunId, status: 'error', reason: 'exception', reasonText: String(e.message || e).slice(0, 300), messageId: errPlaceholderId, capabilities: capabilitySummary({ permission, preset: convPreset, root: permission === 'full' ? RW_FS_ROOT : ws, __light: light }, (runOutcome && runOutcome.toolLog ? runOutcome.toolLog : []).map((t) => t.name)) });
@@ -1473,11 +1536,11 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
   const where = convId ? 'WHERE account_id=? AND conversation_id=?' : 'WHERE account_id=?';
   const u = (await db.query(`SELECT COUNT(*) rounds, SUM(tokens_in) tin, SUM(tokens_out) tout, SUM(duration_ms) dur, SUM(cost) cost FROM usage_stats ${where}`, p))[0] || {};
   const t = await db.query('SELECT COUNT(*) steps FROM tool_calls WHERE conversation_id=?', [convId || 0]);
-  const rounds = await db.query('SELECT COUNT(*) c FROM messages WHERE role="user" AND conversation_id=?', [convId || 0]);
+  const rounds = convId ? await storage.messages.count(convId, { role: 'user' }) : 0;
   res.json({
     ok: true,
     stats: {
-      rounds: convId ? (rounds[0]?.c || 0) : (u.rounds || 0),
+      rounds: convId ? rounds : (u.rounds || 0),
       steps: convId ? (t[0]?.steps || 0) : 0,
       llmMs: u.dur || 0,
       tokensIn: u.tin || 0,
@@ -1497,8 +1560,8 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
 //   （发 `stream_gap` 让客户端回落 /messages 重新拉全量），不假装接上了。
 app.get('/api/conversations/:id/stream', requireAuth, async (req, res) => {
   const cid = Number(req.params.id);
-  const own = await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [cid, req.user.id]).catch(() => []);
-  if (!own.length) return res.status(404).json({ ok: false, message: '会话不存在' });
+  const own = await storage.conversations.findOwned(cid, req.user.id).catch(() => null);
+  if (!own) return res.status(404).json({ ok: false, message: '会话不存在' });
   const rawId = req.headers['last-event-id'] != null ? req.headers['last-event-id'] : req.query.after;
   let after = Number(rawId);
   if (!Number.isFinite(after) || after < 0) after = 0;
@@ -1550,10 +1613,11 @@ app.get('/api/agent/capabilities', requireAuth, async (req, res) => {
   try {
     const convId = Number(req.query.conversationId) || null;
     let conv = null;
-    if (convId) conv = (await db.query('SELECT id, permission, preset, mode, shell_id FROM conversations WHERE id=? AND account_id=?', [convId, req.user.id]))[0] || null;
+    if (convId) conv = (await storage.conversations.getAs(convId, ['permission', 'preset', 'mode', 'shellId', 'accountId']));
+    if (conv && conv.accountId !== req.user.id) conv = null;
     const permission = (conv && conv.permission) || 'full';
     const preset = (conv && conv.preset) || 'all';
-    const ctx = { permission, preset, mode: (conv && conv.mode) || 'chat', root: permission === 'full' ? RW_FS_ROOT : RW_WORKSPACE, shellId: conv ? conv.shell_id : null };
+    const ctx = { permission, preset, mode: (conv && conv.mode) || 'chat', root: permission === 'full' ? RW_FS_ROOT : RW_WORKSPACE, shellId: conv ? conv.shellId : null };
     // 护栏现值与该会话同源读取（与 runAgent 每轮读 settings 的口径一致）
     let guards = null;
     try {
@@ -1579,9 +1643,9 @@ app.get('/api/agent/capabilities', requireAuth, async (req, res) => {
 //     口径来自 server/cohort.js（与复跑脚本同一份判据，避免首页与脚本各说各话）。
 app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
   try {
-    const raw = await db.query('SELECT svalue FROM settings WHERE skey=?', ['cache_hit_rate_target']);
+    const raw = await storage.settings.get('cache_hit_rate_target');
     let target = 0;
-    if (raw && raw[0] && raw[0].svalue != null) { const v = Number(raw[0].svalue); target = Number.isFinite(v) && v > 0 ? v : 0; }
+    if (raw != null) { const v = Number(raw); target = Number.isFinite(v) && v > 0 ? v : 0; }
     const rows = await db.query(
       `SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
        FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
@@ -1764,9 +1828,8 @@ function unredactMcpServers(nextCfg, prevCfg) {
   });
 }
 app.get('/api/settings', requireAuth, async (req, res) => {
-  const rows = await db.query('SELECT skey, svalue FROM settings');
-  const out = {};
-  for (const r of rows) { try { out[r.skey] = JSON.parse(r.svalue); } catch { out[r.skey] = r.svalue; } }
+  // 设置页读取走接口的 `all()`（值已按 JSON 解析回来；两处解析口径因此只有一份）
+  const out = await storage.settings.all();
   if (out.mcp_servers) out.mcp_servers = redactMcpServers(out.mcp_servers); // 密钥脱敏
   res.json({ ok: true, settings: out, schema: SETTINGS_SCHEMA });
 });
@@ -2132,11 +2195,11 @@ app.post('/api/contracts/:id/confirm', requireAuth, async (req, res) => {
   if (!c) return res.status(404).json({ ok: false, message: '契约不存在' });
   if (decision === 'accept') {
     await db.query('UPDATE task_contracts SET status="done", last_result=?, updated_at=NOW() WHERE id=?', [String(c.last_result || '用户复测通过').slice(0, 3000), c.id]);
-    if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户复测通过 ✅】任务验收完成。']);
+    if (c.conv_id) await storage.messages.append({ conversationId: c.conv_id, role: 'user', content: '【用户复测通过 ✅】任务验收完成。' });
     res.json({ ok: true, status: 'done' });
   } else if (decision === 'reject') {
     await db.query('UPDATE task_contracts SET status="queued", attempts=0, updated_at=NOW() WHERE id=?', [c.id]);
-    if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户复测未通过】请根据反馈继续修复，完成后再次调用 finish_task。']);
+    if (c.conv_id) await storage.messages.append({ conversationId: c.conv_id, role: 'user', content: '【用户复测未通过】请根据反馈继续修复，完成后再次调用 finish_task。' });
     res.json({ ok: true, status: 'queued' });
   } else res.status(400).json({ ok: false, message: 'decision=accept|reject' });
 });
@@ -2150,7 +2213,7 @@ app.post('/api/contracts/:id/answer', requireAuth, async (req, res) => {
   if (ask && ask.kind === 'judge') {
     if (String(answer) === 'continue') {
       await db.query('UPDATE task_contracts SET status="queued", last_ask=NULL, attempts=0, updated_at=NOW() WHERE id=?', [c.id]);
-      if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户裁决】继续执行该任务，直到调用 finish_task 完成。']);
+      if (c.conv_id) await storage.messages.append({ conversationId: c.conv_id, role: 'user', content: '【用户裁决】继续执行该任务，直到调用 finish_task 完成。' });
       return res.json({ ok: true, status: 'queued' });
     }
     // accept → 视同用户接受当前结果（candidate 直达复测）
@@ -2158,7 +2221,7 @@ app.post('/api/contracts/:id/answer', requireAuth, async (req, res) => {
     return res.json({ ok: true, status: 'candidate_done' });
   }
   await db.query('UPDATE task_contracts SET status="queued", last_ask=NULL, updated_at=NOW() WHERE id=?', [c.id]);
-  if (c.conv_id) await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [c.conv_id, 'user', '【用户答复】' + String(answer).slice(0, 2000)]);
+  if (c.conv_id) await storage.messages.append({ conversationId: c.conv_id, role: 'user', content: '【用户答复】' + String(answer).slice(0, 2000) });
   res.json({ ok: true, status: 'queued' });
 });
 
@@ -2249,7 +2312,7 @@ app.post('/api/reviews', requireAuth, async (req, res) => {
     const difficulty = ['小', '中', '大'].includes((req.body || {}).difficulty) ? (req.body).difficulty : null;
     if (!conversationId || !['pass', 'bug'].includes(result)) return res.status(400).json({ ok: false, message: 'conversationId 与 result(pass|bug) 必填' });
     if (result === 'bug' && !String(bugReason || '').trim()) return res.status(400).json({ ok: false, message: '打回(bug)必须填写原因' });
-    const conv = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
+    const conv = await storage.conversations.findOwned(conversationId, req.user.id);
     if (!conv) return res.status(404).json({ ok: false, message: '会话不存在' });
     const r = await db.query('INSERT INTO reviews (conversation_id, account_id, result, bug_reason, difficulty) VALUES (?,?,?,?,?)', [conversationId, req.user.id, result, result === 'bug' ? String(bugReason).trim() : null, difficulty]);
     // A7/A 系列审计补：难度同时回填该会话的观测事实行（model_telemetry.difficulty 为 §9.1 归集维度之一，
@@ -2384,7 +2447,7 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
     let convId = null;
     if (sc === 'conv') {
       if (!conversationId) return res.status(400).json({ ok: false, message: 'scope=conv 需要 conversationId' });
-      const own = (await db.query('SELECT id FROM conversations WHERE id=? AND account_id=?', [conversationId, req.user.id]))[0];
+      const own = await storage.conversations.findOwned(conversationId, req.user.id);
       if (!own) return res.status(404).json({ ok: false, message: '会话不存在' });
       convId = conversationId;
     }
@@ -2577,11 +2640,12 @@ app.post('/api/apps/:key/launch', requireAuth, async (req, res) => {
       if (r.error) return res.status(404).json({ ok: false, message: r.error });
       shellId = r.shellId;
     }
-    const c = await db.query('INSERT INTO conversations (account_id, title, permission, preset, shell_id) VALUES (?,?,?,?,?)',
-      [req.user.id, String(a.name || a.key).slice(0, 60), 'full', 'all', shellId]);
+    const c = await storage.conversations.create({
+      accountId: req.user.id, title: String(a.name || a.key).slice(0, 60), permission: 'full', preset: 'all', shellId,
+    });
     const draft = buildLaunchDraft(a, (req.body || {}).goal || '');
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'app:launch', 'app=' + a.key + (shellKey ? ' shell=' + shellKey : '') + ' conv=' + c.insertId]);
-    res.json({ ok: true, conversationId: c.insertId, shellKey: shellKey || null, draft });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'app:launch', 'app=' + a.key + (shellKey ? ' shell=' + shellKey : '') + ' conv=' + c.id]);
+    res.json({ ok: true, conversationId: c.id, shellKey: shellKey || null, draft });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
@@ -2815,7 +2879,17 @@ app.use((err, req, res, next) => {
 
 // ---------- 启动 ----------
 async function main() {
-  await initSchema();
+  // G1 出口（v0.3 §0.2/§0.4 M1）：「干净机器 + 一份配置 → 跑通一次对话 + 一次工具调用」。
+  // 建表/迁移是 **MySQL 介质自己的事** —— 换到 jsonfile 实现时那套 DDL 根本不适用，
+  // 而且它一跑就要连库：不连库的机器会在启动第一步就 `connect ECONNREFUSED` 整个进程退出
+  // （实测：`[db] 迁移链校验失败：connect ECONNREFUSED` → `[RW] 启动失败`），
+  // 于是 RW_STORAGE 这个开关形同虚设。所以这里按**当前存储实现**决定要不要初始化 MySQL 架构：
+  // mysql 实现下逐字不变（仍旧是"迁移链坏了就拒绝启动"），jsonfile 实现下明确跳过并说明去哪看数据。
+  if (storage.impl === 'mysql') {
+    await initSchema();
+  } else {
+    console.log('[db] 存储实现=' + storage.impl + '：跳过 MySQL 建表/迁移（本实现的介质不适用 DDL；数据见工作区下的 storage/ 目录）');
+  }
   await ensureAdmin();
   // 初始化 providers 表（同步硬编码 9 家）+ 默认模型 + 每日市场刷新
   try {
@@ -2968,6 +3042,14 @@ async function main() {
       const mcp = await import('./mcp.js');
       const { syncMcpTools } = await import('./tools/index.js');
       const r = await mcp.connectConfiguredMcps();
+      // v0.3 §4.2「连接器=带凭证的执行后端」：声明面 settings.connectors（MCP 路复用同一客户端池 + 同一注册路径，
+      // HTTP 路把声明的动作注册进同一张工具表）。排在上面那行之后、syncMcpTools 之前，让既有那一行把连接器声明的
+      // MCP server 一并注册。失败只记日志，不影响上面的 MCP 结果（连接器声明非法时如实报出，不静默跳过）。
+      try {
+        const { connectConfiguredConnectors } = await import('./connectors.js');
+        const cr = await connectConfiguredConnectors();
+        if (cr.results.length) console.log('[connectors] 连接结果: ' + JSON.stringify(cr.results));
+      } catch (e) { console.error('[connectors] 装配失败(可稍后配置 connectors):', e.message); }
       const clients = mcp.listMcpClients();
       const n = syncMcpTools(clients);
       console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');

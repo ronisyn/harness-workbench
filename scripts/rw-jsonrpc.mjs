@@ -24,6 +24,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serveStdioWith, SERVER_NAME, PROTOCOL_VERSION } from '../server/jsonrpc.js';
+// 编排面（v0.3 §4.5）：**外部调用档的源**＝本进程的请求入口。外面每调一次方法（含握手）就先投递一次
+// `external`——载荷只带方法名与参数里那几格事实（`message` 只带长度、幂等键只带"给没给"），
+// **不带账号/口令/正文**；投递是 fire-and-forget 且永不抛错 ⇒ 不许影响这次 RPC 的返回值与错误口径。
+// 包装点选在整套 backend 上（唯一查表入口：`server/jsonrpc.js:250` 的 `entry.handler(...)`）。
+import { wrapExternalCalls } from '../server/external-trigger.js';
 // 自造会话的标题走**统一声明**（`__probe__ …`）：本适配器建的会话是我们自己发起的，不属于"真实流量"
 // （v0.3 §0.3.1 的口径："探针 ≠ 真实流量"；判据唯一实现在 server/cohort.js）。
 // 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
@@ -226,5 +231,5 @@ const backend = {
   },
 };
 
-serveStdioWith(backend, { input: process.stdin, output: process.stdout });
+serveStdioWith(wrapExternalCalls(backend, { source: 'jsonrpc' }), { input: process.stdin, output: process.stdout });
 console.error('[' + SERVER_NAME + '] 已就绪（stdio JSON-RPC 2.0，base=' + BASE + '，新建会话权限=' + PERMISSION + '）');

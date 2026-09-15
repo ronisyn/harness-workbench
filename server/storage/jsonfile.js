@@ -36,7 +36,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { RW_WORKSPACE } from '../env.js';
-import { assertFields, unsupported } from './index.js';
+import { assertFields, unsupported, FIELDS } from './index.js';
 
 const IMPL = 'jsonfile';
 // 文件格式的身份与版本（v0.3 §4.9：存储格式带版本号与迁移链）。**导出**：夹具要断言"文件里写的就是当前版本"，
@@ -392,6 +392,35 @@ function makeApi(holder, save, { persist }) {
         rec.updatedAt = nowIso();
         await commit();
       },
+      /** 会话在不在（对应 `server/index.js:1147` 的孤儿守卫 `SELECT 1 FROM conversations WHERE id=?`）。 */
+      async exists(id) {
+        return byId('conversations', id) !== null;
+      },
+      /** 删会话（对应 `DELETE /api/conversations/:id` 里那句；归属已在路由里判过）。删不到＝0（幂等）。 */
+      async remove(id) {
+        const key = String(idOf(id));
+        if (!holder.doc.tables.conversations[key]) return 0;
+        delete holder.doc.tables.conversations[key];
+        await commit();
+        return 1;
+      },
+      /**
+       * 读**指定的那几列**（对应 `server/index.js:779` 的 Web 只读会话读八列）。未知键当场抛
+       * （与 mysql 实现同一份判据：拼错列名不许静默少一个字段）。返回**只含这些键**的记录，
+       * 外加介质一定会带的 `id`/`createdAt`/`updatedAt` 之外的列一概不给 —— 与 mysql 侧 `toRecord` 同义。
+       */
+      async getAs(id, keys) {
+        const wanted = Array.isArray(keys) ? keys : [];
+        for (const k of wanted) {
+          if (!FIELDS.conversations.includes(k)) throw new Error(`conversations 没有字段 ${k}（可选：${FIELDS.conversations.join(', ')}）`);
+        }
+        if (!wanted.length) return null;
+        const rec = byId('conversations', id);
+        if (!rec) return null;
+        const out = { id: rec.id };
+        for (const k of wanted) out[k] = rec[k] === undefined ? null : clone(rec[k]);
+        return out;
+      },
     },
 
     messages: {
@@ -425,6 +454,50 @@ function makeApi(holder, save, { persist }) {
           .filter((r) => Number(r.conversationId) === Number(conversationId) && (role ? r.role === role : true))
           .length;
       },
+      /**
+       * **上下文口径**的历史读法（对应 `server/index.js:928` 的 `/api/chat` 组装处）：只要
+       * `id, role, content`、按 id 升序、**全量不裁剪**。`content` 用 `?? ''`（与调用方那句
+       * `String(m.content || '')` 同义，也与 mysql 侧 `row.content ?? ''` 对齐）。
+       */
+      async history(conversationId) {
+        return rowsOf('messages')
+          .filter((r) => Number(r.conversationId) === Number(conversationId))
+          .map((r) => ({ id: r.id, role: r.role, content: r.content ?? '' }));
+      },
+      /**
+       * 带**孤儿守卫**的追加（对应 `server/index.js:1370/1446` 的 `INSERT … SELECT … FROM conversations WHERE id=?`）：
+       * 会话不在就一行都不写、返回 `{ id: 0 }`。介质不同、语义同一条（MySQL 靠一条语句原子地判，这里先查后写）。
+       */
+      async guardAppend(fields) {
+        assertFields('messages', fields);
+        if (byId('conversations', fields.conversationId) === null) return { id: 0 };
+        return api.messages.append(fields);
+      },
+      /**
+       * 按工具名数调用次数（对应 `server/index.js:1005` 的 kb 注入判定）。窗口按**记录时间**算
+       * （MySQL 侧用库的 `created_at > NOW() - INTERVAL ? DAY`，这里用进程时钟 —— 与文件头"已知介质差异①"同一档）。
+       * `tools` 空数组＝不查（`IN ()` 在 SQL 侧非法，两边行为必须一致）。
+       */
+      async countByTool(conversationId, { tools = [], days } = {}) {
+        const list = (Array.isArray(tools) ? tools : []).filter((t) => t !== undefined && t !== null);
+        if (!list.length) return 0;
+        const d = Number(days);
+        const since = Number.isInteger(d) && d > 0 ? Date.now() - d * 86400000 : null;
+        return rowsOf('toolCalls')
+          .filter((r) => Number(r.conversationId) === Number(conversationId) && list.includes(r.toolName)
+            && (since === null || new Date(r.createdAt).getTime() > since))
+          .length;
+      },
+      /** 清掉某会话的全部消息（对应 `DELETE /api/conversations/:id` 的级联里那句）。返回删了几条。 */
+      async removeByConversation(conversationId) {
+        const table = holder.doc.tables.messages;
+        let n = 0;
+        for (const [k, r] of Object.entries(table)) {
+          if (Number(r.conversationId) === Number(conversationId)) { delete table[k]; n++; }
+        }
+        if (n) await commit();
+        return n;
+      },
     },
 
     toolCalls: {
@@ -434,6 +507,39 @@ function makeApi(holder, save, { persist }) {
         put('toolCalls', rec);
         await commit();
         return { id: rec.id };
+      },
+      /** 按会话升序读回（对应 `server/index.js:441` 的导出那条 `ORDER BY id`）。 */
+      async list(conversationId, limit) {
+        const rows = rowsOf('toolCalls').filter((r) => Number(r.conversationId) === Number(conversationId));
+        return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
+      },
+      /** 最近 N 条（**倒序**，对应 `/api/conversations/:id/toolcalls` 那条 `ORDER BY id DESC LIMIT 100`）。 */
+      async recent(conversationId, { limit } = {}) {
+        const rows = rowsOf('toolCalls').filter((r) => Number(r.conversationId) === Number(conversationId)).reverse();
+        return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
+      },
+      /**
+       * 把本会话**尚未归属**的工具调用挂到刚落的这条 assistant 消息上（对应 `server/index.js:1410` 的轨迹回填）。
+       * `messageId` 为空的才算"没人认领过"（与 mysql 侧 `message_id IS NULL` 同一条判据）。返回认领了几条。
+       */
+      async attachToMessage(conversationId, messageId) {
+        let n = 0;
+        for (const rec of rowsOf('toolCalls')) {
+          if (Number(rec.conversationId) !== Number(conversationId)) continue;
+          if (rec.messageId === null || rec.messageId === undefined) { rec.messageId = messageId; n++; }
+        }
+        if (n) await commit();
+        return n;
+      },
+      /** 清掉某会话的全部工具调用（对应 `DELETE /api/conversations/:id` 的级联里那句）。返回删了几条。 */
+      async removeByConversation(conversationId) {
+        const table = holder.doc.tables.toolCalls;
+        let n = 0;
+        for (const [k, r] of Object.entries(table)) {
+          if (Number(r.conversationId) === Number(conversationId)) { delete table[k]; n++; }
+        }
+        if (n) await commit();
+        return n;
       },
     },
 

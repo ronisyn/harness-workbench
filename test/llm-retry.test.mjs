@@ -86,11 +86,18 @@ test('可重试次数来自设置项 llm_max_retries（0=关，默认 1），不
   assert.ok(SETTINGS_SCHEMA.some((x) => x.key === 'llm_max_retries'));
   assert.match(agentSrc, /pick\('llm_max_retries'/, 'agent.js 必须从 settings 读它');
   // 键清单成员判定用**解析**而不是位置正则（第一版写成 /llm_max_retries'\]\)/ 依赖"它是最后一个键"，
-  // 后来往清单里加 collapse_window_ratio 就把自己判红了——测试不该依赖无关的排列顺序）
-  const m = /SELECT skey, svalue FROM settings WHERE skey IN \(([?,]+)\)',\s*\[([^\]]+)\]/.exec(agentSrc);
-  assert.ok(m, '未能在 agent.js 里定位设置读取语句');
-  const keys = [...m[2].matchAll(/'([^']+)'/g)].map((x) => x[1]);
-  assert.ok(keys.includes('llm_max_retries'), 'llm_max_retries 必须在 SELECT 键清单里（漏了会永远取默认值）');
+  // 后来往清单里加 collapse_window_ratio 就把自己判红了——测试不该依赖无关的排列顺序）。
+  // 锚点跟着实现搬家（2026-09-16）：这次读取从 SQL 迁到存储接口
+  // （`storage.settings.getMany([...])`，v0.3 §4.1「存储走接口」），所以**两种形状都认**；
+  // 判据一个字没放宽 —— 仍然是"锚点必须定位到那条读取语句，且 llm_max_retries 在它的键清单里"，
+  // 定位不到照样当场判红（下面那条 assert.ok 就是干这个的）。
+  const sqlForm = /SELECT skey, svalue FROM settings WHERE skey IN \(([?,]+)\)',\s*\[([^\]]+)\]/.exec(agentSrc);
+  const ifaceForm = /storage\.settings\.getMany\(\[([^\]]+)\]\)/.exec(agentSrc);
+  const m = sqlForm || ifaceForm;
+  assert.ok(m, '未能在 agent.js 里定位设置读取语句（SQL 或 storage.settings.getMany 两种形状都不匹配）');
+  const keys = [...m[sqlForm ? 2 : 1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  assert.ok(keys.length > 0, '设置读取的键清单不许为空');
+  assert.ok(keys.includes('llm_max_retries'), 'llm_max_retries 必须在读取键清单里（漏了会永远取默认值）');
 });
 
 // ---------- agent 侧顺序与传参（源级） ----------

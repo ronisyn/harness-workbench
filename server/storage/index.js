@@ -36,6 +36,21 @@
 // 这次加的方法**全部**来自"调用方真的在用的查询"（`server/auth.js` 的 6 条 + `server/index.js` 的会话/消息/设置
 // 那几条，逐条写在方法注释里），不是照着"一张表该有什么动词"想出来的；也**没有**改动任何既有方法的签名
 // （`events`/`deliveries`/`conversations.get` 等一字未动，新动词一律新名字）。
+//
+// 2026-09-16 第二批（同一件事的续）：把**登录→会话→消息→历史→设置**这条链的调用点真的迁过来时，发现
+// 有 5 处现有动词表达不了（不是"想要更多动词"，是逐条对不上）：
+//   · `conversations.exists(id)` —— `/api/chat` 的孤儿守卫（原 `SELECT 1 FROM conversations WHERE id=?`）；
+//     会话的**归属判据**没有另造方法：`conversations.get(id)` 已经回 `accountId`/`channel`，
+//     调用方按原 SQL 的同一套条件在 JS 里比（`WHERE id=? AND account_id=?` 与带 `(channel!="web" AND account_id IS NULL)`
+//     那条都逐字保留），接口面因此不多两个几乎同义的动词；
+//   · `conversations.getAs(id, keys)` —— Web 只读会话的**列子集**（八列，读全行是另一种行为）；
+//   · `messages.history(id)` —— 上下文口径的历史读法（只要 id/role/content，升序、全量）；
+//   · `messages.guardAppend(fields)` —— `INSERT … SELECT … FROM conversations WHERE id=?` 的孤儿守卫
+//     （介质原语：MySQL 一条语句、JSON 先查后写，语义都是"会话不在就一行都不写"）；
+//   · `messages.countByTool(id, {tools, days})` —— kb 注入判定那条 `COUNT(*) … tool_name IN (…) AND created_at > NOW()-INTERVAL ? DAY`；
+//   · `messages.count(id, {role})` 已在契约里，本次只是终于接上调用方。
+// 一条既有签名都没动（`contractMethods()` 只多不少），两个实现同步补齐 —— 漏一个会被 test/storage.test.mjs 的
+// 方法面用例当场判红。
 import { RW_STORAGE } from '../env.js';
 import { createMysqlStorage } from './mysql.js';
 import { createJsonFileStorage } from './jsonfile.js';
@@ -70,9 +85,9 @@ export const CONTRACT = {
     // conversations/messages/settings 上带 Owned/ByAccount 后缀的那几个是**按账号收口**的读法：
     // 它们对应 `server/index.js` 里本来就带 `account_id=?` 的查询（:321/:373/:762），不是新发明的边界
     // —— 接口上不留"不带账号"的读法，就不会有人把 D3/OP-01 那条边界漏掉（上一轮的 `/api/deliveries` 就是这么漏的）。
-    conversations: ['create', 'get', 'update', 'findOwned', 'listByAccount', 'updateOwned', 'touch'],
-    messages: ['append', 'list', 'recent', 'count'],
-    toolCalls: ['append'],
+    conversations: ['create', 'get', 'update', 'findOwned', 'listByAccount', 'updateOwned', 'touch', 'exists', 'remove'],
+    messages: ['append', 'list', 'recent', 'count', 'history', 'guardAppend', 'countByTool', 'removeByConversation'],
+    toolCalls: ['append', 'list', 'recent', 'attachToMessage', 'removeByConversation'],
     settings: ['get', 'set', 'all', 'getMany'],
     agentRuns: ['create', 'getLatest', 'update'],
     events: ['append', 'read'],

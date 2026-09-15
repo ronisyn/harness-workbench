@@ -75,6 +75,50 @@ export function fire(kind, payload = {}, meta = {}) {
 }
 
 /**
+ * 触发面的**安全投递口**：给"源"用（使用方的触发点：调度器每轮、外部调用的请求入口、手动跑一次）。
+ *
+ * 与 `fire` 的分工（这是本次接线补上的那一段，语义与 `fire` 完全一致，**没有放宽任何判据**）：
+ *   · `fire(...)`　　＝接口本身：**如实**返回 `{kind, matched}`；档位写错 / payload 不是无损 JSON
+ *     一律**当场抛错**（那两条既有口径一个字没动，`test/triggers.test.mjs` 照旧锁着）。
+ *   · `fireSafely(...)` ＝源用的那一层：**本函数永不抛错、永不等待**——它把 `fire` 调用推到
+ *     微任务队列（`queueMicrotask`）里执行，所有同步异常只记一行日志。
+ *
+ * 为什么源必须走它（"接线坏一次不许打断主流程"）：触发的 payload 来自使用方自己的现场
+ * （任务行、请求参数、会话 id），其中出现不可无损 JSON 的字段是完全可能的；若让 `fire` 的
+ * 同步抛错原样冒泡，`scheduler.js` 的 tick 循环会**当场中断本轮扫描**、
+ * `scripts/rw-jsonrpc.mjs` / `scripts/rw-mcp-server.mjs` 的请求入口会**把一次正常调用变成一次失败**
+ * ——那是"编排面的一个小功能坏掉，把平台的定时任务和对外调用一起带走"，与 §4.5 的
+ * "只加接口、不接管主循环"正好相反。延到微任务还有一个作用：**连调用栈都不占用**
+ * （tick 与请求处理都不会因为触发面而多等一帧）。
+ *
+ * 代价如实记：这样投出去以后**拿不到 `matched`**（返回值恒为 `undefined`）——源只需要知道
+ * "这次触发已经交出去了"，而"有几个 handler 在听"是接口层的观测面，不是源的事。
+ *
+ * @param {'manual'|'schedule'|'external'|'event'} kind 四档之一；写错不抛错，只记一行日志
+ * @param {object} [payload] 触发内容（口径同 `fire`：无损 JSON）
+ * @param {object} [meta] 这次触发从哪来（口径同 `fire`：约定 `{source}`）
+ * @param {(fn:() => void) => void} [enqueue] 延迟机制（默认 `queueMicrotask`；夹具注入同步执行以便断言）
+ */
+export function fireSafely(kind, payload = {}, meta = {}, enqueue = queueMicrotask) {
+  // 外层 try 兜的是 `enqueue` **自己**抛错（注入同步执行的夹具就会走到这里）：本函数的承诺是
+  // "调用方永远看不到异常"，那这条承诺就必须对这一层也成立——否则接线的保证会漏在调度机制上。
+  // 真实路径（`queueMicrotask`）同步部分不会抛，这里是为"任何延迟机制"兜底。
+  try {
+    enqueue(() => {
+      try { fire(kind, payload, meta); }
+      catch (e) { logUnsafeDelivery(kind, e); }
+    });
+  } catch (e) { logUnsafeDelivery(kind, e); }
+}
+
+/** 源那一层的失败出口：出声（不许静默）、不冒泡、不留明文（与 handler 失败同一套脱敏口径）。 */
+function logUnsafeDelivery(kind, e) {
+  let msg = String((e && e.message) || e);
+  try { msg = redactSecretValues(msg); } catch { /* 脱敏不可用＝保持原样，绝不因此吞掉这条日志 */ }
+  console.error('[trigger] ' + kind + ' 档投递失败（触发面自己兜住，不影响触发点）：' + msg);
+}
+
+/**
  * 快照：只接受**无损 JSON**，交给 handler 的是这份快照（而不是调用方那个活对象）。
  * 为什么必须这样（DSH `snapshotDelivery` 的同一条）：同一份 payload 会被多个 handler 看到，
  * 不先固定下来的话，先跑的那个改一下字段，后面的就看到另一种数据；而"此刻就能序列化"也保证

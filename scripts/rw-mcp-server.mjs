@@ -17,6 +17,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { serveStdio } from '../server/mcp-server.js';
+// 编排面（v0.3 §4.5）：**外部调用档的源**＝本进程的请求入口。外面的 agent 每调一次工具
+// （`rw_chat` / `rw_status` / `rw_export`）就先投递一次 `external`——载荷只带**对外的工具名**与参数里
+// 那几格事实（`message` 只带长度），**不带账号/口令/正文**；投递是 fire-and-forget 且永不抛错
+// ⇒ 不许影响这次工具调用的返回值与 `isError` 口径（包装层原样透传，`server/mcp-server.js` 一个字没动）。
+// 包装点选在整套 backend 上（唯一查表入口：`server/mcp-server.js:90`）。
+import { wrapExternalCalls } from '../server/external-trigger.js';
 // 自造会话的标题走**统一声明**（`__probe__ …`）：本适配器建的会话是我们自己发起的，不属于"真实流量"
 // （v0.3 §0.3.1 的口径："探针 ≠ 真实流量"；判据唯一实现在 server/cohort.js）。
 // 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
@@ -167,5 +173,13 @@ const backend = {
   },
 };
 
-serveStdio({ backend, input: process.stdin, output: process.stdout });
+serveStdio({
+  // 外部调用档的包装：后端的键是适配器名（chat/status/exportSession），对外的方法名是 MCP 工具名
+  // （rw_chat/rw_status/rw_export）——载荷里记**调用方看到的那个名字**（见 server/mcp-server.js 的 toolDefs）。
+  backend: wrapExternalCalls(backend, {
+    source: 'mcp',
+    method: (name) => (name === 'chat' ? 'rw_chat' : name === 'status' ? 'rw_status' : 'rw_export'),
+  }),
+  input: process.stdin, output: process.stdout,
+});
 console.error('[mcp-server] rw-platform MCP server 已就绪（stdio，base=' + BASE + '，新建会话权限=' + PERMISSION + '）');
