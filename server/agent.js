@@ -3,6 +3,7 @@
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
+import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE } from './env.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
@@ -108,32 +109,10 @@ function slimToolCallForContext(call) {
   }
   return { id: call.id, type: 'function', function: { name, arguments: slim } };
 }
-// 单任务运行中压缩（5.1 按 harness 标准收紧）：轮次长/上下文大时，把早期 tool/assistant 内容归档为极短占位，
-// 并清掉早期重复的 COMPLETION_HINT；全量细节始终在 DB tool_calls 可查
-// C3 触发条件 = 条数 > 90 或 累计字符 > 65000（防"条数不多但单条巨大"撑爆窗口）
-function archiveEarlyContext(msgs) {
-  let totalChars = 0;
-  for (const m of msgs) {
-    if (!m) continue;
-    totalChars += String(m.content || '').length;
-    if (m.tool_calls) for (const tc of m.tool_calls) totalChars += String(tc.function?.arguments || '').length;
-  }
-  if (msgs.length <= 90 && totalChars <= 65000) return;
-  const keepFrom = msgs.length - 80;
-  for (let i = 1; i < keepFrom; i++) {
-    const m = msgs[i];
-    if (!m) continue;
-    if (m.role === 'system' && m.content === COMPLETION_HINT) { msgs.splice(i, 1); i--; continue; } // 早期重复评估提示移除（最新一条在尾部）
-    if (m.role === 'tool' && String(m.content || '').length > 150) m.content = '（早期步骤结果已压缩归档；需要细节可用 db_query 查 tool_calls 或 job_output 查日志）';
-    else if (m.role === 'assistant' && !m.tool_calls && String(m.content || '').length > 350) m.content = '（早期过程说明已压缩归档）';
-    else if (m.role === 'assistant' && m.tool_calls) { // C2 早期工具调用 arguments 折叠（保留 id/name 骨架维持 API 配对合法）
-      for (const tc of m.tool_calls) {
-        const a = String(tc.function?.arguments || '');
-        if (a.length > 120) tc.function.arguments = JSON.stringify({ _archived: true, note: '早期工具调用参数已折叠；库内 tool_calls 仅存前 2000 字符（可按 tool_call_id=' + tc.id + ' db_query 查询），完整以实际产物/日志为准' });
-      }
-    }
-  }
-}
+// 【已删除】原 archiveEarlyContext（条数>90 或累计字符>65000 时就地改写早期 tool/assistant 内容、折叠 tool_call 参数）：
+// 它是"每轮改写请求前缀"的元凶——一旦触发，其后全部历史的前缀缓存失效（实测 C1 仅 11–25%，见归档 §20 步1）。
+// 依据《RW-Agent 架构 v1.1》§5.3 纪律1（只追加）：唯一允许的改写是"段边界整段替换一次"（maybeCollapseEarly）。
+// 上下文体积由 spill（步6）与段边界折叠共同控制；原文始终在 DB messages/tool_calls 可查（§7.3 双投影）。
 async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
@@ -341,6 +320,15 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     return true;
   };
 
+  // 工具面会话内冻结（纪律3）：一次运行内只计算一次 tools schema，保证逐字节稳定（每轮重算=前缀可能变）。
+  // P1 统一通道：轻量模式（普通问答/无明确任务词）→ 只暴露 LIGHT_TOOLSET 只读工具（模型可零工具直接答，也可单轮只读查询）；
+  // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
+  const defs = ctx.__light
+    ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
+    : toolDefs(ctx.preset, ctx.__enabledTools, ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）
+  const toolsHash = createHash('sha256').update(JSON.stringify(defs)).digest('hex').slice(0, 12);
+  let prevCore = null;   // 前缀不变量：上轮的"非 system 消息"序列（只追加机检）
+  let collapseRound = -1; // 段边界折叠发生的轮次（该轮断链属预期，不计非预期失效）
   for (let round = 0; ; round++) {
     refreshSys();
     // 服务端停止：用户点"停止生成"（POST /api/chat/stop）后本轮不再继续
@@ -374,14 +362,35 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
     emitEv(ctx.conversationId, emit, { type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
-    archiveEarlyContext(msgs); // 轻压缩：早期超长项置占位
-    await maybeCollapseEarly(round, lim); // 5.1 语义折叠：长任务早期轮次 LLM 摘要压缩（F3 阈值可调）
+    // 段边界折叠（纪律1 允许的唯一改写）：整段替换一次，发生时记 collapseRound 供归因
+    const collapsed = await maybeCollapseEarly(round, lim);
+    if (collapsed) {
+      collapseRound = round;
+      console.warn('[collapse] 段边界整段替换（conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + ' → 替换后 ' + msgs.length + ' 条）');
+    }
+    // 前缀不变量（缓存三纪律机检之一 · 只追加）：本轮与上轮的**非 system** 消息序列必须逐条同一对象。
+    // system 消息都是随轮易变的提示（快照/后台通知/护栏提示/完成度提示），不参与比对；
+    // 除"段边界折叠"外任何断链 = 一次非预期前缀改写（C4），如实上报不静默。
+    {
+      const core = msgs.filter((m) => m && m.role !== 'system');
+      if (prevCore) {
+        const n = Math.min(prevCore.length, core.length);
+        let broke = -1;
+        for (let i = 0; i < n; i++) if (prevCore[i] !== core[i]) { broke = i; break; }
+        if (broke === -1 && core.length < prevCore.length) broke = core.length;
+        if (broke !== -1 && collapseRound !== round) {
+          console.warn('[prefix-invariant] 非预期前缀改写：首个不同下标=' + broke
+            + '（上轮 ' + prevCore.length + ' 条 → 本轮 ' + core.length + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
+        }
+      }
+      prevCore = core;
+      if (process.env.RW_PREFIX_DEBUG === '1') {
+        const sysHash = createHash('sha256').update(String((msgs[0] && msgs[0].content) || '')).digest('hex').slice(0, 12);
+        console.log('[prefix-debug] conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1)
+          + ' sys=' + sysHash + ' tools=' + toolsHash + ' core=' + core.length);
+      }
+    }
     const llmT0 = Date.now();
-    // P1 统一通道：轻量模式（普通问答/无明确任务词）→ 只暴露 LIGHT_TOOLSET 只读工具（模型可零工具直接答，也可单轮只读查询）；
-    // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
-    const defs = ctx.__light
-      ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
-      : toolDefs(ctx.preset, ctx.__enabledTools, ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）
     // P20 每轮流式（2026-09）：stream:true + tools，思考增量经 onThink 实时透出（P21），正文增量经 onContent 实时透出（真流）；
     // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）；流失败 → 同模型一次性兜底一次（保底），再失败如实抛出（②由 index catch 落痕）
     let res = null;

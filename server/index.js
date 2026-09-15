@@ -774,6 +774,57 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   }
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
+  // 【尾巴区】F10 目标 / F15 技能 / F19 知识：三类易变注入已移至 hist 之后（纪律2 前缀冻结，见下方尾巴区）
+  // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
+  // 2026-09 C1 修复：git 块原位于 hist 之前=消息前缀中部，自改场景有新 commit 时该块内容变化
+  // → 其后全部历史（含最近 30 条）前缀缓存击穿（DeepSeek miss/hit 价差 27 倍）。
+  // 改为 append 到消息末尾（hist 之后）：前缀=固定注入+增长历史稳定，git 变化仅影响尾部少量 token。
+  const buildGitBlock = async () => {
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const gLines = gitLog.trim().split('\n').filter(Boolean);
+      if (gLines.length) return '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n');
+    } catch { /* git 不可用/非仓库时静默跳过 */ }
+    return null;
+  };
+  // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
+  try {
+    const sp = await getSetting('systemPrompt', '');
+    if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
+  } catch { /* 忽略 */ }
+  // WS5c 项目自我说明（类 AGENTS.md）：projects/<project>/AGENTS.md 存在则注入（每任务必带的项目级事实）
+  // P25(O-25)：去掉 '!== default' 门——default 项目也可放 projects/default/AGENTS.md；存在才注入
+  try {
+    if (convProject) {
+      const agp = path.join(RW_WORKSPACE, 'projects', convProject, 'AGENTS.md');
+      if (fs.existsSync(agp)) {
+        const ag = fs.readFileSync(agp, 'utf8').slice(0, 16000);
+        messages.push({ role: 'system', content: '【项目 ' + convProject + ' 说明（AGENTS.md）】\n' + ag });
+      }
+    }
+  } catch { /* 项目说明不可用时静默跳过 */ }
+  // 【尾巴区】断点现场注入（resumeHint）已移至 hist 之后（纪律2）
+  // 【尾巴区】本轮只读意图判定 与 高成本自荐 已移至 hist 之后（纪律2：它们是"每轮可能变"的注入）
+  // B1：壳语境注入（非 default 壳且带 persona 时扩展语境；默认壳/无 persona=保持现状，不改内核自述）
+  if (convShellCtx && convShellCtx.persona) {
+    messages.push({ role: 'system', content: '【壳语境：' + convShellCtx.key + '】' + (convShellCtx.domain ? '领域说明：' + convShellCtx.domain + '\n' : '') + convShellCtx.persona });
+  }
+  // 【尾巴区】只读意图 / 高成本自荐 的注入已移至 hist 之后（见下方尾巴区块）
+
+  // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
+  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化；
+  // assistant 超长文逐条截断（保留头+尾，DB messages 表仍有全文，不影响 UI 回看）
+  for (const m of hist) {
+    let c = String(m.content || '');
+    if (m.role === 'assistant' && c.length > 4000) {
+      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
+    }
+    messages.push({ role: m.role, content: c });
+  }
+
+  // ── 尾巴区（每轮可能变 → 放最后，变化只影响自身尾部 token）──────────────────────
+  // 《RW-Agent 架构 v1.1》§5.3 纪律2（前缀冻结）：这些注入若放在历史之前，每变一次就让其后全部历史失效。
   // F10 目标注入：会话存在 active 目标时提醒持续推进（目标由 set_goal 工具创建；表缺失等异常不阻断对话）
   try {
     const gl = (await db.query('SELECT objective FROM goals WHERE conversation_id=? AND status="active" ORDER BY id DESC LIMIT 1', [conversationId]))[0];
@@ -807,35 +858,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       messages.push({ role: 'system', content: '【知识库条目(记忆；主题相关可引用，或 agent 路径用 kb_search 检索)】\n' + lines.join('\n') });
     }
   } catch { /* 知识表不可用时静默跳过 */ }
-  // F19b 平台自我进化·实时状态注入：最近 git 提交（事实源自动进上下文，防"记忆滞后于实现"→假遗忘/重复开发；git 不可用/非仓库时静默跳过）
-  // 2026-09 C1 修复：git 块原位于 hist 之前=消息前缀中部，自改场景有新 commit 时该块内容变化
-  // → 其后全部历史（含最近 30 条）前缀缓存击穿（DeepSeek miss/hit 价差 27 倍）。
-  // 改为 append 到消息末尾（hist 之后）：前缀=固定注入+增长历史稳定，git 变化仅影响尾部少量 token。
-  const buildGitBlock = async () => {
-    try {
-      const { execFileSync } = await import('node:child_process');
-      const gitLog = execFileSync('git', ['-C', ROOT, 'log', '--oneline', '-8'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-      const gLines = gitLog.trim().split('\n').filter(Boolean);
-      if (gLines.length) return '【平台自我进化·最近提交(事实源：以 git log + docs 勾选为准，勿凭记忆复述开发进度)】\n' + gLines.join('\n');
-    } catch { /* git 不可用/非仓库时静默跳过 */ }
-    return null;
-  };
-  // 用户自定义系统提示词（能力"系统提示词"：settings.systemPrompt，注入每条消息的模型上下文）
-  try {
-    const sp = await getSetting('systemPrompt', '');
-    if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
-  } catch { /* 忽略 */ }
-  // WS5c 项目自我说明（类 AGENTS.md）：projects/<project>/AGENTS.md 存在则注入（每任务必带的项目级事实）
-  // P25(O-25)：去掉 '!== default' 门——default 项目也可放 projects/default/AGENTS.md；存在才注入
-  try {
-    if (convProject) {
-      const agp = path.join(RW_WORKSPACE, 'projects', convProject, 'AGENTS.md');
-      if (fs.existsSync(agp)) {
-        const ag = fs.readFileSync(agp, 'utf8').slice(0, 16000);
-        messages.push({ role: 'system', content: '【项目 ' + convProject + ' 说明（AGENTS.md）】\n' + ag });
-      }
-    }
-  } catch { /* 项目说明不可用时静默跳过 */ }
   // 断点恢复：本会话存在 interrupted/paused 的长任务现场 → 注入现场信息，支持"继续任务"
   try {
     const hint = await resumeHint(conversationId);
@@ -845,10 +867,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // （无持久状态：本轮生效，用户放行/下一条新指令自然解除）。命中则本轮注入只读约束。
   const READONLY_INTENT_RE = /(?:只(?:规划|调研|研究|分析|设计|查证|评估|看看|读一下|查一下|先别改|先别执行)|先(?:规划|调研|设计|分析|出方案|评估|查证|看看|看一下方案|别动手)|别动手|不要动手|只读规划|先别改|先别执行|先别做|出个方案|出方案|先出方案|只读)/i;
   const readonlyIntent = READONLY_INTENT_RE.test(String(content).slice(0, 60));
-  // B1：壳语境注入（非 default 壳且带 persona 时扩展语境；默认壳/无 persona=保持现状，不改内核自述）
-  if (convShellCtx && convShellCtx.persona) {
-    messages.push({ role: 'system', content: '【壳语境：' + convShellCtx.key + '】' + (convShellCtx.domain ? '领域说明：' + convShellCtx.domain + '\n' : '') + convShellCtx.persona });
-  }
   if (readonlyIntent) {
     messages.push({
       role: 'system',
@@ -859,7 +877,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         '- 用户说"开始/按计划执行/做吧"等放行后，下一条消息即恢复全部工具能力（无需退出任何模式）。',
       ].join('\n'),
     });
-  } 
+  }
   // P4 高成本自荐（2026-09 批1）：用户指令带"重构/迁移/全部/大规模"等高成本信号 → 模型先给简短执行方案
   // （≤4 行：做什么/几步/涉及文件）再动手——用户可据此提前叫停，避免闷头烧钱。独立于只读意图与 needsTools：
   // 任务词命中（重构/迁移本身就是执行动词）也应触发；纯问答不含这些词不触发。自荐是软约束（方案后继续执行），非审批门禁。
@@ -869,17 +887,6 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       role: 'system',
       content: '【高成本自荐】本任务规模较大（重构/迁移/批量/大改类）。开工前先用 ≤4 行说明执行方案（做什么→分几步→涉及哪些文件/区域→验证方式），然后直接按方案动手推进；不要在方案处停下等确认（除非你判断风险极高需要用户拍板）。',
     });
-  }
-
-  // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
-  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化；
-  // assistant 超长文逐条截断（保留头+尾，DB messages 表仍有全文，不影响 UI 回看）
-  for (const m of hist) {
-    let c = String(m.content || '');
-    if (m.role === 'assistant' && c.length > 4000) {
-      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
-    }
-    messages.push({ role: m.role, content: c });
   }
 
   // F19b git 块 append 到消息末尾（C1 修复：git 内容随 commit 变化，放 hist 之前会击穿其后全部历史的前缀缓存；
