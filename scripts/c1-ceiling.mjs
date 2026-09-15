@@ -10,7 +10,7 @@
 //   ③ 分档（人发起 / 定时任务 / 探针）分别给，并给出"若达上限能到多少"
 // 用法：node scripts/c1-ceiling.mjs
 import { db } from '../server/db.js';
-import { COHORTS, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, REAL_WHERE } from './cohort.mjs';
+import { COHORTS, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, REAL_WHERE, SAMPLE_WHERE } from './cohort.mjs';
 
 const q = async (sql, p = []) => { try { return await db.query(sql, p); } catch (e) { return [{ __err: e.message }]; } };
 const pct = (x) => (x == null || !isFinite(x) ? '-' : (x * 100).toFixed(2) + '%');
@@ -32,7 +32,22 @@ for (const [label, mk] of COHORTS) {
   console.log(`${label.padEnd(10)} ${fmt(rounds).padStart(6)} ${fmt(convs).padStart(5)}  ${(rounds / convs).toFixed(1).padStart(6)}   ${pct(c1).padStart(8)}   ${pct(ceiling).padStart(9)}   ${pct(ceiling - c1).padStart(8)}   ¥${r.cost}`);
 }
 
-console.log('\n== 结构结论（口径级，别按"单会话平均轮数 ≥100"理解——那是错的推导）==');
+console.log('\n== 分档自检 ==');
+const cnt = async (w) => Number(((await q(`SELECT COUNT(*) n FROM usage_stats u WHERE u.kind='round' AND ${w}`))[0] || {}).n || 0);
+const nHuman = await cnt(HUMAN_WHERE('u'));
+const nSched = await cnt(`(${SCHEDULED_WHERE('u')}) AND NOT (${PROBE_WHERE('u')}) AND NOT (${SAMPLE_WHERE('u')})`);
+const nSample = await cnt(SAMPLE_WHERE('u'));
+const nReal = await cnt(REAL_WHERE('u'));
+const nProbe = await cnt(PROBE_WHERE('u'));
+const sum3 = nHuman + nSched + nSample;
+console.log(`  真实流量内部：人发起 ${fmt(nHuman)} + 定时任务 ${fmt(nSched)} = ${fmt(nHuman + nSched)}　vs　真实流量 ${fmt(nReal)}　${nHuman + nSched === nReal ? '✅ 一致（两个子档互斥且穷尽）' : '❌ 不一致'}`);
+// 「样本」是**人造定时任务**，它天然会被探针判据捞走一部分（它自己就是本轮改造的产物，会落 prefix:* 账本），
+// 所以它可能落在真实流量之外。这里只做提示，不做等值断言——口径归属写清楚比强行凑等式重要。
+console.log(`  样本(人造任务) ${fmt(nSample)} 轮${nSample && nSample > 0 ? '：' : '：'}其中落在真实流量内 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${REAL_WHERE('u')})`))} 轮、落在探针档 ${fmt(await cnt(`(${SAMPLE_WHERE('u')}) AND (${PROBE_WHERE('u')})`))} 轮`);
+if (nSample > 0) console.log('  ⚠️ 样本若落在探针档，说明它带 `prefix:*` 账本（本轮改造的产物）——引用样本成绩时按"人造任务"标注，别当真实使用。');
+console.log(`  探针档合计 ${fmt(nProbe)} 轮（含样本中被判为探针的部分）`);
+
+console.log('\n== 结构结论（口径级，别按"单会话平均轮数 ≥100"理解——那是错的推导）==');;
 const all = (await q(`SELECT COUNT(*) n, COUNT(DISTINCT conversation_id) convs FROM usage_stats WHERE kind='round'`))[0];
 console.log(`  全库：${fmt(all.n)} 轮 / ${fmt(all.convs)} 会话 → 口径上界 1 − ${all.convs}/${all.n} = ${pct(1 - all.convs / all.n)}`);
 const need = (await q(`SELECT COUNT(*) n, COUNT(DISTINCT conversation_id) convs FROM usage_stats u WHERE kind='round' AND (${HUMAN_WHERE('u')})`))[0];

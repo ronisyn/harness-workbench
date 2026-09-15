@@ -48,13 +48,26 @@ export const SCHEDULED_WHERE = (alias = '') => {
   const p = alias ? alias + '.' : '';
   return `${p}conversation_id IN (SELECT id FROM conversations WHERE title LIKE '定时任务：%')`;
 };
-export const HUMAN_WHERE = (alias = '') => `(${REAL_WHERE(alias)}) AND NOT (${SCHEDULED_WHERE(alias)})`;
+export const SAMPLE_TASK_PREFIX = 'RA35样本-';
+export const SAMPLE_WHERE = (alias = '') => {
+  const p = alias ? alias + '.' : '';
+  return `${p}conversation_id IN (
+            SELECT c.id FROM conversations c JOIN scheduled_tasks t ON t.id = CAST(SUBSTRING_INDEX(c.external_id, '-', -1) AS UNSIGNED)
+            WHERE c.external_id LIKE 'task-%' AND t.name LIKE '${SAMPLE_TASK_PREFIX}%')`;
+};
+// ⚠️ 「人发起」必须显式排掉样本：样本也是 channel='task' 的定时任务，但它不满足 SCHEDULED_WHERE
+// （它的标题是"定时任务：RA35样本-…"，其实满足…）——真正的问题是样本由 task 会话承载、
+// 同时满足 REAL_WHERE，若不显式排除就会被**同时算进人发起与样本**（加总自检当场报"不一致"）。
+export const HUMAN_WHERE = (alias = '') => `(${REAL_WHERE(alias)}) AND NOT (${SCHEDULED_WHERE(alias)}) AND NOT (${SAMPLE_WHERE(alias)})`;
 
 export const COHORTS = [
   ['全量', () => '1=1'],
   ['真实流量', (a) => REAL_WHERE(a)],
   ['  ├ 人发起', (a) => HUMAN_WHERE(a)],
-  ['  └ 定时任务', (a) => `(${SCHEDULED_WHERE(a)}) AND NOT (${PROBE_WHERE(a)})`],
+  ['  ├ 定时任务', (a) => `(${SCHEDULED_WHERE(a)}) AND NOT (${PROBE_WHERE(a)}) AND NOT (${SAMPLE_WHERE(a)})`],
+  ['  └ 样本(人造任务)', (a) => SAMPLE_WHERE(a)],
   ['探针', (a) => PROBE_WHERE(a)],
   ['孤儿', (a) => ORPHAN_WHERE(a)],
 ];
+// 三个子档互斥且合起来 = 真实流量（人发起 + 定时任务 + 样本）。这句是给"分档表能不能加总"的自检口径：
+// 若哪天某档写重了，c1-ceiling.mjs 的合计行会与"真实流量"行对不上，一眼可见。
