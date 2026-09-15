@@ -55,7 +55,11 @@ const GROUP_OTHER_BITS = 0o077;
  */
 function assertOwnerOnly(file) {
   let st;
-  try { st = fs.statSync(file); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  // 2026-09-16（服务器 Linux 上跑出来的可移植性缺陷）：路径上挡着一个**非目录**的同名文件时，
+  // `statSync` 抛的是 `ENOTDIR` 而不是 `ENOENT` —— 只认 ENOENT 就会让"凭据文档不存在"这条正常路径
+  // 变成抛错，于是"写文档失败 ⇒ settings 一个字都不改"这条契约在 Linux 上被破坏（Windows 上恰好不抛）。
+  // 两个 errno 都表示"这个文件现在读不到"，按同一个语义处理（后面写入时若真的写不了，会如实抛给调用方）。
+  try { st = fs.statSync(file); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return; throw e; }
   if (process.platform === 'win32') return;
   if ((st.mode & GROUP_OTHER_BITS) !== 0) {
     throw new Error('凭据文件 ' + file + ' 属主之外可读（mode ' + (st.mode & 0o777).toString(8) + '）；请先 chmod 600 ' + file);
@@ -71,7 +75,7 @@ function readStore() {
   const file = credentialsFile();
   assertOwnerOnly(file);
   let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return {}; throw e; }
   const out = {};
   for (const [i, raw] of text.split(/\r?\n/).entries()) {
     const line = raw.trim();
