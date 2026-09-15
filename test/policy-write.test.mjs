@@ -89,6 +89,34 @@ test('账本 detail：谁改的 / 改前改后 / 原始 SQL 都在，且截断�
   assert.ok(big.length <= 1000, 'detail 必须截断到 1000 字符（实为 ' + big.length + '）');
 });
 
+// C-29（2026-09-16）：人工经设置页改策略此前**一行账都不落** ⇒ "策略什么时候被谁改了"答不出来，
+// C-28 的漂移检测也因此不成立（人工改动会被误报成漂移）。现在两条路写同一形状的账，只把 actor/via 分开。
+test('C-29：人工路径（PUT /api/settings）与模型路径共用同一 detail 形状，只有 actor/via 不同', () => {
+  const human = JSON.parse(policyWriteDetail({
+    kind: 'update', keys: ['progress_stall_n'], from: { progress_stall_n: '10' }, to: { progress_stall_n: '20' },
+    ctx: { accountId: 1 }, actor: 'human-via-api', via: 'PUT /api/settings',
+  }));
+  assert.equal(human.actor, 'human-via-api');
+  assert.equal(human.via, 'PUT /api/settings');
+  assert.deepEqual(human.keys, ['progress_stall_n']);
+  assert.equal(human.from.progress_stall_n, '10');
+  assert.equal(human.to.progress_stall_n, '20');
+  // 形状与模型路径一致：两条账放在一起能被同一条 SQL 读出来（否则"策略变更史"又要分两处拼）
+  const model = JSON.parse(policyWriteDetail({ kind: 'update', keys: ['loop_guard'], from: {}, to: {} }));
+  assert.deepEqual(Object.keys(human).sort(), Object.keys(model).sort(), '两条路的 detail 字段必须同形');
+  // 人工路径的 `by` 里没有会话（不是模型在某个会话里改的）——如实为 null，不拿账号冒充会话
+  assert.equal(human.by.conversationId, null);
+  assert.equal(human.by.accountId, 1);
+  // 代码层锁：setSetting 是唯一收口，且它对策略键必须落账（改回"只有模型留账"会让这条红）
+  const idx = read('server/index.js');
+  assert.match(idx, /POLICY_SETTINGS_KEYS\.includes\(key\)/, 'setSetting 必须按策略键清单判断');
+  assert.match(idx, /actor: 'human-via-api'/, '人工路径必须带可识别的 actor');
+  // 两个人工入口（PUT /api/settings 与 PUT /api/access-rules）都要把发起人传下去。
+  // 注意：不要用「一行正则跨过参数表」——`!GUARD_KEYS.has(k)` 里就有个 `)`，会把 `[^)]*` 提前截断（本夹具踩过）。
+  const humanCalls = idx.split('\n').filter((l) => l.includes('setSetting(') && l.includes('accountId: req.user.id'));
+  assert.ok(humanCalls.length >= 2, '两个人工入口都要传发起人（实际 ' + humanCalls.length + ' 处）');
+});
+
 test('B-①② 边界如实：识别只挂在 db_write 上、两条钩子都不拦截，且**直改库不在这套机制里**', () => {
   const hooks = listHooks().filter((h) => h.name.startsWith('policy_write_'));
   assert.deepEqual(hooks.map((h) => h.side + ':' + h.tool).sort(), ['after:db_write', 'before:db_write'],

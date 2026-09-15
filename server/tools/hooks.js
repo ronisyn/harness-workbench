@@ -416,14 +416,16 @@ export function policyWriteOf(sql) {
  * 策略写入的账本 detail（**纯函数**，便于夹具核对"谁改的 / 改前改后 / 都带了"）。
  * 截断到 1000 字符——与 `tool:<名>` 那行的既有口径一致。
  */
-export function policyWriteDetail({ kind, keys, from, to, ctx = {}, result, sql } = {}) {
+export function policyWriteDetail({ kind, keys, from, to, ctx = {}, result, sql, actor = 'model-via-tool', via = 'db_write' } = {}) {
   const cut = (v) => (v === undefined || v === null ? null : String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 160));
   const brief = (o) => Object.fromEntries((keys || []).map((k) => [k, cut(o && o[k])]));
   return JSON.stringify({
-    // 「模型还是人」：人改策略走设置页 API（PUT /api/settings、/api/access-rules），那条路不经过 execTool；
-    // 能走到这里的只可能是模型经工具发起的写入（approval 只对 guard 档生效，write/full 无卡）。
-    actor: 'model-via-tool',
-    via: 'db_write',
+    // 「谁改的」：默认是"模型经工具"（能走到 execTool 那条路的只可能是模型——approval 只对 guard 档生效）。
+    // 2026-09-16 起**人工路径也落同一条账**（C-29）：人经设置页改策略走 PUT /api/settings，
+    // 那条路显式传 actor='human-via-api' / via='PUT /api/settings'，于是"策略变更"这件事
+    // 无论谁发起都能一条 SQL 查全（此前人工改动没有任何账本行，C-28 的漂移检测因此不成立）。
+    actor,
+    via,
     kind, keys,
     from: brief(from), to: brief(to),
     affected: (result && result.affected) ?? null,

@@ -10,6 +10,7 @@ import { activeProviders, allProviders, findProvider, syncChatModels } from './l
 import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
+import { POLICY_SETTINGS_KEYS, policyWriteDetail } from './tools/hooks.js'; // C-29：人工改策略落同一条账（与模型路径同形状）
 import { persistEvent } from './eventlog.js'; // 事件账本（append-only）：唯一写入点挂在 send 上
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, TOOL_CN, TOOL_TIER_CN } from './tools/registry.js';
 import { shellContext, rowToPack } from './shells.js';
@@ -621,9 +622,37 @@ async function getSetting(key, def) {
     try { return JSON.parse(r[0].svalue); } catch { return r[0].svalue; } // 兼容已 JSON 序列化与裸文本
   } catch { return def; }
 }
-async function setSetting(key, val, noBump) {
+/**
+ * 写一个 settings 键（**唯一收口**，见 §9）。
+ * @param {string} key
+ * @param {any} val
+ * @param {boolean} [noBump] true=不自增政策版本（普通参数高频调整不该让版本抖动）
+ * @param {{accountId?:number}} [actor] 发起人（人工经 API 改时传 req.user.id；内部默认/系统写入不传）
+ *
+ * 2026-09-16（C-29）：**人工改策略也要留账**。此前只有模型经 `db_write` 改策略落 `policy:settings-write` 行，
+ * 人经设置页改（就是这里）**一行都不落** ⇒ "策略什么时候被谁改了"答不出来，C-28 的漂移检测也因此不成立
+ * （人工改动会被误报成漂移）。现在两条路写**同一条账**，只把 `actor`/`via` 分开。
+ */
+async function setSetting(key, val, noBump, actor) {
+  const isPolicy = POLICY_SETTINGS_KEYS.includes(key);
+  let before = null;
+  if (isPolicy) {
+    // 只对策略键多读一次旧值（账本要能回答"改前是什么"）；读失败如实标 null，不假装读到
+    try { const r = await db.query('SELECT svalue FROM settings WHERE skey=?', [key]); before = r[0] ? r[0].svalue : null; } catch { /* 见下：留痕时如实标 null */ }
+  }
   await db.query('INSERT INTO settings (skey, svalue, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE svalue=VALUES(svalue), updated_at=NOW()', [key, JSON.stringify(val)]);
   if (!noBump) await bumpPolicyRev(); // 政策版本自增：仅护栏/政策类键（运行时快照提示模型"规则已更新"）；普通参数高频调整不应使版本抖动
+  if (isPolicy) {
+    try {
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+        [actor && actor.accountId != null ? actor.accountId : null, 'policy:settings-write',
+          policyWriteDetail({ kind: 'update', keys: [key], from: { [key]: before }, to: { [key]: JSON.stringify(val) }, ctx: { accountId: actor && actor.accountId }, actor: 'human-via-api', via: 'PUT /api/settings' }),
+          null, null]);
+    } catch (e) {
+      // 留痕失败必须出声（本仓库教训：静默 catch 会让账本静默缺行），但不阻断设置写入
+      console.error('[policy-audit] 人工策略变更留痕失败（设置已生效，但账本缺行）：' + ((e && e.message) || e));
+    }
+  }
 }
 
 // ---------- 模型路由（F11 自动路由） ----------
@@ -1517,7 +1546,7 @@ app.put('/api/settings', requireAuth, async (req, res) => {
     if (!chk.ok) return res.status(400).json({ ok: false, message: chk.error });
     let val = chk.value; // 常规键：chk.value 已做类型归一（number 字符串→Number）
     if (k === 'mcp_servers') val = unredactMcpServers(chk.value, await getSetting('mcp_servers', [])); // 占位还原
-    await setSetting(k, val, !GUARD_KEYS.has(k)); // 护栏键 bump（模型需即时感知）；普通参数不 bump
+    await setSetting(k, val, !GUARD_KEYS.has(k), { accountId: req.user.id }); // 护栏键 bump；人工发起 ⇒ 传发起人（策略键会落 policy:settings-write 账）
   }
   res.json({ ok: true });
 });
@@ -1537,7 +1566,7 @@ app.put('/api/access-rules', requireAuth, async (req, res) => {
     if (!['allow', 'deny'].includes(r.action)) return res.status(400).json({ ok: false, message: 'action 需为 allow|deny' });
     try { new RegExp(r.pattern); if (r.argPattern) new RegExp(r.argPattern); } catch { return res.status(400).json({ ok: false, message: '正则无法编译: ' + r.pattern }); }
   }
-  await setSetting('access_rules', rules); // 策略类变更 bump policy rev（模型可见规则更新）
+  await setSetting('access_rules', rules, false, { accountId: req.user.id }); // 策略类变更 bump policy rev + 人工发起留账（C-29）
   res.json({ ok: true, count: rules.length });
 });
 
