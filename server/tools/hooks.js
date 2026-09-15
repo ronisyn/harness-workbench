@@ -27,9 +27,9 @@ export function registerHook(side, tool, name, fn, opts = {}) {
   return { side, tool: tool || '*', name, builtin: !!opts.builtin };
 }
 
-// 查看已注册钩子（hooks_list 工具用）
+// 查看已注册钩子（hooks_list 工具用；含 failClosed 语义——"出事时是拦还是放"必须可审计）
 export function listHooks() {
-  return registry.map((h) => ({ side: h.side, tool: h.tool, name: h.name, builtin: h.builtin }));
+  return registry.map((h) => ({ side: h.side, tool: h.tool, name: h.name, builtin: h.builtin, failClosed: h.failClosed }));
 }
 
 // 移除钩子（平台配置/管理用；side/tool/name 可部分省略做通配）

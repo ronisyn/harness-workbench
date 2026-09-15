@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { kbVisibleWhere, rowsToEntries, textToEntries } from '../server/knowledge.js';
 
-test('kbVisibleWhere: 会话可见=global+本会话壳+本会话conv', () => {
+test('kbVisibleWhere: 会话可见=global+本会话壳+本会话conv，且只取当前有效事实', () => {
   const r = kbVisibleWhere({ accountId: 7, shellId: 3, conversationId: 9 });
-  assert.equal(r.where, 'account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?))');
+  // A6 起追加 status="active"（superseded/obsolete 仅历史、不返回）——此断言曾停留在 A6 之前的旧 SQL
+  assert.equal(r.where, 'account_id=? AND (scope="global" OR (scope="shell" AND shell_id<=>?) OR (scope="conv" AND conversation_id=?)) AND status="active"');
   assert.deepEqual(r.params, [7, 3, 9]);
 });
 

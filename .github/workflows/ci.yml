@@ -1,0 +1,19 @@
+name: CI
+
+# 门禁（架构 §3.5 / 计划 §7.1 ⑫）：提交即跑全量单测。
+# 覆盖：工具清单装配零漂移、三条不变式机检、spill 溢出、回归与流式累积等（npm test = node --test 全量）。
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # 仓库未提交 lockfile → 用 install（有 lockfile 后应改成 npm ci；见《部署规范》§三 ④）
+      - run: npm install --no-audit --no-fund
+      - run: npm test

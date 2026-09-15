@@ -6,6 +6,7 @@ import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './ll
 import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
+import { diffCore, isUnexpectedBreak } from './prefix.js';
 import { spillToolResult } from './tools/spill.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -15,6 +16,8 @@ import { LIGHT_TOOLSET } from './tools/registry.js';
 // 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
 // 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）
 const activity = new Map(); // convId -> { items: [{seq,at,type,...}] }
+// 段边界（§5.3 纪律3）：convId -> 上次运行的工具面哈希。进程内保留（跨运行），重启即忘——只影响一次提示，不影响正确性。
+const toolsFace = new Map();
 let actSeq = 0;
 const ACT_MAX = 300;
 function emitEv(conversationId, emit, ev) {
@@ -336,6 +339,15 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   // C5 豁免失效归因（只报数、不设 0）：运行起点分类一次 —— 首轮 / 长空闲 / 切模型。
   // 依据《RW-Agent 架构 v1.1》§5.3 纪律5（失效可数）与计划 §0.3 的 C4/C5 口径；落 audit_log（现有载体，不新造表）。
   if (ctx.conversationId) {
+    // 段边界（§5.3 纪律3 的另一半）：工具面变更＝**新段**——上段缓存必然重建，属预期失效（不计 C4），但要如实告知。
+    // 进程内按会话记上一次的工具面哈希；进程重启后记录丢失 → 只是少一次提示，不影响正确性（如实说明，不假装持久）。
+    let faceChanged = false;
+    try {
+      const prevFace = toolsFace.get(ctx.conversationId);
+      faceChanged = prevFace != null && prevFace !== toolsHash;
+      if (toolsFace.size > 2000) toolsFace.clear(); // 防无界增长：清空后最坏是漏一次提示，绝不影响正确性
+      toolsFace.set(ctx.conversationId, toolsHash);
+    } catch { /* 忽略 */ }
     try {
       const prev = (await db.query('SELECT created_at, model_id FROM usage_stats WHERE conversation_id=? ORDER BY id DESC LIMIT 1', [ctx.conversationId]))[0];
       const reasons = [];
@@ -345,11 +357,16 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         if (gapMin >= RW_IDLE_MIN) reasons.push('idle:' + gapMin + 'min');
         if (prev.model_id && model && prev.model_id !== model) reasons.push('model-switch:' + prev.model_id + '→' + model);
       }
+      if (faceChanged) reasons.push('tool-face-changed');
       if (reasons.length) {
         await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
           [ctx.accountId ?? null, 'prefix:exempt', reasons.join(' '), ctx.shellId ?? null, ctx.conversationId]);
       }
     } catch { /* 归因失败不影响执行 */ }
+    if (faceChanged) {
+      console.warn('[segment] 工具面变更（新段）：conv=' + ctx.conversationId + ' tools=' + toolsHash + ' 首轮缓存预期重建（不计 C4）');
+      msgs.push({ role: 'system', content: '【新段】本会话的工具面相对上一段有变化（工具清单/启用集/壳装配/MCP 装载变更）：这一段的首轮缓存需要重建，属**预期失效**（不计 C4）；此后同段内仍严格只追加。' });
+    }
   }
   let prevCore = null;   // 前缀不变量：上轮的"非 system 消息"序列（只追加机检）
   let collapseRound = -1; // 段边界折叠发生的轮次（该轮断链属预期，不计非预期失效）
@@ -399,18 +416,13 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 除"段边界折叠"外任何断链 = 一次非预期前缀改写（C4），如实上报不静默。
     {
       const core = msgs.filter((m) => m && m.role !== 'system');
-      if (prevCore) {
-        const n = Math.min(prevCore.length, core.length);
-        let broke = -1;
-        for (let i = 0; i < n; i++) if (prevCore[i] !== core[i]) { broke = i; break; }
-        if (broke === -1 && core.length < prevCore.length) broke = core.length;
-        if (broke !== -1 && collapseRound !== round) {
-          console.warn('[prefix-invariant] 非预期前缀改写：首个不同下标=' + broke
-            + '（上轮 ' + prevCore.length + ' 条 → 本轮 ' + core.length + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
-          // C4 计数落 audit_log（唯一账本；不新造表）
-          db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-            [ctx.accountId ?? null, 'prefix:invalidate', 'first-diff-idx=' + broke + ' core ' + prevCore.length + '→' + core.length + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
-        }
+      const d = diffCore(prevCore, core);
+      if (isUnexpectedBreak(d, collapseRound, round)) {
+        console.warn('[prefix-invariant] 非预期前缀改写：首个不同下标=' + d.broke
+          + '（上轮 ' + d.prevLen + ' 条 → 本轮 ' + d.curLen + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
+        // C4 计数落 audit_log（唯一账本；不新造表）
+        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [ctx.accountId ?? null, 'prefix:invalidate', 'first-diff-idx=' + d.broke + ' core ' + d.prevLen + '→' + d.curLen + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
       }
       prevCore = core;
       if (process.env.RW_PREFIX_DEBUG === '1') {
