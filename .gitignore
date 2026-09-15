@@ -24,6 +24,10 @@ Thumbs.db
 data/
 tmp/
 .cache/
+# 自动 checkpoint 快照（写类工具执行前的文件时间线，undo_checkpoint 用）：纯本机运行态，不进仓库
+.rw-checkpoints/
+# 实时实测脚本的临时文件（scripts/ra26-waitsides.mjs 等）
+.ra26-waitsides.tmp
 
 # Skills (F15) - runtime-authored skill content
 skills/
