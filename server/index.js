@@ -1205,7 +1205,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       } catch { /* 忽略 */ }
     }
   } catch (e) {
-    // RA-37 G5：异常终结点先落占位消息、再发事件（与 done 路径同序），事件里带**结构化原因**而非只有 message
+    // 异常必须留下**堆栈**：此前只把 message 发给客户端，服务端日志里什么都没有，
+    // 于是"客户端看到一个 ReferenceError"却无从定位（本次 selfcheck 的 "result is not defined" 就是这么卡住的）。
+    // 客户端仍只收到 message（不回显内部细节），完整堆栈进 journald。
+    console.error('[chat] 本轮执行失败：' + ((e && e.message) || e) + '\n' + ((e && e.stack) || '（无堆栈）'));
     let errPlaceholderId = null;
     try {
       let prog = '';
