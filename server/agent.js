@@ -5,7 +5,8 @@
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
 import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
-import { toolDefs, execTool, plans, jobs } from './tools/index.js';
+import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
+import { spillToolResult } from './tools/spill.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
@@ -63,15 +64,8 @@ export function activitySince(conversationId, after = 0, limit = 200) {
 let limitsCache = null;
 let limitsCacheAt = 0;
 
-// 工具结果入上下文前的修剪策略（对齐 3080 tool-result-pruner：保留头+尾，中段截断并注明）
-function contextResultPrune(text, cap) {
-  const s = String(text ?? '');
-  if (s.length <= cap) return s;
-  const head = Math.floor(cap * 0.6);
-  const tail = Math.floor(cap * 0.3);
-  const cut = s.length - head - tail;
-  return s.slice(0, head) + `\n…[上下文已裁剪中段 ${cut} 字符；需要全文可用 job_output/read_file/查询工具]…\n` + s.slice(-tail);
-}
+// 工具结果入上下文前的处理：溢出（spill，步6）——超内联上限的结果全文落盘，上下文只留"预览 + 精确省略量 + 定位符"；
+// 存盘失败降级为内联截断且如实提示（工具本身仍算成功）。几何/阈值/取回见 tools/spill.js。
 
 // B6 假完成检测辅助：取最近一条用户消息文本（用于判断是否"任务语境"）
 function lastUserTextOf(msgs) {
@@ -631,7 +625,12 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           if (p) emitEv(ctx.conversationId, emit, { type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
         }
         const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
-        msgs.push({ role: 'tool', tool_call_id: call.id, content: contextResultPrune(JSON.stringify(rawResults[k]), msgCap) });
+        msgs.push({
+          role: 'tool', tool_call_id: call.id,
+          content: spillToolResult(JSON.stringify(rawResults[k]), msgCap, {
+            tool: call.function.name, args: toolItem.args, conversationId: ctx.conversationId, callId: call.id, redact: redactSecrets,
+          }),
+        });
       });
     }
     // F4 连续失败轮计数（2026-09 批1）：本轮工具全失败（无任一成功）→ 计数+1；有成功→清零。

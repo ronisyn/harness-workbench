@@ -16,6 +16,7 @@ import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
+import { readSpill } from './spill.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
@@ -1265,4 +1266,18 @@ TOOLS.push({
     if (!r.ok) return { error: r.error };
     return { ok: true, root: r.root, summary: r.summary, text: r.text, files: r.files };
   },
+});
+
+// 步6 fetch_spill：溢出的取回端（与 spill.js 成对）——上下文出现"全文已存 <路径>"时的闭环。
+// 恒可用（PLATFORM_EXEMPT）：模型拿到定位符却没有取回工具，等于把信息丢了。
+TOOLS.push({
+  name: 'fetch_spill',
+  description: '取回被溢出（spill）的工具结果全文。上下文里出现"已省略 N 字节…全文已存 <路径>"时，用它按范围分段读回',
+  permission: 'read',
+  params: {
+    path: { type: 'string', required: true, desc: '溢出文件路径（上下文提示里的定位符，"全文已存 …"后面的路径）' },
+    offset: { type: 'number', desc: '起始字符偏移（默认 0）' },
+    length: { type: 'number', desc: '读取字符数（默认 20000）' },
+  },
+  run: async (a) => readSpill(a.path, a.offset, a.length),
 });

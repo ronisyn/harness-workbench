@@ -197,7 +197,9 @@ function groupTraces(traces) {
 
 const PERM_LABEL = { read: '只读', write: '读写', full: '完全', guard: '需审批' };
 const PRESET_LABEL = { all: '全量', standard: '标准', minimal: '精简' };
-const PRESET_TIP = { all: '暴露全部 61 工具（默认）', standard: 'core+pro 52 个，隐藏 expert 高危/改自身类', minimal: '仅 core 21 个文件/查证/规划类' };
+// 档位说明只写"包含哪一层"，不写具体工具条数——条数随工具增删漂移，写死在文案里必然变成假信息；
+// 权威条数见后台「设置→工具」（/api/toolset 实时给出 core/pro/expert 分组）。
+const PRESET_TIP = { all: '暴露全部工具（含 expert 高危/改自身类，默认）', standard: 'core+pro：隐藏 expert 高危/改自身类工具', minimal: '仅 core：文件读写、查证、规划类' };
 
 export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialConvId }) {
   const [convs, setConvs] = useState([]);

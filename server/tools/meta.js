@@ -3,7 +3,8 @@
 // when/not/ex：拼进 function calling description，帮模型在正确时刻选对工具（X1 评审）
 // 注意：conv_summarize 已注册进 TOOLS（index.js），tier=pro；下方注释仅为工具使用提醒，注册状态以 tools/index.js 为准
 export const TOOL_META = {
-  // ===== core(24) =====
+  // ===== core(25) =====
+  fetch_spill: { tier: 'core', when: '上下文提示"全文已存 <路径>"时，按范围取回被溢出的工具结果全文', not: '读取类工具溢出的定位符是源文件路径，用 read_file_range 直接读', ex: 'fetch_spill {path:"/srv/rw-workspace/spill/12/db_query-x.txt", offset:0, length:20000}' },
   read_file: { tier: 'core', when: '读文本内容、改前先读、查实现细节', not: '大文件超限用 read_file_range；列目录用 list_dir', ex: 'read_file {path:"/srv/harness-workbench/server/agent.js"}' },
   read_file_range: { tier: 'core', when: '大文件按 offset/length 分段读', not: '小文件直接用 read_file', ex: 'read_file_range {path, offset:10000, length:5000}' },
   write_file: { tier: 'core', when: '新建文件或整体覆盖', not: '局部小改用 edit_file；追加用 append_file', ex: 'write_file {path, content}' },
@@ -87,7 +88,8 @@ export const DEFAULT_TOOLSET = [
 // O-6（2026-09 批2）：hooks_list/undo_checkpoint 属平台纪律工具——拦截提示引导用 hooks_list 排查，若受启用集约束则被拦后无法自诊；
 // undo_checkpoint 是写坏文件的安全网回滚端，二者均应恒可用（不依赖用户勾选）。
 // A5：intake_submit 恒可用（受 intake 技能硬闸门约束，动作层再拦，见 hooks.js）。
-export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'hooks_list', 'undo_checkpoint', 'intake_submit'];
+// 步6：fetch_spill 恒可用——spill 提示给出定位符后必须有取回手段，否则等于丢信息（与 undo_checkpoint 同理）。
+export const PLATFORM_EXEMPT = ['reload_platform', 'set_limits', 'hooks_list', 'undo_checkpoint', 'intake_submit', 'fetch_spill'];
 
 // P1 轻量工具集（2026-09 批1）：普通问答统一通道的轻量 schema——覆盖高频日常任务（读写文件/查库/检索/搜网/测试/知识），
 // 不含高危与重型工具（delete_file/db_write/git_pull_push/run_command/kill_process/reload/set_limits/plan_mode/子代理族）。
@@ -104,7 +106,7 @@ export const TOOL_CN = {
   // 文件
   read_file: '读取文件', read_file_range: '分段读取', write_file: '写入文件', append_file: '追加内容', edit_file: '修改文件',
   delete_file: '删除文件', list_dir: '列出目录', mkdir: '创建目录', copy_move: '复制/移动', find_file: '查找文件',
-  grep_search: '搜索内容', repo_map: '代码地图', undo_checkpoint: '撤销快照', extract_pdf: '解析PDF', extract_docx: '解析Word',
+  grep_search: '搜索内容', repo_map: '代码地图', undo_checkpoint: '撤销快照', fetch_spill: '取回溢出结果', extract_pdf: '解析PDF', extract_docx: '解析Word',
   extract_xlsx: '解析Excel', extract_pptx: '解析PPT', syntax_check: '语法检查', run_test: '运行测试', view_image: '看图', ocr_image: 'OCR识图',
   // 执行/后台
   run_command: '执行命令', run_long_task: '后台长任务', kill_process: '终止进程', job_list: '后台任务列表', job_output: '查看后台输出',
