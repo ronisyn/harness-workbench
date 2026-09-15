@@ -157,6 +157,11 @@ export async function checkEpochAndWarm({ provider = 'deepseek', model = 'deepse
       }
     }
   }
-  if (!out.changed.length) console.log('[epoch] 前缀面无变化（已核对 ' + out.checked + ' 条泳道×面，未产生任何调用）');
+  // 日志如实区分三态（此前只按 changed 判，会出现"报了预热完成、却仍打印'未产生任何调用'"的自相矛盾）：
+  //   · 有换纪元 → 上面每条已经各自报过；这里不重复
+  //   · 没换纪元但有首次记录的面 → 说清是"补齐新面"，别让人以为是白跑
+  //   · 两者都没有 → 才是真正的零调用
+  if (!out.changed.length && !out.warm.length) console.log('[epoch] 前缀面无变化（已核对 ' + out.checked + ' 条泳道×面，未产生任何调用）');
+  else if (!out.changed.length) console.log('[epoch] 无换纪元，但补齐了 ' + out.warm.length + ' 个从未记录过的面（已各预热一次；已核对 ' + out.checked + ' 条泳道×面）');
   return out;
 }
