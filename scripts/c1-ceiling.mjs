@@ -1,13 +1,27 @@
 // scripts/c1-ceiling.mjs - RA-35 判据拆解（只读）：把 C1 的缺口拆成"结构地板"与"可省失效"
-// 为什么需要它：C1 是"命中/(命中+未命中)"的**会话级聚合**，而每个会话的**第一轮必然 100% 未命中**
-//（没有前缀可命中）。于是一个会话能拿到的 C1 有硬上界：
-//      C1_max(会话) = 1 - 1/轮数
-//      C1_max(口径) = 1 - 会话数/总轮数            ← 假设"首轮之外全部命中"（前缀完美冻结）
-// 所以 `RA-35` 的 "C1 ≥ 99%" 在结构上等价于要求 **平均每个会话 ≥ 100 轮**。
-// 本报告把三件事分开算清楚，避免把"会话太短"误当成"机制没生效"：
-//   ① 结构地板：1 - 会话数/轮数
-//   ② 实测 C1 与地板的差 → 这才是"可省的失效"（前缀改写/工具面变更/长空闲/切模型）
-//   ③ 分档（人发起 / 定时任务 / 探针）分别给，并给出"若达上限能到多少"
+// ── 口径与上界（2026-09-15 更正：早前写的"首轮必然 100% 未命中"是**错的**）─────────────────
+// 实测（conv=633，真实人发起 2 轮）：第 1 轮 命中 10,496 / 未命中 707 —— 首轮就命中了，
+// 因为**固定前缀（系统提示 + 工具面 + 环境块 ≈ 10.5k）是跨会话共享的**，第一次请求就命中它。
+// 因此正确的上界按"每轮输入里有多少是上一轮已出现过的内容"算：
+//     hit_t  = in_{t-1}          （上一轮输入在本轮原样重现 → 可命中）
+//     in_t   = in_{t-1} + m_t    （上下文只追加；m_t = 本轮固有新增：用户消息 + 上轮模型输出 + 本轮工具结果）
+//     C1_max(会话) = Σhit / Σin  ← 随轮数单调升高，**受模型窗口封顶**
+// 下面这个 `1 − 会话数/总轮数` 只是"若首轮全 miss 且此前无任何共享前缀"的**下界式粗估**，
+// 现在只作为"冷启动占比"的参考指标，**不再当作上界**（实际首轮命中率远高于 0）。
+export const coldStartShare = (convs, rounds) => (rounds > 0 ? convs / rounds : null);
+
+/**
+ * 按实测参数递推 C1 上界（与平台实现一致：只追加、上一轮输入即本轮可命中部分）。
+ * @param {number} prefix 固定前缀 tokens（实测 ≈10,496）
+ * @param {number} perRound 每轮固有新增 tokens（实测 ≈1,772）
+ * @param {number} N 轮数
+ */
+export const c1Ceiling = (prefix, perRound, N) => {
+  if (N <= 0) return null;
+  let inPrev = prefix + perRound, H = prefix, M = perRound;
+  for (let t = 2; t <= N; t++) { H += inPrev; M += perRound; inPrev += perRound; }
+  return H / (H + M);
+};
 // 用法：node scripts/c1-ceiling.mjs
 import { db } from '../server/db.js';
 import { COHORTS, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, REAL_WHERE, SAMPLE_WHERE } from './cohort.mjs';
