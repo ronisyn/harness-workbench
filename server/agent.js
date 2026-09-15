@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
 import { diffCore, isUnexpectedBreak, prefixHash } from './prefix.js';
+import { newProgressState, judgeRound, stallMessage, fuseDecision } from './progress.js';
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { effectiveCollapseChars } from './modelwindow.js';
 import { spillToolResult } from './tools/spill.js';
@@ -153,7 +154,7 @@ export async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -177,12 +178,15 @@ export async function agentLimits() {
       // 注：原先另写一个 failPick 完成同样语义，但它引用的 rows 是 try 块内的 const（词法作用域不可见），
       // 必然抛 "rows is not defined" 并让整个护栏读取回退默认值 —— 故直接用同语义的 pick。
       failGuardN: pick('consecutive_fail_guard', 3),
+      // 2026-09-15：进展判据（替代人在场时的轮次/时间熔断）。schema hint=0 关闭，须与"无行缺省 10"区分（同 failGuardN）
+      progressStallN: pick('progress_stall_n', def.progressStallN),
+      fuseInteractive: pick('fuse_interactive', def.fuseInteractive),
       rev: pick('__policy_rev', 0),
     };
   } catch (e) {
     // 不静默：读取护栏失败会让"设置里的阈值"整体回退默认值（曾导致折叠阈值设了不生效）——如实报出原因
     console.warn('[limits] 读取护栏失败，已回退默认值：' + (e && e.message ? e.message : e));
-    limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 };
+    limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3, progressStallN: def.progressStallN, fuseInteractive: def.fuseInteractive };
   }
   limitsCacheAt = Date.now();
   if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars }));
@@ -247,6 +251,11 @@ const COMPLETION_HINT = [
 ].join('\n');
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
+  // 无人值守判定（2026-09-15）：定时任务/契约驱动器 = true（driver 与 scheduler 都会显式带上），
+  // 子代理继承父级上下文所以自动跟着走；网页/微信/飞书都是人在场 = false。
+  // 它决定两件事：① 轮次与时间熔断是否生效（只在无人值守时生效）② 审批是否需要排队（tools/index.js 已有语义）。
+  const unattended = !!ctx.__autonomous;
+  const prog = newProgressState();
   // F15 技能（2026-09-15 改）：**技能全文不再拼进节点 0**。
   // 旧实现把 skill_load 载入的技能拼进 msgs[0]，于是"载一次技能 = 请求最前面那段整段作废"。
   // 现在改成 DSH 那种做法：**追加一条系统消息到历史之后**（in-history 追加，角色仍是 system，权威性不变），
@@ -490,11 +499,17 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     scanBg();
     const bgNotes = await bgNotices();
     for (const n of bgNotes) msgs.push({ role: 'system', content: n });
-    if (lim.budgetMin > 0 && budgetElapsedMs(Date.now() - t0, cumWaitMs) > lim.budgetMin * 60000) {
-      return { content: `（达到 ${lim.budgetMin} 分钟时间预算，任务已挂起。可让我继续，或用 set_limits 调大/关闭预算）`, toolLog, usage: {}, guard: 'budget', spentYuan: spentNow(), usageTotals: runTotals() };
-    }
-    if (lim.roundCap > 0 && round >= lim.roundCap) {
-      return { content: `（达到 ${lim.roundCap} 轮护栏上限，任务已挂起。可调大/关闭轮次上限后说"继续任务"恢复）`, toolLog, usage: {}, guard: 'cap', spentYuan: spentNow(), usageTotals: runTotals() };
+    // 轮次/时间熔断（2026-09-15 改口径）：**只在无人值守时生效**。
+    // 理由：这两条数字的粒度不对 —— 正常长任务会被墙钟误杀（保险丝接到用户身上），
+    // 而真正的原地打转（同一调用反复拿到同样结果）它又抓不住。人在场的会话改成靠下面的**进展判据**停，
+    // 用户要恢复老行为可把 settings 的 `fuse_interactive` 设 1（不必改代码）。判定抽在 server/progress.js。
+    const fuse = fuseDecision({
+      unattended, interactiveFuse: lim.fuseInteractive > 0,
+      budgetMin: lim.budgetMin, roundCap: lim.roundCap, round,
+      elapsedMs: budgetElapsedMs(Date.now() - t0, cumWaitMs),
+    });
+    if (fuse) {
+      return { content: `（${fuse.why}，任务已挂起。可让我继续，或用 set_limits 调大/关闭）`, toolLog, usage: {}, guard: fuse.guard, spentYuan: spentNow(), usageTotals: runTotals() };
     }
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
@@ -766,6 +781,24 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       const added = appendNewSkills();
       if (added > 0) {
         console.log('[skill] 追加 ' + added + ' 条技能到历史之后（in-history 追加，不破坏前缀）conv=' + (ctx.conversationId || '-'));
+      }
+    }
+    // 进展判据（2026-09-15）：替代"轮次/时间"作为人在场时的主判据。
+    // 只看"这一轮有没有产生新的、可验证的东西"——改了东西 / 新调用 / 转成功 / 结果变了，四者之一即算进展。
+    // 连续 K 轮都没有 ⇒ 停在原地打转，如实说清在重复什么。K 由 settings `progress_stall_n` 配（0=关）。
+    {
+      // ⚠️ `slice(-calls.length)` 在 calls.length===0 时等价于 slice(0)（会把**全部历史**当成"本轮"）——
+      // 显示的空轮虽然在这之前就 return 了，但这里显式挡一下，免得将来重构把这段挪到空轮也走到的位置。
+      const thisRound = calls.length ? toolLog.slice(-calls.length) : [];
+      const pj = judgeRound(prog, thisRound);
+      if (process.env.RW_PROGRESS_DEBUG === '1') {
+        console.log('[progress] round=' + (round + 1) + ' stalled=' + pj.stalled + ' progress=' + pj.progress + ' why=' + pj.why.join(',') + ' repeats=' + pj.repeats.join(','));
+      }
+      if (lim.progressStallN > 0 && pj.stalled >= lim.progressStallN) {
+        console.warn('[progress] 连续 ' + pj.stalled + ' 轮无进展，挂起 conv=' + (ctx.conversationId || '-') + ' 重复调用=' + pj.repeats.join('|'));
+        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [ctx.accountId ?? null, 'progress:stall', 'round=' + (round + 1) + ' stalled=' + pj.stalled + ' repeats=' + pj.repeats.join(',').slice(0, 300), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+        return { content: stallMessage(prog, round, lim, pj.repeats), toolLog, usage: {}, guard: 'no-progress', paused: true, reason: '连续无进展', spentYuan: spentNow(), usageTotals: runTotals() };
       }
     }
     // F4 连续失败轮计数（2026-09 批1）：本轮工具全失败（无任一成功）→ 计数+1；有成功→清零。

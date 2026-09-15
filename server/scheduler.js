@@ -71,6 +71,11 @@ export function taskExecContext(task, conversationId, conv = null, accessRules =
     root: permission === 'full' ? '/' : RW_WORKSPACE,
     __accessRules: accessRules,
     shellId: (conv && conv.shell_id != null) ? conv.shell_id : null,
+    // 2026-09-15：定时任务**本来就是无人值守**，此前漏标 `__autonomous`（driver 标了、scheduler 没标）。
+    // 它决定两件事：① 轮次/时间熔断是否生效（只在无人值守时生效 —— 人在场的会话改用"无进展轮数"判据）
+    // ② 需要授权时是"排队等下次"还是"干等一个人来点"（见 tools/index.js 的无人值守分支）。
+    // 对定时任务来说两者都该按"无人"处理：等一个不会来的人，只会占着调度槽位到超时。
+    __autonomous: true,
   };
 }
 
