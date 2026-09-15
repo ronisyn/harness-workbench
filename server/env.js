@@ -9,3 +9,4 @@ export const RW_WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';    
 export const RW_SKILLS = process.env.RW_SKILLS || path.join(RW_WORKSPACE, 'skills');     // 技能根目录
 export const RW_SERVICE = process.env.RW_SERVICE || 'rw-test';                           // 服务名（重启/自愈用）
 export const RW_SEARCH_ENGINE = process.env.RW_SEARCH_ENGINE || 'SearXNG';               // 联网搜索后端名
+export const RW_IDLE_MIN = Number(process.env.RW_IDLE_MIN || 60);                        // 长空闲判定阈值（分钟；C5 豁免归因用）

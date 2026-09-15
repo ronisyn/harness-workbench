@@ -4,7 +4,7 @@
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
 import { createHash } from 'node:crypto';
-import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE } from './env.js';
+import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -327,6 +327,24 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
     : toolDefs(ctx.preset, ctx.__enabledTools, ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）
   const toolsHash = createHash('sha256').update(JSON.stringify(defs)).digest('hex').slice(0, 12);
+  // C5 豁免失效归因（只报数、不设 0）：运行起点分类一次 —— 首轮 / 长空闲 / 切模型。
+  // 依据《RW-Agent 架构 v1.1》§5.3 纪律5（失效可数）与计划 §0.3 的 C4/C5 口径；落 audit_log（现有载体，不新造表）。
+  if (ctx.conversationId) {
+    try {
+      const prev = (await db.query('SELECT created_at, model_id FROM usage_stats WHERE conversation_id=? ORDER BY id DESC LIMIT 1', [ctx.conversationId]))[0];
+      const reasons = [];
+      if (!prev) reasons.push('first-round');
+      else {
+        const gapMin = Math.round((Date.now() - new Date(prev.created_at).getTime()) / 60000);
+        if (gapMin >= RW_IDLE_MIN) reasons.push('idle:' + gapMin + 'min');
+        if (prev.model_id && model && prev.model_id !== model) reasons.push('model-switch:' + prev.model_id + '→' + model);
+      }
+      if (reasons.length) {
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [ctx.accountId ?? null, 'prefix:exempt', reasons.join(' '), ctx.shellId ?? null, ctx.conversationId]);
+      }
+    } catch { /* 归因失败不影响执行 */ }
+  }
   let prevCore = null;   // 前缀不变量：上轮的"非 system 消息"序列（只追加机检）
   let collapseRound = -1; // 段边界折叠发生的轮次（该轮断链属预期，不计非预期失效）
   for (let round = 0; ; round++) {
@@ -367,6 +385,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (collapsed) {
       collapseRound = round;
       console.warn('[collapse] 段边界整段替换（conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + ' → 替换后 ' + msgs.length + ' 条）');
+      db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+        [ctx.accountId ?? null, 'prefix:collapse', 'round=' + (round + 1) + ' msgs=' + msgs.length, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
     }
     // 前缀不变量（缓存三纪律机检之一 · 只追加）：本轮与上轮的**非 system** 消息序列必须逐条同一对象。
     // system 消息都是随轮易变的提示（快照/后台通知/护栏提示/完成度提示），不参与比对；
@@ -381,6 +401,9 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         if (broke !== -1 && collapseRound !== round) {
           console.warn('[prefix-invariant] 非预期前缀改写：首个不同下标=' + broke
             + '（上轮 ' + prevCore.length + ' 条 → 本轮 ' + core.length + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
+          // C4 计数落 audit_log（唯一账本；不新造表）
+          db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+            [ctx.accountId ?? null, 'prefix:invalidate', 'first-diff-idx=' + broke + ' core ' + prevCore.length + '→' + core.length + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
         }
       }
       prevCore = core;

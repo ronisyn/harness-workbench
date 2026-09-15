@@ -33,4 +33,12 @@ console.log(`C3：每 run ≈ ${perRun.runs ? (perRun.cost / perRun.runs).toFixe
 
 const c4 = (await q(`SELECT COUNT(*) n FROM usage_stats WHERE kind='round' AND IFNULL(cache_hit_tokens,0)=0 AND tokens_in > 5000`))[0];
 console.log(`C4 近似（整段作废候选）：${fmt(c4.n)} 次`);
+
+// C4/C5 账本（步5 起落 audit_log）：C4=prefix:invalidate 非预期前缀改写；C5=prefix:exempt/prefix:collapse 豁免归因
+const ledger = await q(`SELECT action, COUNT(*) n FROM audit_log WHERE action LIKE 'prefix:%' GROUP BY action ORDER BY n DESC`);
+console.log('失效账本（audit_log）：' + (ledger.length && !ledger[0].__err ? ledger.map((r) => r.action + '=' + r.n).join('  ') : '（暂无）'));
+const ex = await q(`SELECT detail, COUNT(*) n FROM audit_log WHERE action='prefix:exempt' GROUP BY detail ORDER BY n DESC LIMIT 6`);
+for (const r of ex) if (!r.__err) console.log('  C5 归因：' + r.detail + ' × ' + r.n);
+const inv = await q(`SELECT conversation_id, detail, created_at FROM audit_log WHERE action='prefix:invalidate' ORDER BY id DESC LIMIT 5`);
+for (const r of inv) if (!r.__err) console.log('  C4 明细：conv=' + r.conversation_id + ' ' + r.detail + ' @' + r.created_at);
 process.exit(0);

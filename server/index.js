@@ -416,6 +416,7 @@ const AUDIT_CATS = {
   task: ['task:%', 'route:%', 'review:%'],
   model: ['model:%', 'provider:%', 'settings:%', 'skill:%', 'evo:%'],
   auth: ['auth:%', 'login%', 'logout%'],
+  prefix: ['prefix:%'], // 步5：缓存失效账本（prefix:invalidate=C4 非预期；prefix:exempt/prefix:collapse=C5 豁免归因）
 };
 function auditCatConds(cat) {
   const pats = AUDIT_CATS[cat];
