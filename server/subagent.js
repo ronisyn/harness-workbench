@@ -122,8 +122,11 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
   // 子代理上下文：继承会话与账号，禁止再无限套娃（depth>=上限 或调用方强制 noSubagentOverride）
   // OP-08（2026-09-15）：上限原本**硬编码 3**，而"2 层够不够"从未实证。两件事一起补：
   //   ① 上限改为可配置（settings `subagent_max_depth`，默认 3）——运维可收紧/放开而不用改代码；
-  //   ② 每次派生记录实际深度（journalctl `[subagent] depth=` + agent_runs.tool_counts 可统计），
-  //      这样"真实任务用到第几层"有数据可查，而不是靠拍脑袋。**本次不改默认值**：没有证据就不动行为。
+  //   ② 每次派生记录实际深度。**2026-09-16 更正**：原先这里写"journalctl + agent_runs.tool_counts 可统计"，
+  //      其中后半句**不成立**——子代理不进 `agent_runs`（那张表记的是 /api/chat 的运行），
+  //      于是"有数据可查"其实只有 stdout 日志一种，重启即散。现在把每次派生落一行审计账本，深度变成可查的：
+  //        SELECT JSON_EXTRACT(detail,'$.depth') d, COUNT(*) FROM audit_log WHERE action='subagent:spawn' GROUP BY d;
+  //      **本次不改默认值**：没有证据就不动行为。
   const maxDepth = await subagentMaxDepth();
   const childDepth = (parentCtx.depth || 0) + 1;
   const childCtx = {
@@ -141,6 +144,17 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
   record.depth = childDepth;
   console.log('[subagent] depth=' + childDepth + '/' + maxDepth + ' id=' + id + ' name=' + String(record.name || '').slice(0, 40)
     + ' tools=' + (whitelist ? whitelist.size : 'inherit') + (childCtx.noSubagent ? '（本层不可再派生）' : ''));
+  // OP-08 的证据落账（见上面 ② 的更正）：深度要能**用 SQL 查**，否则"2 层够不够"永远只能靠日志翻。
+  // 留痕失败必须出声（本仓库的教训：静默 catch 会让账本静默缺行），但**不得阻断派生**。
+  // 只在**有会话归属**时落账：没有归属的派生（夹具/无会话调用）落了也没法归因，只会污染"真实任务用到第几层"
+  // 这个统计——实测夹具用 `conversationId: 0` 起子代理，若不加这条，测试跑一遍就往证据里灌一批 depth=1。
+  if (parentCtx.conversationId) {
+    db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+      [parentCtx.accountId ?? null, 'subagent:spawn',
+        JSON.stringify({ id, name: String(record.name || '').slice(0, 60), depth: childDepth, maxDepth, canSpawnMore: !childCtx.noSubagent, tools: whitelist ? whitelist.size : null }),
+        parentCtx.shellId ?? null, parentCtx.conversationId])
+      .catch((e) => console.warn('[subagent] 派生留痕失败（不影响执行，但 OP-08 的深度证据会缺行）：' + ((e && e.message) || e)));
+  }
   const t0 = Date.now();
   // P10 子代理输出契约（2026-09 批4）：默认注入结构化输出模板（调用方可传 contract 覆盖/关闭）。
   // 目的：子代理返回"可消费的结构化结果"而非自由散文——父代理/驱动器可稳定解析（结论/产物/验证/遗留）。
