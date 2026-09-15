@@ -2538,6 +2538,18 @@ async function main() {
     catch (e) { console.error('[audit] 定时归档失败:', e.message); }
   }, 24 * 60 * 60 * 1000);
   if (auditArchTimer.unref) auditArchTimer.unref();
+  // 「缓存影响」声明自检（v0.3 §4.4.1 规则5 / §7.1 ⑨）：CD 靠编译器强制边界，JS 里我们靠**启动即检**。
+  // 声明表把结构性错误拦在启动时（深层的源码锚点核对在 CI 夹具里做）；不阻断启动，只醒目告警 + 落账。
+  try {
+    const { auditPrefixDeclarations } = await import('./prefix-participants.js');
+    const a = auditPrefixDeclarations();
+    if (a.bad.length) {
+      console.error('[prefix-decl] ⚠️ 前缀组件声明不合法（' + a.bad.join('；') + '）——见 server/prefix-participants.js');
+      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:decl-error', a.bad.join('；').slice(0, 500)]).catch(() => {});
+    } else {
+      console.log('[prefix-decl] 前缀组件声明自检通过：' + a.n + ' 个组件（其中会破坏前缀的 ' + a.breakers.length + ' 个：' + a.breakers.join('/') + '；尾巴区 ' + a.tailOnly + ' 个）');
+    }
+  } catch (e) { console.warn('[prefix-decl] 自检失败（不阻断启动）:', e.message); }
   // OP-17 溢出文件保留与清理（2026-09-15）：`<工作区>/spill/` 此前**只增不减**（无任何删除路径）。
   // 策略在 server/tools/spill.js（按龄 7 天 + 按量 64MB，两步都保守）；启动跑一次 + 每 6h 一次；
   // 只有真删了东西才落账本（避免每天一条空账）。

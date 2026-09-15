@@ -247,17 +247,30 @@ const COMPLETION_HINT = [
 ].join('\n');
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
-  // P13 三层：按实际会话权限动态拼装身份层（read/write 会话不注入 full 能力暗示），环境+纪律全量
+  // F15 技能（2026-09-15 改）：**技能全文不再拼进节点 0**。
+  // 旧实现把 skill_load 载入的技能拼进 msgs[0]，于是"载一次技能 = 请求最前面那段整段作废"。
+  // 现在改成 DSH 那种做法：**追加一条系统消息到历史之后**（in-history 追加，角色仍是 system，权威性不变），
+  // 于是载技能那一刻，它前面的历史**照样命中**，等于不花钱。见 proposals/架构文档冲突登记-20260915.md C-7 后的取舍。
   const buildEnv = () => buildEnvFor(permission);
   const msgs = [{ role: 'system', content: buildEnv() }, ...messages];
-  // F15 技能：本轮 runAgent 内 skill_load 载入的技能（ctx.skills）注入后续每轮系统提示
-  const sysContent = () => {
-    const loaded = ctx.skills ? Object.values(ctx.skills) : [];
-    if (!loaded.length) return buildEnv();
-    return [buildEnv(), ...loaded.map((s) => '【已载入技能: ' + s.name + '】\n' + s.content)].join('\n\n');
+  // 已经进过上下文（或开跑前就由 index.js 注入过）的技能，不再重复追加
+  const injectedSkills = new Set(Object.keys(ctx.skills || {}));
+  // 把"本轮新载入的技能"追加到历史之后；返回追加了几条
+  const appendNewSkills = () => {
+    let n = 0;
+    for (const [k, s] of Object.entries(ctx.skills || {})) {
+      if (!s || injectedSkills.has(k)) continue;
+      injectedSkills.add(k);
+      msgs.push({ role: 'system', content: '【已载入技能: ' + s.name + '】\n' + String(s.content || '') });
+      n++;
+    }
+    return n;
   };
+  // 节点 0 的**唯一**内容来源就是 buildEnv()（身份/环境/纪律三层），一个会话内逐字节恒定。
+  // 它每一次变化都等于"换纪元"（所有会话前缀作废），所以这里刻意不留任何动态拼接口子；
+  // 运行期要新增内容一律走 appendNewSkills/pushSnapshot 那条"追加到历史之后"的路。
   const refreshSys = () => {
-    const c = sysContent();
+    const c = buildEnv();
     if (msgs[0].content !== c) msgs[0] = { role: 'system', content: c };
   };
   const toolLog = [];
@@ -746,6 +759,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           }),
         });
       });
+    }
+    // 技能：本轮若通过 skill_load 新载入了技能，**追加到历史之后**（不是改节点 0）。
+    // 放在工具结果之后：位置=这一轮真正发生的位置，且它前面的历史仍然命中。
+    {
+      const added = appendNewSkills();
+      if (added > 0) {
+        console.log('[skill] 追加 ' + added + ' 条技能到历史之后（in-history 追加，不破坏前缀）conv=' + (ctx.conversationId || '-'));
+      }
     }
     // F4 连续失败轮计数（2026-09 批1）：本轮工具全失败（无任一成功）→ 计数+1；有成功→清零。
     // 到 N 次（默认3）先软提示换策略一次；再连败 N 次仍失败 → 挂起 paused（现场保留可恢复），防无脑重试烧 token。

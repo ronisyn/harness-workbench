@@ -17,3 +17,10 @@ jobs:
       # 仓库未提交 lockfile → 用 install（有 lockfile 后应改成 npm ci；见《部署规范》§三 ④）
       - run: npm install --no-audit --no-fund
       - run: npm test
+      # 验收锚点机检（2026-09-15）：每条验收项在代码里挂一个锚点，缺锚点即失败。
+      # 为什么放进 CI：状态过去靠人手抄，代码动了没人回头改，同一件事在三份文档里出现三种说法；
+      # 把"做没做"变成机器判定，是 JS 里能做到的、最接近 CD 编译期强制的手段。
+      - run: node scripts/acceptance-status.mjs
+      # 前缀声明检查：任何进前缀的组件都必须声明缓存影响（v0.3 §4.4.1 规则5），
+      # 锚点必须还在源码里，且节点 0 只允许有一个写入点。
+      - run: node --test --test-force-exit test/prefix-participants.test.mjs
