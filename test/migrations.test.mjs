@@ -124,6 +124,28 @@ test('运行器：全新库（核心表还不存在）→ 整条链标记为已�
   assert.ok(said.some((m) => /全新库/.test(m)), '必须出声说明为什么一条都没执行');
 });
 
+// 2026-09-16（子代理造探针库时实测发现的真问题，也暴露了本夹具原先的假信心）：
+// `initSchema` 是"先按最终形状建表、再调 runMigrations"，所以**就地探测**在真实启动路径上恒为"不是全新库"
+// ⇒ 全新库照样跑 0002 的 `ADD COLUMN error_code`，撞上建表时的同名列 → 不 tolerate → 判失败并 break，
+// 链停在 0002 且每次启动刷错误。正确做法是**调用方在建表前探测后把结果传进来**。这条夹具锁"传进来的值说了算"。
+test('运行器：fresh 由调用方传入时以传入值为准（真实启动路径的时序：建表在前、迁移在后）', async () => {
+  const p = fakePool(); // 表"已存在"（模拟 initSchema 刚建完表）
+  const said = [];
+  const r = await runMigrations(p, {
+    versions: [V('0001_a', ['ALTER TABLE t ADD COLUMN a']), { id: '0002_b', statements: ['ALTER TABLE t ADD COLUMN b'] }],
+    log: { error() {}, log: (m) => said.push(m) }, fresh: true,
+  });
+  assert.equal(r.fresh, true, '传进来的 fresh=true 必须被采信，而不是就地重新探测');
+  assert.equal(r.failed, null);
+  assert.equal(p.log.filter((s) => /^ALTER/.test(s)).length, 0, '不得执行任何 ALTER');
+  assert.deepEqual(p.appliedRows().sort(), ['0001_a', '0002_b']);
+  // 反向：显式传 false（存量库）时不得被当成全新库
+  const p2 = fakePool();
+  const r2 = await runMigrations(p2, { versions: [V('0001_a', ['ALTER TABLE t ADD COLUMN a'])], log: { error() {} }, fresh: false });
+  assert.equal(r2.fresh, undefined);
+  assert.deepEqual(r2.applied, ['0001_a'], '存量库必须真的执行迁移');
+});
+
 test('运行器：存量库（有表、没有迁移表）必须照常走链 —— 与"全新库"判然两分', async () => {
   const p = fakePool(); // 有 tool_calls、无 schema_migrations
   const r = await runMigrations(p, { versions: [V('0001_a', ['ALTER TABLE t ADD COLUMN a']), { id: '0002_b', statements: ['ALTER TABLE t ADD COLUMN b'] }], log: { error() {} } });

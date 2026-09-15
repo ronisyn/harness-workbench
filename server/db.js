@@ -533,6 +533,17 @@ const SCHEMA = [
 ];
 
 export async function initSchema() {
+  // 2026-09-16 修（子代理在造探针库时实测发现，我上一版的"全新库"探测是**假的**）：
+  // 探测必须发生在**建表之前**。原来我把探测放在 runMigrations 里，而 runMigrations 是在上面这圈
+  // SCHEMA 建表**之后**才调用的 —— 那时 `tool_calls` 已被按最终形状建好，探测恒为"不是全新库"，
+  // 于是全新库照样去跑 0001/0002：0002 的 `ADD COLUMN error_code` 撞上建表时的同名列 → 不 tolerate →
+  // **判失败并 break**，链停在 0002（后续迁移永远不会应用），而且每次启动刷一条迁移失败日志。
+  // 客户装机走的正是这条路径。夹具当时用一个"现实中不会出现的时序"骗过了我，所以这里连夹具一起改。
+  let fresh = false;
+  try {
+    const r = await pool.query('SHOW TABLES LIKE ?', ['tool_calls']);
+    fresh = !(r[0] && r[0].length);
+  } catch { fresh = false; }
   for (const sql of SCHEMA) {
     try { await pool.query(sql); } catch (e) { console.error('[db] schema error:', e.message); }
   }
@@ -541,7 +552,7 @@ export async function initSchema() {
   // 现在：按序号应用、应用过就跳过、链有缺口直接报错（照 DSH 会话格式迁移链的两条：相邻无缺口、只向前）。
   // **新增结构变更只加到 migrations.js 的 VERSIONS**，同时改上面的 SCHEMA 建表语句（新库走 CREATE，存量库走迁移）。
   try {
-    const r = await runMigrations(pool);
+    const r = await runMigrations(pool, { fresh });
     if (r.applied.length) console.log('[db] 迁移已应用 ' + r.applied.join(', ') + '（此前已应用 ' + r.skipped + ' 条）');
     if (r.failed) console.error('[db] 迁移失败于 ' + r.failed.id + '：' + r.failed.error);
   } catch (e) {

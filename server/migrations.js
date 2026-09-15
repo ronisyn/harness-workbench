@@ -168,9 +168,12 @@ const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (
  * 与 DSH 会话格式同一思路：新文件直接写在最新版本上，不存在"迁移"这回事。
  * 判定依据是"核心表此前不存在"，不是"猜测列结构"——存量库（有表、没迁移表）必须照常走链。
  */
-export async function runMigrations(pool, { versions = VERSIONS, log = console } = {}) {
+export async function runMigrations(pool, { versions = VERSIONS, log = console, fresh: freshOpt } = {}) {
   validateChain(versions);
-  const fresh = !(await tableExists(pool, 'tool_calls')); // 判定必须在建 schema_migrations **之前**做
+  // `fresh` 由调用方在**建表之前**探测后传进来（见 db.js 的 initSchema）——那才是唯一正确的探测时机：
+  // 真实启动路径上，这圈 SCHEMA 建表已经把表建好了，此时再探测恒为"不是全新库"。
+  // 没传时退回"就地探测"，只适用于测试与一次性脚本。
+  const fresh = freshOpt === undefined ? !(await tableExists(pool, 'tool_calls')) : !!freshOpt;
   await pool.query(TBL);
   if (fresh) {
     for (const v of versions) await pool.query('INSERT IGNORE INTO schema_migrations (id, note) VALUES (?,?)', [v.id, String(v.note || '').slice(0, 200)]);
