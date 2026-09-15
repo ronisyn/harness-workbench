@@ -1195,6 +1195,13 @@ export async function execTool(name, args, ctx) {
   if (tool.params && Object.keys(tool.params).length) validateArgs(tool, args);
   const t0 = Date.now();
   let result;
+  // ⚠️ 这两个必须在执行块**外面**声明（2026-09-15 踩过，代价是账本断了 40 分钟）：
+  // 留痕代码在下面那个 try/catch 之**后**，若把 `hookStop`/`argsAsked` 声明在执行 try 内部，
+  // 引用时就是 ReferenceError —— 而留痕那段的 catch 是"静默不影响主流程"，于是**每次工具调用都少两行账**，
+  // 工具却照常成功（文件真的写了）。同一类错误本仓库第二次犯（前一次是 `result is not defined`）。
+  // 现在的护栏：留痕失败会打日志（见下面 catch），并有 scripts/agent-smoke.mjs 端到端核对"工具调用必须落账"。
+  let hookStop = null;
+  let argsAsked = {};
   // full 权限不限制路径（limitPath=false）；read/write 级才检查工作区边界（guard=full 级能力+审批，不受限）
   const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
@@ -1215,11 +1222,10 @@ export async function execTool(name, args, ctx) {
     }
     // P2（2026-09 批2）：纪律钩子（preset/启用集/只读意图/命令纪律）先于审批执行——
     // 未启用/未暴露/只读意图下的调用先被 hooks 拦，不浪费 guard 审批卡；审批只对真正可执行的受控工具弹卡。
-    let hookStop = null;
     // 审计口径（2026-09-15，OP-03 尾巴）：`args` 到这里已经被两处就地改写过（相对路径归一、后续的 hook 改写），
     // 若直接落库，账上记的就是"改写后"，**模型当初要执行什么就永久丢失了**。
     // 因此先把"模型请求的原始参数"留一份，改写明细单独落 `hook:rewrite` 账本。
-    const argsAsked = { ...args };
+    argsAsked = { ...args };
     const payload = { args, ctx: eff };
     try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
     if (hookStop && hookStop.stopped) {
@@ -1306,7 +1312,12 @@ export async function execTool(name, args, ctx) {
       await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
       await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, result_bytes, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?,?)',
         [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), rBytes, Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
-    } catch { /* 留痕失败不影响 */ }
+    } catch (e) {
+      // 留痕失败**必须出声**：这里过去是静默 `catch {}`，于是"每次工具调用都少两行账"能瞒过所有人
+      // 直到有人去查库（2026-09-15 实测：账本断了 40 分钟才被端到端冒烟发现）。
+      // 工具已经执行完了，不能因为留痕失败就改判成败；但日志与自检必须能看见。
+      console.error('[tool-audit] 留痕失败（工具已执行，但账本缺行）tool=' + name + ' conv=' + (ctx.conversationId || '-') + '：' + ((e && e.stack) || (e && e.message) || e));
+    }
   }
   return result;
 }
