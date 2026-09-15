@@ -21,6 +21,7 @@ import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skil
 import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
 import { kbInjectMode, kbBlock } from './kbgate.js';
+import { streamPatch } from './streampatch.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
@@ -1126,29 +1127,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           send({ type: 'delta', delta: answer.slice(i, i + chunkSize) });
         }
       } else if (answer) {
-        // RA-37 G1 补流对账：真流路径下，`answer` 可能在流完之后又被后置加工过——
-        // C4 自动续写段、TRUNC_NOTE 截断提示、假完成强制加注前缀、空答兜底摘要。
-        // 这些字节此前**从不经过 delta**，于是"事件流拼出来的正文 ≠ 落库正文"。
-        // 这里只补发"还没发出去的那一段"，不整段重发（否则客户端会重复显示一遍）：
-        //   · 后置追加（续写/截断提示/兜底摘要）→ 拼出的正文是落库正文的前缀 → 补发尾部；
-        //   · 假完成前缀（前置加注）→ 拼出的正文是落库正文的后缀 → 先补前缀，再补尾部。
-        const sentText = String(runOutcome.streamedText || '');
-        let head = '', tail = '';
-        if (!sentText) {
-          tail = answer; // 声称流式却没记到任何流式文本（异常路径）→ 整段补发
-        } else if (answer.startsWith(sentText)) {
-          head = ''; tail = answer.slice(sentText.length); // 后置追加：补尾部
-        } else if (answer.endsWith(sentText)) {
-          head = answer.slice(0, answer.length - sentText.length); tail = ''; // 前置加注：补前缀
-        } else if (answer.includes(sentText)) {
-          const at = answer.indexOf(sentText); head = answer.slice(0, at); tail = answer.slice(at + sentText.length);
-        } else {
-          // 对不上账：不静默（宁可多显示一遍，也不让客户端内容与落库不符），并如实告警
-          console.warn('[stream] 事件流正文与落库正文无法对账，已整段补发（conv=' + conversationId + ' streamed=' + sentText.length + ' answer=' + answer.length + '）');
-          tail = answer;
+        // RA-37 G1 补流对账：真流路径下 `answer` 可能在流完之后又被后置加工过（C4 续写段 / 截断提示 /
+        // 假完成前缀 / 空答兜底摘要），这些字节从不经过 delta → "事件流拼出来的正文 ≠ 落库正文"。
+        // 判定抽在 server/streampatch.js（纯函数、有夹具）：这里只负责"按结果补发 + 对不上账时告警"。
+        const patch = streamPatch(answer, runOutcome.streamedText);
+        if (patch.mode === 'mismatch') {
+          console.warn('[stream] 事件流正文与落库正文无法对账，已整段补发（conv=' + conversationId
+            + ' streamed=' + String(runOutcome.streamedText || '').length + ' answer=' + answer.length + '）');
         }
-        if (head) send({ type: 'delta', delta: head });
-        if (tail) send({ type: 'delta', delta: tail });
+        if (patch.head) send({ type: 'delta', delta: patch.head });
+        if (patch.tail) send({ type: 'delta', delta: patch.tail });
       }
     }
     if (!skipStore) {

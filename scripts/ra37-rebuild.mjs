@@ -17,6 +17,7 @@ import { toolDefs } from '../server/tools/index.js';
 import { rebuild, verifyRebuild } from '../src/eventstream.js';
 import { childEmit } from './child-emit.js';
 import { chatStreamWithTools } from '../server/llm/gateway.js';
+import { streamPatch } from '../server/streampatch.js';
 import { sweepStale, purgeConversation } from './probe-cleanup.js';
 
 const PORT = Number(process.env.RA37_PORT || 3187);
@@ -98,17 +99,13 @@ app.post('/api/chat', async (req, res) => {
     answer = result.content || '（无输出）';
     usage = result.usage || {};
     if (result.finishReason === 'length' && answer) answer += '\n\n（本轮输出触到模型长度上限，已截断；可说"继续"续写）';
-    // 补流对账（与 server/index.js 同一条规则，逐字复制以免"脚本测了个假实现"）
+    // 补流对账：与 server/index.js 走**同一个**纯函数（server/streampatch.js）——
+    // 以前这里抄了一份内联逻辑，抄件与原件会各自漂移，实测就不再等于线上行为。
     if (result.streamed && answer) {
-      const sentText = String(result.streamedText || '');
-      let head = '', tail = '';
-      if (!sentText) tail = answer;
-      else if (answer.startsWith(sentText)) tail = answer.slice(sentText.length);
-      else if (answer.endsWith(sentText)) head = answer.slice(0, answer.length - sentText.length);
-      else if (answer.includes(sentText)) { const at = answer.indexOf(sentText); head = answer.slice(0, at); tail = answer.slice(at + sentText.length); }
-      else tail = answer;
-      if (head) send({ type: 'delta', delta: head });
-      if (tail) send({ type: 'delta', delta: tail });
+      const patch = streamPatch(answer, result.streamedText);
+      if (patch.mode === 'mismatch') console.warn('[stream] 事件流正文与落库正文无法对账（实测脚本），已整段补发');
+      if (patch.head) send({ type: 'delta', delta: patch.head });
+      if (patch.tail) send({ type: 'delta', delta: patch.tail });
     }
     const r = await db.query('INSERT INTO messages (conversation_id, role, content, model, provider, tokens_in, tokens_out) VALUES (?,?,?,?,?,?,?)',
       [conversationId, 'assistant', answer, 'deepseek-v4-flash', 'deepseek', usage.tokens_in || 0, usage.tokens_out || 0]);
