@@ -1,64 +1,103 @@
 // server/readcache.js - 同会话重复读去重（RA-35 措施②：压每轮新增）
 //
-// 问题（实测）：read 类调用里 **41.7% 是重复读同一个文件**——同一个 `daily-evolve-log.md` 被读 56 次
-// （单次 3,799 字节）、`RW行为准则-服务器版.md` 23 次、`cohort.mjs` 8 次（单次 6,665 字节）。
-// 这些内容**上一轮就已经进过上下文**，再原样注入一遍：既花 input token（虽然大部分能命中缓存，
-// 但每次仍要按"新增内容"计费一小段），又挤占上下文、推高折叠频率。
+// 问题（实测）：read 类调用里 **41.7% 是重复读同一个文件**——`daily-evolve-log.md` 被读 56 次、
+// `RW行为准则-服务器版.md` 23 次、`cohort.mjs` 8 次（单次 6,665 字节）。这些内容**上一轮就已经进过上下文**，
+// 再原样注入：既按"新增"计费，又挤占上下文、推高折叠频率。
 //
-// 策略：**同会话内、同一个文件、内容未变、同一区域** → 第二次起返回极短回执（几十字节），
-// 告诉模型"内容已在上文、需要请用 force 重取"。文件一旦被改动（mtime/size 变了）就照常返回全文——
-// 新内容必须看得见。调用方也可显式 `force:true` 强制重取。
+// ⚠️ 第一版按"整文件 + 是否读过"去重，**实测一次都没触发**：模型第二次改用 `read_file_range` 读了
+//    同一文件的不同区间（6,665 字节全文 vs 5,711 字节分段，内容高度重叠但键不同）。
+//    所以去重必须做在**区间一级**：记录本会话已经给过哪些段，只补"真正没给过"的部分。
 //
-// 为什么状态放内存：重启后状态丢失 = 下次读返回全文，属**安全方向**（宁可多给一次，也不误省），
-// 且天然避免"跨会话误用别人的缓存"。会话删除时由调用方 clear()，不长期占内存。
+// 口径：
+//   · 键 = (会话, 文件)。文件**改动过**（mtime/size 变）→ 全部记录作废，下次照常给全文（新内容必须看得见）。
+//   · 记录 = 已给出的字符区间集合；请求区间与之求差 → 只返回未覆盖的部分，并附一行说明。
+//   · 完全被覆盖 → 返回极短回执（<200 字符），提示"已在上文、可用 force 重取"。
+//   · `force:true` → 该次请求不参与去重（强制给全）。
+//   · 跨会话不串用；会话删除时由调用方 clear()。
+//
+// 纯函数部分（mergeIntervals/subtractIntervals/planRead）可单测；状态放内存：重启即失效 →
+// 下次读返回全文，属**安全方向**（宁可多给一次，也不误省）。
 
-const state = new Map(); // conversationId -> Map(key -> { mt, size, hash, at, n })
+const state = new Map(); // conversationId -> Map(absPath -> { mt, size, iv: [[s,e),...] })
 
-const keyOf = (kind, absPath, off = null, len = null) => `${kind}|${absPath}|${off == null ? '' : off}|${len == null ? '' : len}`;
+function bucket(cid, absPath) {
+  const c = String(cid == null ? 'g' : cid);
+  if (!state.has(c)) state.set(c, new Map());
+  const b = state.get(c);
+  if (!b.has(absPath)) b.set(absPath, { mt: null, size: null, iv: [] });
+  return b.get(absPath);
+}
 
-function bucket(cid) {
-  const k = String(cid == null ? 'g' : cid);
-  if (!state.has(k)) state.set(k, new Map());
-  return state.get(k);
+/** 合并重叠/相邻区间（输入不改动，返回新区间数组，按起点排序） */
+export function mergeIntervals(list) {
+  const arr = (list || []).filter((x) => Array.isArray(x) && x[1] > x[0]).slice().sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [s, e] of arr) {
+    const last = out[out.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else out.push([s, e]);
+  }
+  return out;
+}
+
+/** 求差：target 中**未被 covered 覆盖**的部分 */
+export function subtractIntervals(target, covered) {
+  const [ts, te] = target;
+  const cov = mergeIntervals(covered);
+  const out = [];
+  let cur = ts;
+  for (const [cs, ce] of cov) {
+    if (ce <= cur) continue;
+    if (cs >= te) break;
+    if (cs > cur) out.push([cur, Math.min(cs, te)]);
+    cur = Math.max(cur, ce);
+    if (cur >= te) break;
+  }
+  if (cur < te) out.push([cur, te]);
+  return out;
 }
 
 /**
- * 判定"这次读能否只回执"。
- * @param {object} p
- *   cid 会话 id · kind 'read_file'|'read_file_range' · absPath 绝对路径
- *   mt/size 文件的 mtimeMs/size（用于识别"改动过"）· hash 内容指纹（可选，用于识别"同 mtime 不同内容"）
- *   off/len 分段参数（read_file_range 用）· force 调用方强制重取
- * @returns {{hit:boolean, times?:number, bytes?:number, ageMs?:number}}
+ * 规划一次读：返回未覆盖的区间 + 是否"完全重复"。
+ * @param {object} p { cid, absPath, mt, size, span:[start,end), force }
+ * @returns {{duplicate:boolean, gaps:Array<[number,number]>, coveredChars:number, seenBefore:boolean}}
  */
-export function checkRepeat(p) {
-  if (p.force) return { hit: false };
-  const k = keyOf(p.kind, p.absPath, p.off, p.len);
-  const b = bucket(p.cid);
-  const prev = b.get(k);
-  if (!prev) return { hit: false };
-  const unchanged = prev.mt === p.mt && prev.size === p.size && (p.hash == null || prev.hash === p.hash);
-  if (!unchanged) return { hit: false };   // 文件变了 → 必须给全文
-  return { hit: true, times: prev.n, bytes: p.size, ageMs: Date.now() - prev.at };
+export function planRead(p) {
+  const b = bucket(p.cid, p.absPath);
+  const changed = b.mt !== p.mt || b.size !== p.size;
+  const covered = changed ? [] : b.iv;              // 文件变了 → 旧记录作废
+  if (p.force) return { duplicate: false, gaps: [p.span], coveredChars: 0, seenBefore: covered.length > 0 };
+  const gaps = subtractIntervals(p.span, covered);
+  const spanLen = p.span[1] - p.span[0];
+  const gapLen = gaps.reduce((a, [s, e]) => a + (e - s), 0);
+  return { duplicate: gapLen === 0, gaps, coveredChars: spanLen - gapLen, seenBefore: covered.length > 0 };
 }
 
-/** 记下"这次给了全文"，供后续去重使用 */
-export function noteReadFull(p) {
-  const k = keyOf(p.kind, p.absPath, p.off, p.len);
-  const b = bucket(p.cid);
-  const prev = b.get(k);
-  b.set(k, { mt: p.mt, size: p.size, hash: p.hash == null ? null : p.hash, at: Date.now(), n: (prev ? prev.n : 0) + 1 });
-  return b.get(k).n;
+/** 记录"这次确实给出去了"的区间（只记实际提供的部分） */
+export function noteServed(p) {
+  const b = bucket(p.cid, p.absPath);
+  if (b.mt !== p.mt || b.size !== p.size) { b.iv = []; b.mt = p.mt; b.size = p.size; } // 文件变更 → 从头记
+  b.iv = mergeIntervals([...b.iv, ...p.spans]);
+  return b.iv.length;
 }
 
-/** 会话结束/删除时清理（调用方负责） */
+/** 完全重复时的极短回执：必须让模型明白"内容在上下文里"，否则它会以为读失败而反复重试 */
+export function repeatNotice(tool, absPath, info) {
+  const kb = (info.size / 1024).toFixed(1);
+  return `（${tool} 已跳过重复读取：${absPath} 的这段内容在本会话上文已给出且文件未改动`
+    + `（共 ${info.size} 字节 / ${kb}KB，本次请求区间 ${info.span[0]}–${info.span[1]} 已覆盖）。`
+    + `需要重新查看请带 force:true，或换一个区间读没看过的部分。）`;
+}
+
+/** 部分重复时的说明（贴在给出去的新内容前面） */
+export function partialNotice(tool, absPath, info) {
+  return `（${tool} 提示：${absPath} 本次请求区间 ${info.span[0]}–${info.span[1]} 中有 ${info.coveredChars} 字符`
+    + `在本会话上文已给出，下面只补未读过的部分。）\n`;
+}
+
 export function clearReadCache(cid) { state.delete(String(cid == null ? 'g' : cid)); }
 
-/** 极短回执文案：必须让模型明白"内容在上下文里"，否则它会以为读失败而反复重试 */
-export function repeatNotice(tool, absPath, info) {
-  const kb = (info.bytes / 1024).toFixed(1);
-  return `（${tool} 已跳过重复读取：${absPath} 的内容在本会话上文已完整给出，文件未改动，共 ${info.bytes} 字节 / ${kb}KB，`
-    + `本会话第 ${info.times + 1} 次读。需要重新查看请带 force:true，或改用 read_file_range 读特定片段。）`;
-}
-
-/** 测试用：查看内部状态大小 */
-export function _sizeOf(cid) { const b = state.get(String(cid == null ? 'g' : cid)); return b ? b.size : 0; }
+/** 测试用：看某会话已记录的文件数 */
+export function _filesOf(cid) { const b = state.get(String(cid == null ? 'g' : cid)); return b ? b.size : 0; }
+/** 测试用：看某文件已覆盖的区间 */
+export function _ivOf(cid, absPath) { const b = state.get(String(cid == null ? 'g' : cid)); return b && b.get(absPath) ? b.get(absPath).iv : []; }
