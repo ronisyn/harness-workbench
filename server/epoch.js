@@ -22,7 +22,7 @@
 // · 预热失败绝不影响启动（全部 try/catch，只打日志 + 落账）。
 import { db } from './db.js';
 import { prefixHash, epochKey, laneKey, isEpochChange } from './prefix.js';
-import { buildEnvFor } from './agent.js';
+import { buildEnvFor, lightDefs } from './agent.js';
 import { toolDefs } from './tools/index.js';
 import { chatOnceWithTools } from './llm/gateway.js';
 import { config } from './config.js';
@@ -30,16 +30,24 @@ import { REAL_WHERE } from './cohort.js';
 
 const SETTINGS_PREFIX = 'prefix_epoch:';
 
+/** 工具面的两种形态 —— 与 agent.js 里的 `defs` 表达式必须逐字节一致（那是唯一判据）。 */
+export const FACES = [
+  { light: false, name: '全量面', defs: (preset) => toolDefs(preset, null, null) },
+  // 轻量面：agent.js 的 lightDefs() 忽略 preset（固定按 all 档取再按 LIGHT_TOOLSET 裁）
+  { light: true, name: '轻量面', defs: () => lightDefs() },
+];
+
 /**
- * 某泳道当前的纪元信息。纯计算（不碰 DB），便于测试与复用。
- * @returns {{lane:string, permission:string, preset:string, env:string, defs:object[], sysHash:string, toolsHash:string, key:string}}
+ * 某泳道 × 某工具面的当前纪元信息。纯计算（不碰 DB），便于测试与复用。
+ * @returns {{lane:string, permission:string, preset:string, light:boolean, env:string, defs:object[], sysHash:string, toolsHash:string, key:string}}
  */
-export function laneEpoch(permission = 'full', preset = 'all') {
+export function laneEpoch(permission = 'full', preset = 'all', light = false) {
   const env = buildEnvFor(permission);
-  const defs = toolDefs(preset, null, null);
+  const face = FACES.find((f) => f.light === !!light) || FACES[0];
+  const defs = face.defs(preset);
   const sysHash = prefixHash(env);
   const toolsHash = prefixHash(JSON.stringify(defs));
-  return { lane: laneKey(permission, preset), permission, preset, env, defs, sysHash, toolsHash, key: epochKey(env, toolsHash) };
+  return { lane: laneKey(permission, preset, light), permission, preset, light: !!light, env, defs, sysHash, toolsHash, key: epochKey(env, toolsHash) };
 }
 
 /**
@@ -86,7 +94,7 @@ async function writePrev(lane, keyV) {
  * 计费：命中则几乎免费（实测 ~¥0.002），未命中则付一次前缀重建价（这正是我们要提前付掉的那笔）。
  */
 export async function warmLane(lane, { provider = 'deepseek', model = 'deepseek-v4-flash' } = {}) {
-  const e = laneEpoch(lane.permission, lane.preset);
+  const e = laneEpoch(lane.permission, lane.preset, lane.light);
   const t0 = Date.now();
   try {
     const r = await chatOnceWithTools(provider, model,
@@ -116,7 +124,9 @@ export async function warmLane(lane, { provider = 'deepseek', model = 'deepseek-
 
 /**
  * 启动入口：检测换纪元 → 落账本 → 预热变化过的泳道。
- * 全程只读+一次最小预热；任何一步失败都不抛（启动不该被观测功能拖垮）。
+ * 每个泳道会检查**两种工具面**（全量面 / 轻量面）—— `light` 是按每条消息内容算的，
+ * 所以同一个泳道随时可能以两种前缀出现，只预热一种等于漏掉一半真实请求。
+ * 全程只读 + 每条变化的面各一次最小预热；任何一步失败都不抛（启动不该被观测功能拖垮）。
  * @returns {Promise<{checked:number, changed:Array, warm:Array}>}
  */
 export async function checkEpochAndWarm({ provider = 'deepseek', model = 'deepseek-v4-flash', lanes = null } = {}) {
@@ -124,24 +134,27 @@ export async function checkEpochAndWarm({ provider = 'deepseek', model = 'deepse
   let list = lanes;
   if (!list) { try { list = await lanesInUse(); } catch { list = [{ permission: 'read', preset: 'all' }]; } }
   for (const lane of list) {
-    try {
-      const e = laneEpoch(lane.permission, lane.preset);
-      const prev = await readPrev(e.lane);
-      out.checked++;
-      if (isEpochChange(prev, e.key)) {
-        out.changed.push({ lane: e.lane, prev, cur: e.key, sysHash: e.sysHash, toolsHash: e.toolsHash, nTools: e.defs.length });
-        console.warn('[epoch] 换纪元：' + e.lane + ' ' + prev + ' → ' + e.key
-          + '（工具面 ' + e.defs.length + ' 个；前缀面变了 ⇒ 所有会话下次请求要整段重建；已发一次预热，别让真实用户承担这笔钱）');
-        // 账本里带上工具数：MCP 是 `npx -y` 拉的（工具清单随外部包版本漂移），"工具数变了"是最常见的一种换纪元
-        db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-          [null, 'prefix:epoch-change', `lane=${e.lane} ${prev}→${e.key} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length}`]).catch(() => {});
+    for (const face of FACES) {
+      try {
+        const e = laneEpoch(lane.permission, lane.preset, face.light);
+        const prev = await readPrev(e.lane);
+        out.checked++;
+        if (isEpochChange(prev, e.key)) {
+          out.changed.push({ lane: e.lane, prev, cur: e.key, sysHash: e.sysHash, toolsHash: e.toolsHash, nTools: e.defs.length });
+          console.warn('[epoch] 换纪元：' + e.lane + '（' + face.name + '，工具 ' + e.defs.length + ' 个）' + prev + ' → ' + e.key
+            + '　前缀面变了 ⇒ 该面前缀作废；已发一次预热，别让真实用户承担这笔重建');
+          // 账本里带上工具数与面名：MCP 是 `npx -y` 拉的（工具清单随外部包版本漂移），
+          // 而轻量面/全量面会随会话消息内容切换 —— 这两件事都是"换纪元"的常见来源。
+          db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+            [null, 'prefix:epoch-change', `lane=${e.lane} face=${face.name} ${prev}→${e.key} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length}`]).catch(() => {});
+        }
+        await writePrev(e.lane, e.key);
+        if (isEpochChange(prev, e.key)) out.warm.push(await warmLane({ permission: lane.permission, preset: lane.preset, light: face.light }, { provider, model }));
+      } catch (err) {
+        console.warn('[epoch] 检查失败 lane=' + JSON.stringify(lane) + ' light=' + face.light + '：' + String((err && err.message) || err).slice(0, 160));
       }
-      await writePrev(e.lane, e.key);
-      if (isEpochChange(prev, e.key)) out.warm.push(await warmLane(lane, { provider, model }));
-    } catch (err) {
-      console.warn('[epoch] 检查失败 lane=' + JSON.stringify(lane) + '：' + String((err && err.message) || err).slice(0, 160));
     }
   }
-  if (!out.changed.length) console.log('[epoch] 前缀面无变化（已核对 ' + out.checked + ' 条泳道，未产生任何调用）');
+  if (!out.changed.length) console.log('[epoch] 前缀面无变化（已核对 ' + out.checked + ' 条泳道×面，未产生任何调用）');
   return out;
 }

@@ -45,10 +45,12 @@ test('拼接不歧义：("ab","c") 与 ("a","bc") 必须给出不同纪元键', 
   assert.notEqual(epochKey('ab', 'c'), epochKey('a', 'bc'));
 });
 
-test('泳道标签：permission 或 preset 不同即为不同泳道（身份层随 permission 变）', () => {
+test('泳道标签：permission / preset / light 任一不同即为不同泳道（=不同前缀）', () => {
   assert.equal(laneKey('read', 'all'), 'read/all');
   assert.notEqual(laneKey('read', 'all'), laneKey('full', 'all'));
   assert.notEqual(laneKey('read', 'all'), laneKey('read', 'minimal'));
+  assert.equal(laneKey('read', 'all', true), 'read/all#light');
+  assert.notEqual(laneKey('read', 'all'), laneKey('read', 'all', true), '轻量面与全量面是两条不同前缀');
   assert.equal(laneKey(), 'full/all'); // 缺省即默认泳道
 });
 
@@ -65,13 +67,18 @@ test('回归：既有 diffCore/isUnexpectedBreak 语义未被本次改动破坏'
 });
 
 test('确定性（真实泳道）：连续两次算出同一纪元键 —— 前缀面只要有非确定性，每次请求都会是冷的', async () => {
-  const { laneEpoch } = await import('../server/epoch.js');
-  const a = laneEpoch('read', 'all');
-  const b = laneEpoch('read', 'all');
-  assert.equal(a.key, b.key);
-  assert.equal(a.sysHash, b.sysHash);
-  assert.equal(a.toolsHash, b.toolsHash);
-  assert.ok(a.defs.length > 0, '工具面不能为空（空工具面 = 前缀与真实请求完全对不上）');
+  const { laneEpoch, FACES } = await import('../server/epoch.js');
+  for (const light of [false, true]) {
+    const a = laneEpoch('read', 'all', light);
+    const b = laneEpoch('read', 'all', light);
+    assert.equal(a.key, b.key);
+    assert.equal(a.sysHash, b.sysHash);
+    assert.equal(a.toolsHash, b.toolsHash);
+    assert.ok(a.defs.length > 0, '工具面不能为空（空工具面 = 前缀与真实请求完全对不上）');
+  }
+  // 两种工具面必须是两条不同前缀（light 会随消息内容翻转，漏掉一面就漏掉一半真实请求）
+  assert.notEqual(laneEpoch('read', 'all', false).key, laneEpoch('read', 'all', true).key);
   // 不同 permission 必须是不同泳道（身份层随 permission 变）
   assert.notEqual(laneEpoch('read', 'all').key, laneEpoch('full', 'all').key);
+  assert.equal(FACES.length, 2, '工具面有且只有两种：全量面 / 轻量面（多一种就要同步改 agent.js 的 defs 表达式）');
 });

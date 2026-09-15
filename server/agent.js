@@ -231,6 +231,13 @@ export const ENV_MAP = [ENV_IDENTITY('full'), ENV_ENV, ENV_DISCIPLINE].join('\n\
 // 否则预热出来的前缀跟真实请求对不上，等于白花钱（2026-09-15 M1/M2 落地）。
 export const buildEnvFor = (permission = 'full') => [ENV_IDENTITY(permission), ENV_ENV, ENV_DISCIPLINE].join('\n\n');
 
+// 轻量工具面（纯问答走这个）的**单一拼装出口**，同样必须与预热逐字节一致。
+// ⚠️ 2026-09-15 实测：`light` 是按**每条消息内容**算的（`index.js`: `const light = !needsTools(content)`），
+//    所以同一个会话在"闲聊"与"干活"之间切换时，工具面会在**轻量面 / 全量面之间来回翻**；
+//    而工具面是前缀的一部分 —— 一翻，整段前缀就作废。落库的前缀指纹当场把这件事显示出来：
+//    同一会话两轮出现**两种不同的 tools 指纹**、输入从 10,735 掉到 5,130。见方案文档 §4-M2。
+export const lightDefs = () => toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name));
+
 // 每轮工具结果后的"目标完成度评估"提示（引导模型干完才停，避免过早收手）
 const COMPLETION_HINT = [
   '以上是工具执行结果。请评估用户目标是否已真正完成：',
@@ -390,7 +397,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
   // P1 统一通道：轻量模式（普通问答/无明确任务词）→ 只暴露 LIGHT_TOOLSET 只读工具（模型可零工具直接答，也可单轮只读查询）；
   // 任务模式 → 全量工具（启用集内）。删 needsTools 双路径后，问答与任务走同一执行循环，结构性消除"无工具路径假开始"。
   const defs = ctx.__light
-    ? toolDefs('all', null).filter((t) => LIGHT_TOOLSET.includes(t.function.name)) // 全量取 defs 后按白名单裁（排除 reload 等豁免工具）
+    ? lightDefs() // 轻量面：单一拼装出口，见 lightDefs 注释（预热/指纹都要与这里逐字节一致）
     : toolDefs(ctx.preset, narrowEnabled(ctx.__enabledTools, ctx.__subTools), ctx.__shellSchema); // A2：壳 schema 裁剪（presetBase/forceOn/forceOff/按壳 MCP）；RA-12：叠加子代理白名单（只能更窄）
   const toolsHash = createHash('sha256').update(JSON.stringify(defs)).digest('hex').slice(0, 12);
   // RA-12 取证出口：收窄后的实际工具清单只入日志（不落库、不改行为）——夹具与运维都能从 journalctl 核证

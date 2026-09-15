@@ -41,8 +41,11 @@ export const prefixHash = (text) => createHash('sha256').update(String(text == n
  */
 export const epochKey = (envText, toolsHash) => prefixHash(String(envText || '') + '\u0000' + String(toolsHash || ''));
 
-/** 泳道标签：同一份代码在不同 (permission, preset) 下是**不同的前缀**（身份层随 permission 变），必须分泳道记。 */
-export const laneKey = (permission, preset) => String(permission || 'full') + '/' + String(preset || 'all');
+/** 泳道标签：同一份代码在不同 (permission, preset) 下是**不同的前缀**（身份层随 permission 变）。
+ *  第三个轴 light 也不能漏：`light` 是按每条消息内容算的，工具面会在轻量面/全量面之间翻，
+ *  两面是**两条不同的前缀**（实测同一会话两轮：输入 10,735（全量面）vs 5,130（轻量面））。 */
+export const laneKey = (permission, preset, light = false) =>
+  String(permission || 'full') + '/' + String(preset || 'all') + (light ? '#light' : '');
 
 /**
  * 纪元是否变了。`prev` 为空 = 首次记录（不是变更，不报警）；任一为空串 = 数据不可用，按"不变"处理。
