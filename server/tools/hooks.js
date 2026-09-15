@@ -278,29 +278,27 @@ registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
   return {};
 }, { builtin: true, failure: 'open' });
 
-// 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
-//    2026-09-15（对齐 DSH `dsh-tool-bash`）：**换目录这件事改成改写，不再拦截**。
-//    DSH 给 bash 工具一个 `workdir` 参数，描述里明说 "pass `workdir` instead of using `cd`" —— 模型因此
-//    根本不必写 cd，也就没有"被拦"这回事；而 DSH 全库**没有任何**"别用 shell，去用专门工具"的预拦钩子
-//    （全量扫描只命中它的 bash/pwsh 描述里那一句 workdir 提示）。我们此前缺这个参数，模型只能写 cd，
-//    于是近 14 天 65 次纪律拦截里 **40 次是 cd**（真库实测）——每次都在白花一轮。
-//    只认最保险的形态：命令以 `cd <简单目录> &&` 开头、目录里没有 shell 元字符；其余形态照旧拦
-//    （猜不准的东西不改写）。改写过之后**仍然按改写后的命令判纪律**，否则 `cd . && grep x` 就成了绕过口。
-registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
-  let cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+// 6. 换目录规范化：把 `cd <简单目录> && 其余` 改写成 {cwd, cmd}（2026-09-15）
+//
+// 这条钩子的历史：原来叫 `shell_readonly_guard`，用一张黑名单（cat|ls|grep|find|sed|head|cd|echo）
+// **拦下**读型 shell 命令，理由是"省 token"。2026-09-15 拍板**去掉黑名单**，只留换目录改写，依据三条：
+//   ① DSH 全库没有任何"别用 shell，去用专门工具"的预拦钩子——它的边界是**沙箱**（真实能力边界），
+//      省 token 靠**输出层**（spill/截断）；② 我们**已经有**同一套输出层机制（runCmd 8000 字符截断 +
+//      spillToolResult 大结果落盘 + result_bytes 遥测），再用"拦掉一整轮"去做同一件事，是拿更差的手段
+//      重复实现；③ 黑名单不是能力边界，是自己发明的风格规则——而"模型想用 shell"本身没有错。
+// 保留意图但不花轮次：run_command 命中读型别名时在**结果里**附一行提示（模型照样看得见，不必重来一轮）。
+// 换目录改写则保留：`cd X && …` 与 cwd=X 语义等价，改掉它比让模型重写一遍便宜得多（实测 14 天 40 次 cd 被拦）。
+registerHook('before', 'run_command', 'shell_cd_normalizer', ({ args }) => {
+  const cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+  if (!args || args.cwd !== undefined) return {}; // 模型自己给了 cwd 就尊重它，不猜它想用哪个
+  // 只认最保险的形态：cd 在开头、目录里没有 shell 元字符。猜不准的形态一律不动（照原样执行）。
   const m = /^cd\s+([A-Za-z0-9_./~-]+)\s*&&\s*(\S[\s\S]*)$/.exec(cmdline);
-  const moved = (m && args && args.cwd === undefined) ? { cwd: m[1], cmd: m[2] } : null;
-  if (moved) cmdline = moved.cmd; // 第二遍判纪律用改写后的命令
-  const first = cmdline.split(/\s+/)[0];
-  const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
-  if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
-    const hint = first !== 'cd' ? ''
-      : (args && args.cwd !== undefined
-        ? '已提供 cwd 参数时命令里不要再写 cd（两者会打架）——请去掉 cd。'
-        : '换目录请用 cwd 参数（每次调用都是新 shell，cd 不保留）。');
-    return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。${hint}` };
-  }
-  return moved ? { args: { ...args, ...moved } } : {};
+  if (!m) return {};
+  const rest = m[2].trim();
+  // 只处理**一层**：若剩下的还以 cd 开头（`cd a && cd b && …`），不改写——run_command 是 execFile 直调
+  // （不过 shell），`cd` 是 shell 内建、不是可执行文件，改写后剩下的那个 cd 会在运行期 ENOENT。
+  if (/^cd(\s|$)/.test(rest)) return {};
+  return { args: { ...args, cwd: m[1], cmd: rest } };
 }, { builtin: true, failure: 'open', rewritesArgs: true });
 
 // A5 硬闸门（§8.6 关键流程技能）：开发需求采集必须走 intake 流程——

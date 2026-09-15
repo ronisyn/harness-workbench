@@ -410,7 +410,11 @@ const RAW_TOOLS = [
       const want = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
       const t = ctx.__deadline ? Math.min(want, Math.max(1, ctx.__deadline - Date.now())) : want;
       const r = await runCmd(cmd, args, { cwd: dir }, t);
-      return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code, cwd: dir };
+      // 读型别名不再拦截（2026-09-15 决定，见 hooks.js 第 6 条），改成**结果里附一行提示**：
+      // 模型照样看得见建议，但不必为一个写法白花一整轮。只在命中时出现，不占常驻前缀。
+      const head = String(a.cmd).trim().split(/\s+/)[0];
+      const readLike = /^(cat|ls|grep|find|sed|head|tail|wc|awk)$/.test(head) && !(head === 'sed' && /\s-i\b/.test(String(a.cmd)));
+      return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code, cwd: dir, ...(readLike ? { hint: '这条命令有专门工具，输出更省且带行号可导航：读文件 read_file / read_file_range、列目录 list_dir、搜内容 grep_search、找文件 find_file。本次已照常执行。' } : {}) };
     } },
   { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },

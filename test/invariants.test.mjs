@@ -59,7 +59,7 @@ test('② 安全网钩子声明 fail-closed；纪律钩子声明 fail-open（语
     assert.ok(closed.includes(must), must + ' 是安全网，必须 fail-closed（被改成放行＝门禁失效）');
   }
   const open = builtin.filter((x) => x.failure === 'open').map((x) => x.name);
-  for (const guide of ['preset_tier_guard', 'enabled_tools_guard', 'readonly_intent_guard', 'shell_readonly_guard']) {
+  for (const guide of ['preset_tier_guard', 'enabled_tools_guard', 'readonly_intent_guard', 'shell_cd_normalizer']) {
     assert.ok(open.includes(guide), guide + ' 是纪律引导，按设计 fail-open');
   }
 });
