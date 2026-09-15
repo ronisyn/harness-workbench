@@ -110,6 +110,13 @@ export async function executeScheduledTask(task) {
 
 // 主调度循环：每分钟检查（到期任务并发上限 2，防停机积压并发风暴；未执行的下轮补）
 let schedulerRunning = 0;
+// 在跑任务集（2026-09-15 修）：`due` 是**查询那一刻**的快照，其 next_run 是旧值。
+// 若任务执行超过一分钟，下一轮扫描拿到的还是同一个旧 next_run → 同一个任务被**再排一次**。
+// 2026-09-09 那次修复只挡住了"同一分钟内并发双跑"（钳制推进量 ≥ 当前+60s），
+// 但"执行时长 > 60s"的**顺序双跑**仍会发生——实测证据：task_history 里 #4 在 8/11 天各跑两次
+// （如 09-15 05:00:49 与 05:01:49），#3 两次运行也都是双跑。真实浪费。
+const inFlight = new Set();
+export function isTaskInFlight(id) { return inFlight.has(Number(id)); }
 export function startScheduler() {
   setInterval(async () => {
     try {
@@ -117,17 +124,24 @@ export function startScheduler() {
       const due = await db.query('SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run <= NOW()');
       for (const t of due) {
         if (schedulerRunning >= 2) break;
+        if (inFlight.has(t.id)) { console.log(`[scheduler] 任务 ${t.id} 仍在执行中，跳过本轮（防双跑）`); continue; }
         // 防重入：先把 next_run 推后，避免并发重复执行
-        // 2026-09-09 主会话修复：cronToNext 在 cron 分钟（如 05:00:xx）内被调用时返回"当前已过/当前"时刻
-        // （循环从 from+0 开始且不强制未来），导致 next_run 推进后仍 <= NOW → 下一轮 60s 检查再次入队 →
-        // 同一任务并发双实例（conv185 实证：09-05/09-07/09-09 均出现双 message 对）。钳制：推进值必须 ≥ 当前+60s。
+        // 2026-09-09 修复：cronToNext 在 cron 分钟（如 05:00:xx）内被调用时返回"当前已过/当前"时刻
+        // （循环从 from+0 开始且不强制未来），导致 next_run 推进后仍 <= NOW → 下一轮 60s 检查再次入队。
+        // 钳制：推进值必须 ≥ 当前+60s。
+        // 2026-09-15 补：推进值必须**真正跨过本次排程点**，且据"已决定的推进值"计算下一轮，
+        // 而不是再据 now 算一次（否则仍会落回本分钟）。两者合起来才保证"一次排程只跑一次"。
         let next = cronToNext(t.cron);
         if (!next || next.getTime() <= Date.now() + 60000) next = new Date(Date.now() + 60000);
+        const anchor = new Date(Math.max(next.getTime(), Date.now() + 60000));
+        const nextAfterAnchor = cronToNext(t.cron, new Date(anchor.getTime() + 60000));
+        next = nextAfterAnchor && nextAfterAnchor.getTime() > anchor.getTime() ? nextAfterAnchor : anchor;
         await db.query('UPDATE scheduled_tasks SET next_run=? WHERE id=?', [next, t.id]);
         schedulerRunning += 1;
+        inFlight.add(t.id);
         executeScheduledTask(t)
           .catch((e) => console.error('[scheduler] 执行异常:', e.message))
-          .finally(() => { schedulerRunning = Math.max(0, schedulerRunning - 1); });
+          .finally(() => { schedulerRunning = Math.max(0, schedulerRunning - 1); inFlight.delete(t.id); });
       }
     } catch (e) { /* 调度循环容错 */ }
   }, 60000);
