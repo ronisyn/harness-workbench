@@ -88,6 +88,14 @@ function lastUserTextOf(msgs) {
 // 细节库内 tool_calls.args 存前 2000 字符（tool_call_id 可 db_query 查），完整以实际产物/日志为准）。执行与落库仍用原始 calls，仅上下文体积变小。
 const SLIM_ARG_LEN = 600;  // arguments 总长超过此值才瘦身（短参数原样保留，如 read_file 路径）
 const SLIM_VAL_LEN = 200;  // 单个字段值超过此长度截断（典型：write_file/append_file 的 content、edit_file 的 new）
+// 折叠"保留最近 N 条"的下限：低于它，每轮折叠都会把工作集（本轮任务与近期工具结果）一并折掉，
+// 会话失忆后重复探索、无法收敛（步5 实测 keep=1：58 轮 / 112 次工具调用仍未收敛）。
+const COLLAPSE_KEEP_MIN = 10;
+function clampCollapseKeep(v) {
+  if (!Number.isFinite(v) || v >= COLLAPSE_KEEP_MIN) return v;
+  console.warn('[limits] collapse_keep_msgs=' + v + ' 低于下限 ' + COLLAPSE_KEEP_MIN + '，已按下限生效（过小会让会话反复失忆、无法收敛）');
+  return COLLAPSE_KEEP_MIN;
+}
 function slimToolCallForContext(call) {
   const name = call.function?.name || 'tool';
   const raw = String(call.function?.arguments ?? '');
@@ -130,7 +138,9 @@ async function agentLimits() {
       fakeContinueWarn: pick('fake_continue_warn', def.fakeContinueWarn),
       // F3 折叠阈值（0=默认现值）；F4 连续失败（默认 3，0=关）
       collapseGap: pick('collapse_min_gap', 0) || 20,
-      collapseKeep: pick('collapse_keep_msgs', 0) || 80,
+      // 保留条数有下限（COLLAPSE_KEEP_MIN）：实测 keep=1 时每轮都把工作集折叠掉，
+      // 会话彻底失忆 → 58 轮 / 112 次工具调用仍不收敛（步5 实测，见归档 §20）。配置低于下限如实告警并按下限生效。
+      collapseKeep: clampCollapseKeep(pick('collapse_keep_msgs', 0) || 80),
       collapseChars: pick('collapse_trigger_chars', 0) || 30000,
       collapseInput: pick('collapse_input_chars', 0) || 18000,
       // F4 连续失败：schema hint=0 关闭，须与"无行缺省 3"区分（0||3 会把显式 0 变 3——修复）
