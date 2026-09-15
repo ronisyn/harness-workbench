@@ -36,6 +36,25 @@ function ensureServer(id) {
   return cl;
 }
 
+// tools/list 全量拉取（2026-09-15，OP-18）：原来只取第一页 ⇒ 工具数超过一页的 server 会被**静默截断**
+// （模型看不见后面的工具，且没有任何提示）。照 DSH `dsh-mcp-client` 的分页纪律：跟随 nextCursor 取完，
+// 并对"重复游标"直接抛错（服务端分页坏了就该如实失败，而不是死循环或悄悄少给工具）。
+async function listAllTools(cl) {
+  const out = [];
+  const seenCursors = new Set();
+  let cursor;
+  do {
+    const r = await rpc(cl, 'tools/list', cursor ? { cursor } : {});
+    for (const t of (r && r.tools) || []) out.push(t);
+    cursor = r && r.nextCursor;
+    if (cursor) {
+      if (seenCursors.has(cursor)) throw new Error('MCP server 重复返回 tools/list 游标（无效分页）：' + String(cursor).slice(0, 40));
+      seenCursors.add(cursor);
+    }
+  } while (cursor);
+  return out;
+}
+
 // 连接（spawn 子进程 + 初始化握手 + tools/list）
 export async function connectMcp(id, command, args = [], env = {}) {
   if (clients.has(id)) return { ok: true, note: '已连接' };
@@ -67,8 +86,8 @@ export async function connectMcp(id, command, args = [], env = {}) {
   // 握手
   const init = await rpc(cl, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'rw', version: '1' } });
   await rpc(cl, 'notifications/initialized', {});
-  const t = await rpc(cl, 'tools/list', {});
-  cl.tools = (t && t.tools) || [];
+  const t = await listAllTools(cl);
+  cl.tools = t;
   return { ok: true, serverId: id, tools: cl.tools.map((x) => x.name), init: init && init.serverInfo };
 }
 
@@ -78,7 +97,7 @@ export function disconnectMcp(id) {
 }
 
 export function listMcpClients() {
-  // 返回含完整工具定义（name/description/inputSchema）——syncMcpExtras 需 schema 生成 function calling 描述
+  // 返回含完整工具定义（name/description/inputSchema）——syncMcpTools 需 schema 生成 function calling 描述并注册进统一工具表
   return [...clients.entries()].map(([id, cl]) => ({ id, tools: cl.tools }));
 }
 

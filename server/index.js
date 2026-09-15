@@ -1574,11 +1574,11 @@ app.get('/api/mcp', requireAuth, async (req, res) => {
 app.post('/api/mcp/reload', requireAuth, async (req, res) => {
   try {
     const mcp = await import('./mcp.js');
-    const { syncMcpExtras } = await import('./tools/index.js');
+    const { syncMcpTools } = await import('./tools/index.js');
     // 断开全部 → 按配置重连
     for (const c of mcp.listMcpClients()) { try { mcp.disconnectMcp(c.id); } catch { /* ignore */ } }
     const r = await mcp.connectConfiguredMcps();
-    const n = syncMcpExtras(mcp.listMcpClients());
+    const n = syncMcpTools(mcp.listMcpClients());
     res.json({ ok: true, results: r, registeredTools: n });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2607,16 +2607,16 @@ async function main() {
   (async () => {
     try {
       const mcp = await import('./mcp.js');
-      const { syncMcpExtras } = await import('./tools/index.js');
+      const { syncMcpTools } = await import('./tools/index.js');
       const r = await mcp.connectConfiguredMcps();
       const clients = mcp.listMcpClients();
-      const n = syncMcpExtras(clients);
+      const n = syncMcpTools(clients);
       console.log('[mcp] 连接结果: ' + JSON.stringify(r) + ' → 注册 MCP 工具 ' + n + ' 个');
     } catch (e) { console.error('[mcp] 启动连接失败(可稍后配置 mcp_servers):', e.message); }
   })().finally(() => {
     // M2 换纪元检测 + 一次预热（2026-09-15）：前缀面（系统提示 + 工具面）变了 ⇒ 所有会话的下一次请求
     // 都要整段重建那 ~10.5k 公共前缀。这里在启动后**主动付掉这一笔**，而不是让接下来第一个真实用户/定时任务承担。
-    // ⚠️ 必须排在上面的 MCP 连接**之后**：`toolDefs` 的输出含 `syncMcpExtras` 填进去的 `mcp_*` 工具，
+    // ⚠️ 必须排在上面的 MCP 连接**之后**：`toolDefs` 的输出含已注册进同一注册表的 `mcp_*` 工具（syncMcpTools），
     //    早跑会算出一个与真实请求**不一致**的工具面指纹 —— 那样既预热错前缀，又会在下次启动误报"换纪元"。
     // 异步 fire-and-forget：不阻塞 listen；无变化时**零调用**（只读 settings 比对指纹）。
     setTimeout(() => { checkEpochAndWarm().catch((e) => console.warn('[epoch] 启动检查异常:', e.message)); }, 2000).unref?.();
@@ -2626,14 +2626,14 @@ async function main() {
   const mcpWatchdog = setInterval(async () => {
     try {
       const mcp = await import('./mcp.js');
-      const { syncMcpExtras } = await import('./tools/index.js');
+      const { syncMcpTools } = await import('./tools/index.js');
       const cfg = await getSetting('mcp_servers', []);
       if (!Array.isArray(cfg) || cfg.length === 0) return;
       const connected = mcp.listMcpClients();
       const missing = cfg.filter((s) => s && s.id && !connected.some((c) => c.id === s.id));
       if (missing.length === 0) return;
       const r = await mcp.connectConfiguredMcps(); // 已连接的自动跳过（connectMcp 幂等）
-      const n = syncMcpExtras(mcp.listMcpClients());
+      const n = syncMcpTools(mcp.listMcpClients());
       console.log('[mcp] 看门狗重连 ' + missing.map((s) => s.id).join(',') + ' → ' + JSON.stringify(r) + ' 注册工具 ' + n);
     } catch (e) { console.error('[mcp] 看门狗失败:', e.message); }
   }, 60000);

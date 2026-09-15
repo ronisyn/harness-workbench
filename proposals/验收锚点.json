@@ -556,9 +556,31 @@
       "id": "OP-18",
       "title": "MCP 工具合流进同一注册表",
       "owner": "agent",
-      "kind": "manual",
+      "kind": "auto",
       "evidence": "grep -n syncMcpExtras server/tools/index.js（现状=拼接而非统一装载器）",
-      "note": "热装载已通；五类来源统一装载器未做"
+      "note": "**2026-09-15 落地（统一装载器）**：外部来源（MCP）的工具不再另立一张表（原 `MCP_EXTRA` + execTool 里按名字模式现造的伪工具），改为注册进**同一个 TOOLS**——同一套条目校验（重名/缺描述/缺 run/缺权限/界限非法一律拒绝整批）、同一个工具面（`toolDefs` 一条路径）、同一个执行口（`execTool` 一次查表）。照 DSH `dsh-mcp-client` 的三条注册纪律：一个失败就回滚整批（保留上一代）、server 列出重名工具直接抛错（不再靠网关静默去重兜底）、`tools/list` 跟随 nextCursor 分页（原来只取第一页＝工具多于一页时**静默截断**）。仍有意保留：MCP 工具不受档位/启用集裁剪（由管理员在壳上按 server 装载）；server 挂掉时工具面**保持不动**（前缀稳定优先），调用时如实报\"未连接\"。",
+      "anchors": [
+        {
+          "file": "server/tools/registry.js",
+          "pattern": "export function registerDynamicTools"
+        },
+        {
+          "file": "server/tools/registry.js",
+          "pattern": "export function combine"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "export function syncMcpTools"
+        },
+        {
+          "file": "server/mcp.js",
+          "pattern": "async function listAllTools"
+        },
+        {
+          "file": "test/mcp-registry.test.mjs",
+          "pattern": "注册后进同一个 TOOLS"
+        }
+      ]
     },
     {
       "id": "§4.4.1-规则5",

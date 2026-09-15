@@ -53,12 +53,20 @@ export function registerToolSource(tools, rebuild) {
   onRebuild = rebuild || null;
 }
 
-/**
- * 装载实现：清单 × 实现 → 运行时工具表（顺序沿用实现声明顺序）。
- * @returns {Array} 通过校验、且**在清单里的**工具
- */
-export function assembleTools(tools) {
-  const list = tools || rawTools;
+// ---------------------------------------------------------------------------
+// 动态来源（2026-09-15，OP-18「统一装载器」）
+// 为什么要有它：MCP 等**外部**工具的名字由对方的 tools/list 决定，无法在静态清单里声明，
+// 于是此前它们是"另一张表"——`MCP_EXTRA`（给模型的 function defs）+ execTool 里按名字模式**现造**的
+// 伪工具 + 按壳白名单的第三处判断。同一个工具三处表述，后果是：装配期校验（重名/缺描述/缺 run/缺权限）
+// 一律不覆盖它们；工具界限表看不见它们；重名只能等厂商返回 400 后再由网关**静默去重**（症状补丁）。
+// DSH 的做法（`dsh-mcp-client`）是**注册进同一个 tools 注册表**：`ctx.tools.register(definition)`，
+// 一个注册失败就回滚整批（不留半代）、server 列出重名工具直接抛错、tools/list 跟随 nextCursor 分页。
+// 这里照做那三条；差别只有一点：动态条目**不参与静态清单校验**（清单是静态权威），但**必须过同一套
+// 条目校验**——外部工具不许绕过平台契约。
+const dynamicSources = new Map(); // sourceId -> entries[]
+
+/** 条目级校验（静态与动态共用；返回问题清单，不抛） */
+function entryProblems(list) {
   const problems = [];
   const seen = new Set();
   for (const t of list || []) {
@@ -68,7 +76,71 @@ export function assembleTools(tools) {
     if (typeof t.run !== 'function') problems.push('工具缺少 run 实现：' + t.name);
     if (!t.description) problems.push('工具缺少 description（模型选择依据）：' + t.name);
     if (!t.permission) problems.push('工具缺少 permission：' + t.name);
+    if (t.timeoutMs !== undefined && !(Number.isFinite(Number(t.timeoutMs)) && Number(t.timeoutMs) > 0)) {
+      problems.push('工具界限非法（timeoutMs 必须是正有限数，未声明就不要写）：' + t.name);
+    }
   }
+  return problems;
+}
+
+/** 当前全部动态条目（按来源 id 排序，保证工具面顺序稳定——顺序变了就是前缀变了） */
+export function dynamicEntries() {
+  const out = [];
+  for (const id of [...dynamicSources.keys()].sort()) out.push(...dynamicSources.get(id));
+  return out;
+}
+
+/** 动态来源 id 列表（审计/自检用） */
+export function dynamicSourceIds() { return [...dynamicSources.keys()].sort(); }
+
+/**
+ * 注册/替换一个动态来源（全有或全无）。
+ * 校验不通过**不替换**上一代（保留现有工具面），并返回原因——与热重载失败即回滚同口径。
+ * @returns {{ok: boolean, count?: number, error?: string}}
+ */
+export function registerDynamicTools(sourceId, entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const problems = entryProblems(list);
+  // 与静态工具、其它动态来源交叉查重：重名会让厂商直接 400（"Tool names must be unique"），
+  // 必须在装配期拦下——而不是等网关静默去重、模型看不见其中一个却不知为什么。
+  const taken = new Map();
+  // 静态侧只算**真正装载**的名字（在清单里的），与 assembleStatic 的返回一致——但不再重复校验/打日志
+  for (const t of rawTools || []) if (t && t.name && MANIFEST_NAMES.includes(t.name)) taken.set(t.name, '内置工具');
+  for (const [id, arr] of dynamicSources) {
+    if (id === sourceId) continue;
+    for (const t of arr) taken.set(t.name, '动态来源 ' + id);
+  }
+  for (const t of list) if (t && t.name && taken.has(t.name)) problems.push('工具重名：' + t.name + '（已由' + taken.get(t.name) + '占用）');
+  if (problems.length) {
+    console.warn('[registry] 动态来源 ' + sourceId + ' 注册被拒绝（保留上一代工具面）：\n  - ' + problems.join('\n  - '));
+    return { ok: false, error: problems.join('；') };
+  }
+  dynamicSources.set(sourceId, list);
+  rebuild();
+  return { ok: true, count: list.length };
+}
+
+/** 移除一个动态来源（其工具立刻从工具面消失） */
+export function unregisterDynamicTools(sourceId) {
+  if (!dynamicSources.delete(sourceId)) return false;
+  rebuild();
+  return true;
+}
+
+function rebuild() {
+  if (onRebuild) onRebuild(combine());
+}
+
+/** 静态（清单内）× 动态（外部来源）→ 最终工具面 */
+export function combine() {
+  return assembleStatic(rawTools).concat(dynamicEntries());
+}
+
+/** 静态部分：清单 × 实现（默认拒绝未进清单者） */
+export function assembleStatic(tools) {
+  const list = tools || rawTools;
+  const problems = entryProblems(list);
+  const seen = new Set((list || []).map((t) => t && t.name).filter(Boolean));
   for (const n of MANIFEST_NAMES) if (!seen.has(n)) problems.push('清单声明了不存在的工具（无实现）：' + n);
   if (problems.length) throw new Error('[registry] 工具装载失败（清单与实现不一致）：\n  - ' + problems.join('\n  - '));
 
@@ -78,6 +150,14 @@ export function assembleTools(tools) {
   if (disabled.length) console.log('[registry] 清单标注 enabled:false，未装载：' + disabled.join(', '));
 
   return (list || []).filter((t) => MANIFEST_NAMES.includes(t.name));
+}
+
+/**
+ * 装载实现：清单 × 实现 → 运行时工具表（顺序沿用实现声明顺序）。
+ * @returns {Array} 通过校验、且**在清单里的**工具
+ */
+export function assembleTools(tools) {
+  return assembleStatic(tools);
 }
 
 /**
@@ -99,7 +179,7 @@ export async function reloadManifest() {
   try {
     refillDerived(next);
     activeManifest = next;
-    const tools = assembleTools(rawTools);
+    const tools = combine(); // 静态 × 动态：热重载清单不得把动态来源（MCP）挤掉
     if (onRebuild) onRebuild(tools);
     console.warn('[registry] 热重载完成：工具面 ' + before + ' → ' + MANIFEST_NAMES.length + ' 个（无需重启）');
     return { ok: true, before, after: MANIFEST_NAMES.length };
@@ -107,7 +187,7 @@ export async function reloadManifest() {
     // 回滚到旧清单，保证"重载失败不破坏在跑的工具面"
     activeManifest = prevManifest;
     refillDerived(prevManifest);
-    if (onRebuild) onRebuild(assembleTools(rawTools));
+    if (onRebuild) onRebuild(combine());
     console.warn('[registry] 热重载被拒绝（新清单与实现不一致），已回滚旧清单：' + (e && e.message ? e.message : e));
     return { ok: false, error: String((e && e.message) || e) };
   }

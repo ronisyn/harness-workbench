@@ -60,7 +60,7 @@ const P = {
   cmdGuard: 'danger_command_guard',
   enforcement: 'enforcement',
   spillCleanup: 'SPILL_DIR',
-  hotReload: 'reloadManifest|syncMcpExtras',
+  hotReload: 'reloadManifest|syncMcpTools',
   hookRewrite: 'hookNote|payload\\.args',
 };
 const ITEMS = [

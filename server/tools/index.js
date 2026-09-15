@@ -10,7 +10,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource } from './registry.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
 import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepServed, grepRepeatNotice, markWritten } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
@@ -1168,29 +1168,45 @@ export function checkPerm(tool, sessionPerm) {
 
 // 工具定义（给 LLM function calling 用；expose=all|standard|minimal 按 tier 过滤——只影响暴露不影响执行；
 // enabled=账号工具启用集 Set（5.3c），null=全部启用（驱动器等无人值守场景）；expert 平台豁免工具不受启用集限制）
-// P11 MCP 补充工具（2026-09 批5）：connectConfiguredMcps 后由 syncMcpExtras() 填充——
-// 每工具描述来自 MCP tools/list 的 inputSchema；暴露名 mcp_<serverId>_<toolName>，execTool 有 fallback 转发。
-const MCP_EXTRA = [];
-export function syncMcpExtras(clients) {
-  MCP_EXTRA.length = 0;
+// P11 MCP 外部工具（2026-09 批5；**2026-09-15 并入统一注册表，OP-18**）：
+// 原来这里是另一张表 `MCP_EXTRA`（只给模型看的 function defs）+ execTool 里按名字模式**现造**伪工具，
+// 同一工具两处表述 ⇒ 装配期校验/工具界限表都看不见它们，重名只能等厂商 400 后再由网关静默去重。
+// 现在它们与内置工具进**同一个 TOOLS**：同一套条目校验（重名/缺描述/缺 run/缺权限/界限非法一律拒绝整批）、
+// 同一个工具面（toolDefs 一条路径）、同一个执行口（execTool 一条路径）。照 DSH `dsh-mcp-client` 的注册纪律。
+const MCP_TIMEOUT_MS = 15000; // 与 mcp.js 的 JSON-RPC 响应等待同口径（外部 server 不可控，必须声明界限）
+export function syncMcpTools(clients) {
+  const entries = [];
   for (const cl of clients || []) {
+    const seen = new Set(); // DSH 同名纪律：同一个 server 列出重名工具 = 无效工具列表，直接拒绝整批
     for (const t of (cl.tools || [])) {
+      const wire = t && t.name;
+      if (!wire) continue;
+      const name = 'mcp_' + cl.id + '_' + wire;
+      if (seen.has(name)) throw new Error('MCP server ' + cl.id + ' 重复列出工具 ' + wire + '（无效工具列表）');
+      seen.add(name);
       const input = (t && t.inputSchema) || { type: 'object', properties: {} };
-      MCP_EXTRA.push({
-        type: 'function',
-        function: {
-          name: 'mcp_' + cl.id + '_' + t.name,
-          description: '[MCP:' + cl.id + '] ' + (t.description || t.name),
-          parameters: {
-            type: 'object',
-            properties: (input.properties || {}),
-            required: (input.required || []),
-          },
+      entries.push({
+        name,
+        description: '[MCP:' + cl.id + '] ' + (t.description || wire),
+        permission: 'write',       // MCP 外部副作用按 write 级评估（read 会话不可用；guard 会话可另配规则/审批）
+        timeoutMs: MCP_TIMEOUT_MS, // 界限声明在工具定义上（execTool 据此派生截止），不再是散落的私有字面量
+        mcpServer: cl.id,
+        rawTool: wire,
+        // 参数：MCP 自带 JSON Schema，原样透传给模型（平台内部契约 params 留空 ⇒ validateArgs 跳过，
+        // 与原来"跳过 MCP 参数校验"行为一致；但装配期必须看见这个条目）
+        rawParameters: { type: 'object', properties: (input.properties || {}), required: (input.required || []) },
+        params: {},
+        run: async (a) => {
+          const { callMcpTool } = await import('../mcp.js');
+          const r = await callMcpTool(cl.id, wire, a || {});
+          return { content: (r && r.content) || JSON.stringify(r || {}) };
         },
       });
     }
   }
-  return MCP_EXTRA.length;
+  const r = registerDynamicTools('mcp', entries);
+  if (!r.ok) throw new Error('MCP 工具注册被拒绝（工具面保持上一代）：' + r.error);
+  return entries.length;
 }
 
 export function toolDefs(expose = 'all', enabled = null, shell = null) {
@@ -1209,6 +1225,13 @@ export function toolDefs(expose = 'all', enabled = null, shell = null) {
   const allowTierHas = (n) => allowTier.includes(TOOL_META[n]?.tier || 'pro');
   const PKEYS = ['enum', 'items', 'min', 'max']; // 参数 schema 白名单透传（防任意键注入）
   const local = TOOLS.filter((t) => {
+    // 动态来源（MCP）：不进静态清单，故不参与档位/启用集过滤——由管理员在壳上按 server 显式装载
+    // （原 MCP_EXTRA 时代的同一口径，现在只在这一处表达）；壳未显式装载则维持全局 MCP 现状。
+    if (t.mcpServer) {
+      if (sOff.has(t.name)) return false;
+      if (mcpAllow && !mcpAllow.has(t.mcpServer)) return false;
+      return true;
+    }
     if (!allowTierHas(t.name) && !sOn.has(t.name)) return false;          // 档位 ∩ 壳档（forceOn 越级）
     if (sOff.has(t.name) && !PLATFORM_EXEMPT.includes(t.name)) return false; // forceOff 移除（豁免除外）
     if (enabled && !enabled.has(t.name) && !PLATFORM_EXEMPT.includes(t.name) && !sOn.has(t.name)) return false; // 启用集（forceOn 放开）
@@ -1224,7 +1247,8 @@ export function toolDefs(expose = 'all', enabled = null, shell = null) {
       function: {
         name: t.name,
         description,
-        parameters: {
+        // 外部工具（MCP）自带 JSON Schema → 原样透传；内置工具按其 params 契约生成（白名单透传防任意键注入）
+        parameters: t.rawParameters || {
           type: 'object',
           properties: Object.fromEntries(Object.entries(t.params).map(([k, v]) => {
             const p = { type: v.type, description: v.desc };
@@ -1236,14 +1260,7 @@ export function toolDefs(expose = 'all', enabled = null, shell = null) {
       },
     };
   });
-  let mcpDefs = MCP_EXTRA;
-  if (mcpAllow && MCP_EXTRA.length) {
-    mcpDefs = MCP_EXTRA.filter((d) => {
-      const m = /^mcp_([a-zA-Z0-9]+)_/.exec(d.function && d.function.name || '');
-      return m ? mcpAllow.has(m[1]) : false;
-    });
-  }
-  return local.concat(mcpDefs); // P11：拼接已连接 MCP server 的工具（expose 不限层级——MCP 工具由管理员配置信任）;
+  return local; // P11：已连接 MCP server 的工具已在 TOOLS 里（同一注册表），无需再拼接
 }
 
 // 执行工具并留痕
@@ -1274,37 +1291,18 @@ export async function execTool(name, args, ctx) {
   // （失败可见、模型可改用它法继续；throw 会逸出本函数 catch 并中断整轮）。
   const subRefusal = ctx && ctx.__subTools ? subtoolRefusal(ctx.__subTools, name) : null;
   if (subRefusal) return { error: subRefusal };
-  // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：不再在权限/纪律检查前提前返回——
-  // 合成工具元数据（permission=write 级评估），与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
-  // serverId 约定为字母数字（无下划线），工具名可含下划线——用非贪婪首段解析，避免 github_list_commits 被拆错。
-  let tool = null;
-  const mcpMatch = /^mcp_([a-zA-Z0-9]+)_(.+)$/.exec(name);
+  // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
+  // 2026-09-15（OP-18 统一装载器）：不再按名字模式**现造**伪工具——MCP 工具已在同一注册表里
+  // （syncMcpTools 注册，条目校验与内置工具同口径），这里就是一次普通查表。仅保留两处**策略**判断：
+  // 按壳 MCP 白名单（A2/A3）与壳级 force_off，且都从工具条目自己的字段读（不再解析名字）。
+  const tool = findTool(name);
+  if (!tool) throw new Error('未知工具: ' + name);
   // A2/A3 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝。
   // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw —— throw 会逸出 execTool 的 catch 并中断整轮
   // （与其它 hook 纪律拦截"失败可见、模型可改用它法继续"口径不一致），且导致该轮观测不落表。
-  if (mcpMatch && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow)) {
-    if (!ctx.__shellSchema.mcpAllow.includes(mcpMatch[1])) {
-      return { error: 'MCP server ' + mcpMatch[1] + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试，或改用本壳已装配的工具完成。' };
-    }
+  if (tool.mcpServer && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow) && !ctx.__shellSchema.mcpAllow.includes(tool.mcpServer)) {
+    return { error: 'MCP server ' + tool.mcpServer + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试，或改用本壳已装配的工具完成。' };
   }
-  if (mcpMatch) {
-    const srvId = mcpMatch[1], mcpTool = mcpMatch[2];
-    tool = {
-      name,
-      description: '[MCP:' + srvId + '] ' + mcpTool,
-      permission: 'write', // MCP 外部副作用按 write 级评估（read 会话不可用；guard 会话可另配规则/审批）
-      timeoutMs: 15000, // 与 mcp.js 的 JSON-RPC 响应等待同口径（外部 server 不可控，必须声明界限）
-      params: { __mcp: { type: 'object', desc: '透传参数（MCP server 定义）' } },
-      run: async (a) => {
-        const { callMcpTool } = await import('../mcp.js');
-        const r = await callMcpTool(srvId, mcpTool, a || {});
-        return { content: (r && r.content) || JSON.stringify(r || {}) };
-      },
-    };
-  } else {
-    tool = findTool(name);
-  }
-  if (!tool) throw new Error('未知工具: ' + name);
   // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）。
   // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw——throw 逸出 execTool catch → 整轮判"执行失败"中断
   // （模型无法改用其它工具继续，且该轮观测/计量收尾被跳过）。拦截语义不变：绝不执行，仅以失败结果回填给模型。
@@ -1530,7 +1528,9 @@ RAW_TOOLS.push({
 // 校验与默认拒绝语义见 registry.js；工具上下线只改 tools/manifest.js，不改这里。
 // TOOLS 是**身份稳定的数组**：热重载（RA-03）就地清空重填，所有引用方（toolDefs/execTool/API）自动看到新面。
 export const TOOLS = [];
-TOOLS.push(...assembleTools(RAW_TOOLS));
+// 顺序要紧：先注入实现，再 combine —— combine() 读的是 registry 里存的实现（不再由调用方传列表），
+// 反过来写会让首次装配看到一个空实现表（"清单声明了不存在的工具"刷屏）。
 registerToolSource(RAW_TOOLS, (next) => { TOOLS.length = 0; TOOLS.push(...next); });
+TOOLS.push(...combine()); // 静态（清单 × 实现）× 动态来源（MCP）：一个工具面、一条装配路径
 // 元数据/集合由清单派生后在此转发，保持"从 tools/index.js 一处取用"的既有引用面
 export { TOOL_META, TOOL_CN, DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, TOOL_TIER_CN } from './registry.js';

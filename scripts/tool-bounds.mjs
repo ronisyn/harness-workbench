@@ -10,7 +10,6 @@
 // 用法：node scripts/tool-bounds.mjs        # 打印表；任何"私有字面量"都以非零退出码报错
 import { TOOLS } from '../server/tools/index.js';
 import { MANIFEST_NAMES } from '../server/tools/registry.js';
-
 // 有意不设线的两类。写在这里而不是散在实现里，是为了让"不设线"本身可见、可审。
 const INTENT = {
   ask_user: '等人工（答案什么时候来由用户决定，给它编一个数就是莫须有的限制）',
@@ -33,8 +32,10 @@ for (const t of TOOLS) {
 }
 
 const declared = rows.filter((r) => r.bound);
+const mcpRows = rows.filter((r) => r.name.startsWith('mcp_'));
 const w = Math.max(...rows.map((r) => r.name.length));
-console.log('工具界限表：' + rows.length + ' 个工具（清单 ' + MANIFEST_NAMES.length + ' 条）\n');
+console.log('工具界限表：' + rows.length + ' 个工具（清单 ' + MANIFEST_NAMES.length + ' 条'
+  + (mcpRows.length ? '，其中外部来源 mcp ' + mcpRows.length + ' 个' : '') + '）\n');
 console.log('【有界·声明】' + declared.length + ' 个');
 for (const r of declared) console.log('  ' + r.name.padEnd(w) + '  ' + String(r.bound).padStart(7) + 'ms  ' + r.from);
 const groups = new Map();
@@ -45,5 +46,9 @@ for (const [from, names] of groups) console.log('  ' + from + '（' + names.leng
 if (privates.length) {
   console.error('\n[✗] 以下工具把界限写死在实现里（私有字面量）——必须改成工具定义上的 timeoutMs：\n  ' + privates.join(', '));
   process.exit(1);
+}
+if (!mcpRows.length) {
+  console.log('\n[i] 外部来源（MCP）当前为 0 个：本脚本是独立进程，没有连接 MCP server。'
+    + '\n    连接后 MCP 工具走**同一套条目校验**进同一张表（OP-18 统一装载器），会出现在上面的列表里。');
 }
 console.log('\n[✓] 无私有超时字面量：所有外部阻塞调用的界限都来自工具定义上的声明。');
