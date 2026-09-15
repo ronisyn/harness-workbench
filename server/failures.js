@@ -46,6 +46,8 @@ export const FAIL = {
   // 码表是唯一出处，夹具的"源码里出现的码都在表里"交叉核对才拦得住改名/漏登记。
   // retryable 在这里的含义是"调用方原样重试是否有意义"（与工具侧同义）。
   PARAM_MISSING: { retryable: false, note: '请求参数缺失（调用方改参数，重试无效）' },
+  UNAUTHORIZED: { retryable: false, note: '没带凭证（先去登录换 token）' },
+  TOKEN_EXPIRED: { retryable: false, note: '凭证已过期/失效（重新登录）' },
   CONV_NOT_FOUND: { retryable: false, note: '会话不存在或不属于本账号' },
   CONCURRENCY_LIMIT: { retryable: true, note: '同账号并发对话已达上限；槽位何时释放取决于别人的对话，故服务端**不给** Retry-After，调用方按指数退避重试' },
   IDEMPOTENT_IN_PROGRESS: { retryable: true, note: '同一幂等键的上一次请求仍在进行中；稍后用同一个键重试即可（不会重复执行）' },

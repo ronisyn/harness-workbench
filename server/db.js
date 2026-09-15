@@ -1,7 +1,7 @@
 // server/db.js - MySQL 连接池 + 建表
 import mysql from 'mysql2/promise';
 import { config } from './config.js';
-import { runMigrations, schemaVersion } from './migrations.js';
+import { runMigrations, schemaVersion, VERSIONS } from './migrations.js';
 
 export const pool = mysql.createPool({
   host: config.db.host,
@@ -137,6 +137,13 @@ const SCHEMA = [
     mode VARCHAR(16) DEFAULT 'chat',
     project VARCHAR(64) DEFAULT 'default',
     title VARCHAR(255) DEFAULT '新对话',
+    -- 下面这几列是"只在迁移链里加过、忘了同步到这里"的（2026-09-16 由 test/schema-sync.test.mjs 抓出来）：
+    -- 全新库走的是这张建表语句、且迁移链会被整条标记为已应用 ⇒ 少一列，客户机装完第一次建会话就
+    -- Unknown column（且 Express 4 不接 async 拒绝，请求会永久挂住）。类型与 0001_baseline 的 ALTER 逐字一致。
+    provider VARCHAR(32),
+    model VARCHAR(128),
+    shell_id INT NULL,
+    face_full TINYINT DEFAULT 0,
     created_at DATETIME DEFAULT NOW(),
     updated_at DATETIME DEFAULT NOW()
   )`,
@@ -159,6 +166,7 @@ const SCHEMA = [
     action VARCHAR(64),
     detail TEXT,
     conversation_id INT NULL,
+    shell_id INT NULL,
     created_at DATETIME DEFAULT NOW(),
     KEY idx_audit_time (created_at),
     KEY idx_audit_conv (conversation_id)
@@ -226,6 +234,7 @@ const SCHEMA = [
     cache_miss_tokens INT DEFAULT 0,
     prefix_sys_hash VARCHAR(12) NULL,
     prefix_tools_hash VARCHAR(12) NULL,
+    shell_id INT NULL,
     kind VARCHAR(16) DEFAULT 'request',
     created_at DATETIME DEFAULT NOW(),
     INDEX idx_usage_time (created_at),
@@ -359,6 +368,9 @@ const SCHEMA = [
     shell_id INT,
     title VARCHAR(200) NOT NULL,
     body TEXT,
+    kind VARCHAR(12) DEFAULT 'fact',
+    status VARCHAR(12) DEFAULT 'active',
+    related_component VARCHAR(120),
     created_at DATETIME DEFAULT NOW(),
     KEY idx_kb_scope (account_id, scope),
     KEY idx_kb_shell (shell_id)
@@ -424,6 +436,8 @@ const SCHEMA = [
     channels JSON,
     ui_brand JSON,
     pack_extra JSON,
+    intent_rules JSON,
+    task_profiles JSON,
     eval_ref VARCHAR(255),
     status VARCHAR(10) DEFAULT 'enabled',
     created_at DATETIME DEFAULT NOW(),
@@ -612,19 +626,26 @@ export async function initSchema() {
     try { await pool.query(sql); }
     catch (e) { console.error('[db] view error:', (e && e.message) || e); }
   }
-  // 启动自检：关键新列缺失即醒目告警（正常 initSchema 应全过；缺失=迁移被跳过/手工建库，主链路将 500）
+  // 启动自检：关键列缺失即醒目告警（正常 initSchema 应全过；缺失=迁移被跳过/手工建库，主链路将 500）
+  // 2026-09-16（D2′ 装机阻断的教训）：这份清单以前是**手写的一小段**，于是"哪些列该在"有两个出处，
+  // 实测漏了 5 列（conversations.model / audit_log.shell_id / knowledge.status / knowledge.related_component /
+  // shells.pack_extra）。现在**直接从迁移链推导**：链里加过的每一列都该在库里——链是升级路径的唯一事实源。
+  // 同时补上"两条建库路径对齐"的静态检查（test/schema-sync.test.mjs）——那里管"新库该有什么"，
+  // 这里管"这台机器的库现在到底有没有"，两个方向合起来才盖全。
   try {
     const missing = [];
-    const checks = [
-      ['messages', 'reasoning'], ['conversations', 'provider'], ['conversations', 'shell_id'], ['conversations', 'face_full'],
-      ['usage_stats', 'shell_id'], ['usage_stats', 'prefix_sys_hash'], ['usage_stats', 'prefix_tools_hash'],
-      ['tool_calls', 'shell_id'], ['tool_calls', 'result_bytes'], ['shells', 'intent_rules'], ['shells', 'task_profiles'], ['shells', 'pack_extra'], ['knowledge', 'shell_id'], ['knowledge', 'kind'],
-    ];
+    const checks = [['messages', 'reasoning']];
+    for (const v of VERSIONS) {
+      for (const stmt of v.statements || []) {
+        const m = /ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/i.exec(String(stmt));
+        if (m) checks.push([m[1], m[2]]);
+      }
+    }
     for (const [tbl, col] of checks) {
       const r = await pool.query('SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?', [tbl, col]);
       if (!(r[0] && r[0][0] && Number(r[0][0].c) > 0)) missing.push(tbl + '.' + col);
     }
-    if (missing.length) console.error('[db] 启动自检：关键列缺失（迁移可能被跳过）→ ' + missing.join(', '));
+    if (missing.length) console.error('[db] 启动自检：关键列缺失（迁移可能被跳过）→ ' + missing.join(', ') + '（共 ' + checks.length + ' 列参与核对）');
   } catch { /* 自检失败不阻断 */ }
   // schema 版本（架构 §11.1：存储格式带版本号）——升级/排障时第一眼要看的东西
   try { console.log('[db] schema 版本 = ' + (await schemaVersion(pool) || '（无记录）')); } catch { /* 忽略 */ }

@@ -47,6 +47,7 @@ import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from
 import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
 import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
+import { wrapAsyncHandlers } from './asyncwrap.js'; // Express 4 的 async 处理器兜底（出错 500，不再挂住请求）
 
 const app = express();
 // verify：留一份**原始请求体字节**。飞书回调的来源校验要对"原始 body"算 HMAC（官方明确"不要在反序列化后计算"），
@@ -1455,7 +1456,7 @@ app.get('/api/conversations/:id/stream', requireAuth, async (req, res) => {
     } catch (e) { finish('error:' + String((e && e.message) || e).slice(0, 80)); }
   }, 500);
   // 先说明"从哪接"：客户端据此判断自己是不是接丢了（配合 /messages 兜底）
-  frame({ type: 'stream_hello', conversationId: cid, after, ts: Date.now() });
+  frame({ type: 'stream_hello', v: 1, conversationId: cid, after, ts: Date.now() });
 });
 
 // ---------- RA-31 能力清单（2026-09-15）：这个会话里的 agent 能做什么、受什么约束、降级时什么样 ----------
@@ -2605,8 +2606,13 @@ app.get(/^(?!\/api).*/, (req, res) => {
 app.use((err, req, res, next) => {
   console.error('[rw] 路由错误:', err && (err.stack || err.message));
   if (res.headersSent) { res.end(); return; }
-  res.status(500).json({ ok: false, message: '服务内部错误: ' + String((err && err.message) || err).slice(0, 200) });
+  res.status(500).json({ ok: false, code: 'INTERNAL', message: '服务内部错误: ' + String((err && err.message) || err).slice(0, 200) });
 });
+
+// 2026-09-16（Windows 端到端实测撞出来的真问题）：Express 4 不会替我们接住 async 处理器的 rejection，
+// 于是任一处理器里 await 抛错（实测：全新库缺列时 POST /api/conversations 抛 Unknown column）的后果是
+// **客户端永久挂住**：没有 500、没有可诊断的响应。修法见 server/asyncwrap.js，这里只负责装配。
+// （必须在**所有路由注册之后**调用，否则后面注册的路由包不上。）
 
 // ---------- 启动 ----------
 async function main() {
@@ -2801,6 +2807,8 @@ async function main() {
     // 这些都由 env.js 推导，把它们打出来，比让人去反推要快得多（也顺带证明推导结果与预期一致）。
     console.log(`[RW] 环境: os=${RW_OS_CN} shell=${SHELL_CN} 平台=${RW_PLATFORM_DIR} 工作区=${RW_WORKSPACE} 任务日志=${RW_JOBS_DIR} 重启方式=${restartPlan().how}`);
   });
+  // 统一兜底 async 处理器的 rejection（必须在**所有路由注册之后**做，否则后面注册的路由包不上）
+  console.log('[RW] async 处理器兜底已装配：' + wrapAsyncHandlers(app) + ' 个处理器（出错走 500，不再挂住请求）');
 }
 
 main().catch((e) => {

@@ -62,14 +62,16 @@ export async function registerWithInvite(username, password, code) {
 }
 
 // Express 中间件：校验 Bearer token
+// D4-2：错误响应带机器可读 `code`（契约 docs/会话API契约-v1.md §5）。401 分两种，调用方要能分辨
+// "没带凭证"（去登录）与"凭证过期"（重新登录）——正是《接口规范》§三 说的"客户端要分别处理"。
 export function requireAuth(req, res, next) {
   const h = req.headers.authorization || '';
   const token = h.replace(/^Bearer\s+/i, '');
-  if (!token) return res.status(401).json({ ok: false, message: '未登录' });
+  if (!token) return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: '未登录' });
   me(token).then((u) => {
-    if (!u) return res.status(401).json({ ok: false, message: '登录已过期' });
+    if (!u) return res.status(401).json({ ok: false, code: 'TOKEN_EXPIRED', message: '登录已过期' });
     req.user = u;
     req.token = token;
     next();
-  }).catch(() => res.status(500).json({ ok: false, message: '鉴权失败' }));
+  }).catch(() => res.status(500).json({ ok: false, code: 'INTERNAL', message: '鉴权失败' }));
 }
