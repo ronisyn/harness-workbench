@@ -52,6 +52,28 @@ export async function computeNextRuns() {
   }
 }
 
+/**
+ * 定时任务的执行上下文（纯函数，可夹具直测）。
+ * **必须显式带 permission**：execTool 是按 `ctx.permission` 决定是否限制路径的
+ * （tools/index.js：`limitPath = ctx.permission === 'read' || ctx.permission === 'write'`）。
+ * 这里原先漏了它，于是所有定时任务都被当成受限会话、一律被围栏限制在 RW_WORKSPACE 内，
+ * 与任务配置的 permission=full 不符（实测：task#7 连错 7 次"路径超出工作区"）。
+ * @param {{account_id:number, permission?:string}} task
+ * @param {number} conversationId
+ * @param {{shell_id?:number}|null} conv 任务会话行（可带 shell_id）
+ */
+export function taskExecContext(task, conversationId, conv = null, accessRules = null) {
+  const permission = task.permission || 'full';
+  return {
+    permission,
+    accountId: task.account_id,
+    conversationId,
+    root: permission === 'full' ? '/' : RW_WORKSPACE,
+    __accessRules: accessRules,
+    shellId: (conv && conv.shell_id != null) ? conv.shell_id : null,
+  };
+}
+
 // 执行一个定时任务
 // A8：写 task_history（执行历史/失败告警数据源）；手动补跑（task.__manual=true）不推进 next_run
 export async function executeScheduledTask(task) {
@@ -81,8 +103,11 @@ export async function executeScheduledTask(task) {
         const gs = await db.query('SELECT g.name, g.descr FROM evo_goal_tasks b JOIN evo_goals g ON g.id=b.goal_id WHERE b.task_id=? AND g.status="active"', [task.id]);
         if (gs.length) goalLines = '\n\n【本次须执行的目标（进化集勾选，逐条完成）】\n' + gs.map((g, i) => (i + 1) + '. ' + g.name + (g.descr ? '——' + String(g.descr).slice(0, 300) : '')).join('\n');
       } catch { /* 目标绑定不可用则忽略 */ }
-      const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (RW_WORKSPACE), __accessRules: accessRules };
-      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt + goalLines }], permission: task.permission || 'full', ctx, keys: config.keys });
+      // 2026-09-15 修：ctx 必须带 permission —— 见 taskExecContext 的注释（原实现漏了它，
+      // 于是所有定时任务都被当成受限会话、一律被围栏限制在 RW_WORKSPACE 内，与 permission=full 不符）。
+      const effectivePermission = task.permission || 'full';
+      const ctx = taskExecContext(task, conv.id, conv, accessRules);
+      const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt + goalLines }], permission: effectivePermission, ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）
       await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', '【定时任务】' + task.name + (task.__manual ? '（手动跑一次）' : '') + '\n' + task.prompt + goalLines]);
