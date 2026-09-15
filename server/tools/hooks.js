@@ -22,9 +22,11 @@
 //   6. shell_readonly_guard（before run_command）—— 读型命令（cat/ls/grep/…）引导用专门工具
 // P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { TOOL_META, PLATFORM_EXEMPT } from './registry.js';
 import { db } from '../db.js';
+const execFileAsync = promisify(execFile);
 const registry = [];
 const MAX_HOOKS = 128;
 const DEFAULT_TIMEOUT_MS = 2000;
@@ -316,11 +318,16 @@ registerHook('before', 'intake_submit', 'intake_skill_guard', async ({ args, ctx
 //   hookNote 是附加上下文，按 §7.3 双投影接缝不得替换工具结果本身。
 // ---------------------------------------------------------------------------
 const CODE_EXT = /\.(js|mjs|cjs)$/;
-const syntaxNote = ({ args, result }) => {
+// ⚠️ 2026-09-15 改异步：原实现用 `execFileSync` 跑 `node --check`（超时 8s）——**同步子进程会把整个
+//   Node 进程冻住**，而它挂在 write_file/edit_file 的 after 上，也就是 **agent 写代码的必经之路**：
+//   那一瞬间所有会话的 SSE 流、心跳、别的用户全部停摆。而且同步代码会堵住事件循环，
+//   连 emitHooks 新加的 timeoutMs 都**没机会触发**（定时器要等同步调用返回才轮到）。
+//   改成异步之后：不冻进程，且钩子超时真的能生效。内层 6000 < 钩子 8000，让"命令自己超时"优先。
+const syntaxNote = async ({ args, result }) => {
   try {
     const p = String((args && args.path) || '');
     if (!CODE_EXT.test(p)) return {};
-    execFileSync('node', ['--check', p], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] });
+    await execFileAsync('node', ['--check', p], { encoding: 'utf8', timeout: 6000, stdio: ['ignore', 'pipe', 'ignore'] });
     if (result && typeof result === 'object' && !Array.isArray(result)) result.hookNote = '语法检查通过（node --check）';
   } catch (e) {
     if (result && typeof result === 'object' && !Array.isArray(result)) {
@@ -330,8 +337,8 @@ const syntaxNote = ({ args, result }) => {
   }
   return {};
 };
-registerHook('after', 'write_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open' });
-registerHook('after', 'edit_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open' });
+registerHook('after', 'write_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open', timeoutMs: 8000 });
+registerHook('after', 'edit_file', 'code_syntax_check', syntaxNote, { builtin: true, failure: 'open', timeoutMs: 8000 });
 
 registerHook('after', 'finish_task', 'finish_selfcheck_note', ({ args, result }) => {
   try {

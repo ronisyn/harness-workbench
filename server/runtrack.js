@@ -9,13 +9,22 @@ import { RW_WORKSPACE } from './env.js';
 
 // P16 唤醒包（2026-09 批1）：恢复任务时注入工作区 git 状态摘要——模型知道"改到哪、脏区在哪、HEAD 在哪"，
 // 避免恢复后盲目重读/重做或误判现场。工作区非 git 仓库/不可读时静默返回空（不阻塞恢复）。
-function gitStateSummary() {
+//
+// ⚠️ 2026-09-15 改异步：原实现用 `execFileSync` 跑三条 git 命令（各 3s 超时），
+//   而它是**在 /api/chat 的请求路径上**被 await 调用的 ⇒ 同步子进程会把**整个 Node 进程**冻住
+//   （不是只冻这一个请求：所有会话的 SSE 流、心跳、其它用户全部停摆），最坏 9 秒。
+//   这是"单个请求能冻全站"的一类真问题，统一改成异步（请求路径上禁止同步子进程，见夹具 invariant）。
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
+
+async function gitStateSummary() {
   const ws = RW_WORKSPACE;
   try {
     if (!fs.existsSync(ws)) return '';
-    const run = (args) => execFileSync('git', ['-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    const head = run(['rev-parse', '--short', 'HEAD']);
-    const status = run(['status', '--short']);
+    const run = async (args) => String((await execFileAsync('git', ['-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })).stdout || '').trim();
+    const head = await run(['rev-parse', '--short', 'HEAD']);
+    const status = await run(['status', '--short']);
     const lines = status.split('\n').filter(Boolean).slice(0, 15); // 脏区最多列 15 行，防摘要过长
     const parts = ['工作区 git 状态（' + ws + '）：HEAD=' + head];
     if (lines.length) parts.push('未提交改动 ' + lines.length + ' 项：\n' + lines.map((l) => '  ' + l.slice(0, 100)).join('\n'));
@@ -69,7 +78,7 @@ export async function resumeHint(conversationId) {
   if (!r || !['interrupted', 'paused'].includes(r.status)) return null;
   const counts = (() => { try { return JSON.parse(r.tool_counts || '{}'); } catch { return {}; } })();
   const cText = Object.entries(counts).map(([k, v]) => k + '×' + v).join('、');
-  const git = gitStateSummary();
+  const git = await gitStateSummary();
   return '【上次任务现场】目标：' + String(r.goal || '').slice(0, 300)
     + '\n状态：' + r.status + (r.reason ? '（' + r.reason + '）' : '')
     + '；已执行 ' + (r.rounds || 0) + ' 轮工具调用' + (cText ? '：' + cText : '')

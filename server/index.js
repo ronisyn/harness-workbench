@@ -2156,18 +2156,24 @@ app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
 // 模板库 git 同步：模板目录是仓库文件权威；运行时导入/克隆直接写 ROOT/templates 后立即 add+commit+push origin main，
 // 保持"本地=服务器=origin"三端一致（guard-deploy 要求服务器工作树干净、无未推送提交——导入后不推送会在下次部署被拦）。
 async function syncTemplateGit(relPath, msg) {
-  const { execFileSync } = await import('node:child_process');
+  // ⚠️ 2026-09-15 改异步：原实现用 execFileSync 跑 git add/commit/**push**（超时 60s），
+  //   而 git push 是**网络操作**——慢的时候会把整个 Node 进程冻住几十秒，所有会话一起卡死。
+  //   同一个类的问题在请求路径上还有两处（syntax-check 钩子、resumeHint 的 git 状态），一并改成异步；
+  //   夹具 test/no-sync-subprocess.test.mjs 会把"同步子进程"钉死在 server/ 里不许再加。
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
   const opts = { cwd: ROOT, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] };
-  execFileSync('git', ['add', relPath], opts);
+  await run('git', ['add', relPath], opts);
   let committed = true;
   try {
-    execFileSync('git', ['commit', '-m', msg], opts);
+    await run('git', ['commit', '-m', msg], opts);
   } catch (e) {
     const out = String(e && e.stdout || '');
     if (/nothing to commit|no changes added/.test(out)) committed = false;
     else throw new Error('git commit 失败: ' + out.slice(0, 200));
   }
-  if (committed) execFileSync('git', ['push', 'origin', 'main'], opts);
+  if (committed) await run('git', ['push', 'origin', 'main'], opts);
   return committed;
 }
 

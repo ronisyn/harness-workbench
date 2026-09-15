@@ -67,6 +67,38 @@ test('RA-05b 负例：3000 字节的 ASCII 结果（同字符数）不得被拦 
   assert.equal(fs.existsSync(SPILL_DIR), false, '未超限就不该落盘');
 });
 
+// ── 2026-09-15 真 bug 的回归锁（这条是"改了阈值才放出来"的，必须有夹具钉住）────────────────
+// 现象：字节触发那一档满足 `s.length ≤ cap`，而预览预算原先一律取 cap ⇒ 头尾重叠、
+//      省略量变负数、**输出比原文还长**（实测中文 2667 字符 → 输出 3803 字符，声称"已省略 -933 字符"）。
+test('回归锁：任何一档溢出后，输出都必须**比原文短**，且省略量不得为负', () => {
+  CLEAN();
+  const cases = [
+    ['中文 2667 字符（8001 字节，刚过天花板）', '中'.repeat(2667)],
+    ['中文 3000 字符（9000 字节）', '中'.repeat(3000)],
+    ['中文 4000 字符（12000 字节）', '中'.repeat(4000)],
+    ['中文 5000 字符（15000 字节，超字符上限）', '中'.repeat(5000)],
+    ['ASCII 4100 字符（超字符上限）', 'B'.repeat(4100)],
+    ['ASCII 9000 字符（超字符上限）', 'C'.repeat(9000)],
+    ['子代理族 cap=12000 的中文 9000 字符（27000 字节）', '中'.repeat(9000)],
+  ];
+  for (const [name, s] of cases) {
+    const cap = name.startsWith('子代理族') ? 12000 : 4000;
+    const out = spillToolResult(s, cap, { tool: 'run_command', conversationId: 7, callId: 'call-reg' });
+    assert.notEqual(out, s, name + '：超限就必须溢出');
+    assert.ok(out.length < s.length, name + '：溢出后必须变小（实为 ' + s.length + ' → ' + out.length + '）');
+    const m = /已省略 (-?\d+) 字节（(-?\d+) 字符）/.exec(out);
+    assert.ok(m, name + '：必须给出精确省略量');
+    assert.ok(Number(m[2]) > 0, name + '：省略的字符数必须为正（实为 ' + m[2] + '）');
+    assert.ok(Number(m[1]) > 0, name + '：省略的字节数必须为正（实为 ' + m[1] + '）');
+  }
+});
+
+test('回归锁：字符超限那一档的行为与改动前一致（4100 → 约 3800 字符，不是砍一半）', () => {
+  CLEAN();
+  const out = spillToolResult('B'.repeat(4100), 4000, { tool: 'run_command', conversationId: 7, callId: 'call-legacy' });
+  assert.ok(out.length > 3700 && out.length < 3900, '字符超限档仍按 cap 出预览（实为 ' + out.length + '）');
+});
+
 // ── OP-17 溢出文件保留与清理 ──────────────────────────────────────────────────────────
 test('OP-17 按龄清理：过期文件删、新鲜文件留；不碰溢出目录之外', () => {
   CLEAN();

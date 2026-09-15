@@ -30,9 +30,12 @@ const READER_TOOLS = new Set(['read_file', 'read_file_range']);
 const safeName = (s) => String(s || 'x').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
 
 // 预览几何：头 60% + 尾 30%（余下 10% 给省略提示本身）；按字符切，Unicode 码点安全
-function splitPreview(s, cap) {
-  const head = s.slice(0, Math.floor(cap * 0.6));
-  const tail = s.slice(-Math.floor(cap * 0.3));
+// ⚠️ 调用方必须保证 budget ≤ s.length，否则头尾会重叠、省略量变成负数、输出比原文还长
+//    （2026-09-15 实测踩到：见 spillToolResult 里的预算计算与兜底）。
+function splitPreview(s, budget) {
+  const b = Math.max(0, Math.min(Number(budget) || 0, s.length));
+  const head = s.slice(0, Math.floor(b * 0.6));
+  const tail = s.slice(-Math.floor(b * 0.3));
   return { head, tail, omittedChars: s.length - head.length - tail.length, omittedBytes: Buffer.byteLength(s, 'utf8') - Buffer.byteLength(head + tail, 'utf8') };
 }
 
@@ -55,14 +58,27 @@ function logSpill(tool, conv, bytes, outcome, extra) {
 export function spillToolResult(text, cap, meta = {}) {
   const s = String(text ?? '');
   const bytes = Buffer.byteLength(s, 'utf8');
-  if (s.length <= cap && bytes <= byteCeiling(cap)) return s;
-  const parts = splitPreview(s, cap);
+  const overChars = s.length > cap;
+  const overBytes = bytes > byteCeiling(cap);
+  if (!overChars && !overBytes) return s;
+  // 预览预算（决定"能看到多少"）：
+  //   · 字符超限：还是 cap —— **老行为一点不变**（这类结果本来就比 cap 长，收成 cap 一定是变小）
+  //   · 只有字节超限（字符数没超）：按 60% 收。这里是 2026-09-15 修掉的真 bug：
+  //     原先一律用 cap 当预算，而字节超限这一档满足 `s.length ≤ cap` ⇒ 头尾直接重叠，
+  //     实测中文 2667 字符会输出 3803 字符（**比原文还长**）并声称"已省略 -933 字符"。
+  //     改成按比例收之后，"溢出"这两个字才名副其实。
+  const budget = overChars ? cap : Math.max(1, Math.floor(s.length * 0.6));
+  const parts = splitPreview(s, budget);
   const tool = meta.tool || '';
   // 3) 读取类：全文=源文件，不落盘
   const srcPath = meta.args && meta.args.path;
+  const build = (locator) => compose(parts, locator);
+  // 兜底护栏（防这一类问题再回来）：溢出后没变小，就**干脆不溢出**。
+  // 宁可让上下文多占一点，也不能让它变大 —— "省空间"的动作不能反而占更多空间。
+  const smaller = (out) => (out.length < s.length ? out : s);
   if (READER_TOOLS.has(tool) && typeof srcPath === 'string' && srcPath) {
     logSpill(tool, meta.conversationId, bytes, 'reader', srcPath);
-    return compose(parts, '全文即源文件 ' + srcPath + '（共 ' + bytes + ' 字节）；用 read_file_range 带 offset/length 分段读');
+    return smaller(build('全文即源文件 ' + srcPath + '（共 ' + bytes + ' 字节）；用 read_file_range 带 offset/length 分段读'));
   }
   // 1)+2) 落盘取回；失败降级
   try {
@@ -71,11 +87,13 @@ export function spillToolResult(text, cap, meta = {}) {
     const file = path.join(dir, safeName(tool) + '-' + safeName(meta.callId || String(Date.now())) + '.txt');
     const body = typeof meta.redact === 'function' ? meta.redact(s) : s; // 与落库同口径脱敏（密钥不入盘）
     fs.writeFileSync(file, body, 'utf8');
+    const out = smaller(build('全文已存 ' + file + '（' + bytes + ' 字节），取回：fetch_spill {path:"' + file + '", offset:0, length:20000}'));
+    if (out === s) { logSpill(tool, meta.conversationId, bytes, 'skipped-not-smaller', file); return s; }
     logSpill(tool, meta.conversationId, bytes, 'stored', file);
-    return compose(parts, '全文已存 ' + file + '（' + bytes + ' 字节），取回：fetch_spill {path:"' + file + '", offset:0, length:20000}');
+    return out;
   } catch (e) {
     logSpill(tool, meta.conversationId, bytes, 'degraded', e && e.message ? e.message : String(e));
-    return compose(parts, '⚠️ 全文未能存盘（' + (e && e.message ? e.message : e) + '），已按内联截断降级：请改用分段/过滤参数缩小结果，或自行落盘后再读');
+    return smaller(build('⚠️ 全文未能存盘（' + (e && e.message ? e.message : e) + '），已按内联截断降级：请改用分段/过滤参数缩小结果，或自行落盘后再读'));
   }
 }
 
