@@ -390,19 +390,27 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full', timeoutMs: 300000,
-    params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
+  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full', timeoutMs: 300000,
+    params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, cwd: { type: 'string', desc: '工作目录；相对路径按工作区根解析（换目录用它，不要在命令里 cd）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
         const allow = ['ls', 'cat', 'node --check', 'git status', 'npm test', 'pwd', 'echo', 'find', 'grep'];
         if (!allow.some((p) => a.cmd.startsWith(p))) throw new Error('write 级仅允许工作区常用命令，此命令需 full 权限');
       }
       const [cmd, ...args] = a.cmd.split(/\s+/);
+      // 换目录 = 参数，不是命令（2026-09-15 对齐 DSH `dsh-tool-bash` 的 workdir：每次调用都是新 shell，
+      // cd 本来就不会保留；我们此前没有这个参数，模型只能写 `cd X && ...`，于是 65 次纪律拦截里 40 次是 cd）。
+      let dir = ctx.root;
+      if (a.cwd) {
+        const abs = path.isAbsolute(String(a.cwd)) ? String(a.cwd) : path.join(ctx.root, String(a.cwd));
+        if (ctx.limitPath && !inside(abs, ctx.root)) throw inputError('cwd 超出工作区（本会话权限只允许访问 ' + ctx.root + '）');
+        dir = abs;
+      }
       // timeout 参数是模型选的（5-300s）；声明的 timeoutMs=300s 是它的上限，两者取小即"一个界限一个出处"
       const want = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
       const t = ctx.__deadline ? Math.min(want, Math.max(1, ctx.__deadline - Date.now())) : want;
-      const r = await runCmd(cmd, args, { cwd: ctx.root }, t);
-      return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code };
+      const r = await runCmd(cmd, args, { cwd: dir }, t);
+      return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code, cwd: dir };
     } },
   { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },

@@ -279,15 +279,29 @@ registerHook('before', '*', 'readonly_mcp_guard', ({ args, ctx }) => {
 }, { builtin: true, failure: 'open' });
 
 // 6. 命令纪律：run_command 读型命令引导用专门工具（原 execTool 内联；审计 58% shell 调用本可用专门工具）
+//    2026-09-15（对齐 DSH `dsh-tool-bash`）：**换目录这件事改成改写，不再拦截**。
+//    DSH 给 bash 工具一个 `workdir` 参数，描述里明说 "pass `workdir` instead of using `cd`" —— 模型因此
+//    根本不必写 cd，也就没有"被拦"这回事；而 DSH 全库**没有任何**"别用 shell，去用专门工具"的预拦钩子
+//    （全量扫描只命中它的 bash/pwsh 描述里那一句 workdir 提示）。我们此前缺这个参数，模型只能写 cd，
+//    于是近 14 天 65 次纪律拦截里 **40 次是 cd**（真库实测）——每次都在白花一轮。
+//    只认最保险的形态：命令以 `cd <简单目录> &&` 开头、目录里没有 shell 元字符；其余形态照旧拦
+//    （猜不准的东西不改写）。改写过之后**仍然按改写后的命令判纪律**，否则 `cd . && grep x` 就成了绕过口。
 registerHook('before', 'run_command', 'shell_readonly_guard', ({ args }) => {
-  const cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+  let cmdline = String((args && (args.cmd ?? args.command)) || '').trim();
+  const m = /^cd\s+([A-Za-z0-9_./~-]+)\s*&&\s*(\S[\s\S]*)$/.exec(cmdline);
+  const moved = (m && args && args.cwd === undefined) ? { cwd: m[1], cmd: m[2] } : null;
+  if (moved) cmdline = moved.cmd; // 第二遍判纪律用改写后的命令
   const first = cmdline.split(/\s+/)[0];
   const isEditSed = first === 'sed' && /\s-i\b/.test(cmdline);
   if (!isEditSed && /^(cat|ls|grep|find|sed|head|cd|echo)$/.test(first || '')) {
-    return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。` };
+    const hint = first !== 'cd' ? ''
+      : (args && args.cwd !== undefined
+        ? '已提供 cwd 参数时命令里不要再写 cd（两者会打架）——请去掉 cd。'
+        : '换目录请用 cwd 参数（每次调用都是新 shell，cd 不保留）。');
+    return { stop: true, reason: `run_command 命令纪律：${first} 有专门工具（读文件=read_file/read_file_range；列目录=list_dir；搜内容=grep_search；找文件=find_file；查看片段=read_file_range）。请改用专门工具完成；确需系统操作请把命令拆开执行。${hint}` };
   }
-  return {};
-}, { builtin: true, failure: 'open' });
+  return moved ? { args: { ...args, ...moved } } : {};
+}, { builtin: true, failure: 'open', rewritesArgs: true });
 
 // A5 硬闸门（§8.6 关键流程技能）：开发需求采集必须走 intake 流程——
 // 未在本会话载入对应 intake 技能（plugin-dev-intake/app-dev-intake/shell-intake）时拒绝 intake_submit，
