@@ -137,9 +137,13 @@ async function agentLimits() {
       failGuardN: failPick('consecutive_fail_guard', 3),
       rev: pick('__policy_rev', 0),
     };
-  } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 }; }
+  } catch (e) {
+    // 不静默：读取护栏失败会让"设置里的阈值"整体回退默认值（曾导致折叠阈值设了不生效）——如实报出原因
+    console.warn('[limits] 读取护栏失败，已回退默认值：' + (e && e.message ? e.message : e));
+    limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 };
+  }
   limitsCacheAt = Date.now();
-  if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars, rows: (typeof rows !== 'undefined' ? rows.length : 'ERR') }));
+  if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars }));
   return limitsCache;
   // 行存在时按值（含 0=关）；行缺失时才用默认——与 pick 的"缺省回退"区分
   function failPick(k, d) {
