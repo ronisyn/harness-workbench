@@ -917,6 +917,31 @@
         }
       ],
       "note": "**2026-09-16 落地（C-29）**：人工经 `PUT /api/settings` / `/api/access-rules` 改策略此前**一行账都不落** ⇒ \"策略什么时候被谁改了\"答不出来，C-28 的漂移检测也因此不成立（人工改动会被误报成漂移）。现在 `setSetting()`（唯一收口）对策略键落同一条 `policy:settings-write`，只把 `actor`/`via` 分开（模型＝`model-via-tool`/`db_write`，人＝`human-via-api`/`PUT /api/settings`）。**真机取证**：服务器上登录后 PUT 一个护栏键 → 账本新增 #13168 `actor=human-via-api keys=[\"progress_stall_n\"] from=null to=\"10\"`，与模型路径那行同形状并列。另：`scripts/tools-face-diff.mjs`（工具面反向核对）已接进 CI（A3）——工具描述/参数是进前缀的字节，改一个字就是一次换纪元，以前只靠\"记得同步快照\"。"
+    },
+    {
+      "id": "RA-54",
+      "title": "换纪元的代价在决策点可见（模型重启 / 人工部署两条路）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/index.js",
+          "pattern": "PREFIX_COST_NOTE"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "reload 防撞：另有"
+        },
+        {
+          "file": "scripts/release.mjs",
+          "pattern": "agent_runs WHERE status='running'"
+        },
+        {
+          "file": "test/epoch-cost.test.mjs",
+          "pattern": "不设时间窗口"
+        }
+      ],
+      "note": "**2026-09-16 落地（A0，C-31 实测驱动）**：实测 214 次\"整段重建\"集中在一条 432 轮的会话上（量级 ≈14M tokens），成因是**在活跃会话上反复部署**——改工具面/系统提示会换纪元，所有活跃会话的前缀整段作废。先问了 DSH：**它不做这件事**（核心包里 `prompt cache / cached prefix` 零命中，没有预热/失效预警/延后变更；它的会话是持久日志 + 投影，重建只花钱不影响正确性）。我们的决定：**只做描述性的一半**——判据用现成的 `agent_runs.status='running'`（**不发明时间窗口**），两处提示位：① `reload_platform` 无论被拦还是放行都带代价说明（既有 F2 防撞不动）；② `scripts/release.mjs` 预检按 status=running 列出活跃会话并给\"攒批发布\"的建议，读不到库如实跳过、不阻断发布。**真机两条分支都验过**：无活跃会话 → \"发布的好时机\"；造哨兵 running 会话 → 正确列出（含轮次/最后活动/目标摘要）。"
     }
   ]
 }
