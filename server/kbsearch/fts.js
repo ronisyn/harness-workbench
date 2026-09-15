@@ -126,6 +126,16 @@ export async function search(q, opts = {}) {
   const boolQ = toBooleanQuery(q);
   const like = toLikePattern(q);
 
+  // 缺省只认"当前事实"（A6 条目治理 §7.3：superseded/obsolete 仅历史，不参与检索/注入）。
+  // 调用方传的 `where` 若**已经**自己写了 `status=…`（例如管理面显式筛 status），这里就不再插一条——
+  // 同一件事两个出处必然长歪（那条纪律见 `server/knowledge.js` 的 `kbVisibleWhere`）。
+  // `includeHistorical` 的语义与 `kbVisibleWhere` 的**同一个名字同一个意思**：要历史才给 true。
+  // ⚠️ 这条**必须**在这一层实现（而不是像会话侧那样由调用方自己往 where 里塞）：管理面带 `q` 时会走这个函数
+  // 且自带条件串，如果只靠调用方，同一个函数就会出现"从 kb_search 调=只搜当前事实、从管理面调=连历史一起搜"
+  // 这种没人看得出来的分叉。
+  const statusGuard = (opts.includeHistorical || /(^|[\s(])status\s*=/.test(where)) ? '' : "status='active'";
+  const allConds = [where, statusGuard].filter(Boolean).join(' AND ');
+
   // 空查询：不落库、不猜，如实返回空（调用方据此判断"没搜"）
   if (!boolQ) {
     return { items: [], mode: 'empty', backend: id, degraded: false, detail: '空查询：未执行检索' };
@@ -144,10 +154,10 @@ export async function search(q, opts = {}) {
   // 的时候得先看到它。
   const matchSql = `SELECT ${cols}, MATCH(${INDEX_COLUMNS.join(', ')}) AGAINST (? IN BOOLEAN MODE) AS score
      FROM knowledge
-    WHERE MATCH(${INDEX_COLUMNS.join(', ')}) AGAINST (? IN BOOLEAN MODE)${where ? ' AND ' + where : ''}
+    WHERE MATCH(${INDEX_COLUMNS.join(', ')}) AGAINST (? IN BOOLEAN MODE)${allConds ? ' AND ' + allConds : ''}
     ORDER BY score DESC, id ASC LIMIT ?`;
   try {
-    // 参数顺序必须跟着上面 SQL 里的占位符顺序走：① 选择项里的 MATCH、② WHERE 里的 MATCH、③ 可见范围参数、④ limit
+    // 参数顺序必须跟着上面 SQL 里的占位符顺序走：① 选择项里的 MATCH、② WHERE 里的 MATCH、③ 过滤条件参数、④ limit
     const rows = (await db.query(matchSql, [boolQ, boolQ, ...params, limit])) || [];
     return {
       items: rows.map((r) => toItem(r, opts, true)),
@@ -159,10 +169,12 @@ export async function search(q, opts = {}) {
   } catch (e) {
     if (!isIndexUnavailable(e)) throw e; // 不是"索引不可用"就如实抛，绝不吞
     // ---- ② 兜底：索引不在 ⇒ 如实回落 LIKE（并**标明**走的是这条路）----
+    // 过滤条件与 status 缺省守卫跟 fts 那条路**共用同一份** `allConds`（同一件事不许两个出处）；
+    // 排序沿用改造前 LIKE 的口径（`id DESC`，没有分数可排）。
     const likeSql = `SELECT ${cols} FROM knowledge
-      WHERE ${where ? where + ' AND ' : ''}(title LIKE ? OR body LIKE ?)
+      WHERE (title LIKE ? OR body LIKE ?)${allConds ? ' AND ' + allConds : ''}
       ORDER BY id DESC LIMIT ?`;
-    const rows = (await db.query(likeSql, [...params, like, like, limit])) || [];
+    const rows = (await db.query(likeSql, [like, like, ...params, limit])) || [];
     return {
       items: rows.map((r) => toItem(r, opts, false)),
       mode: 'like',

@@ -112,7 +112,28 @@ test("② 兜底：MATCH 报 1191 ⇒ 回落 LIKE、mode='like'、degraded=true�
   assert.equal(db.calls.length, 2);
   assert.match(db.calls[1].sql, /\(title LIKE \? OR body LIKE \?\)/, '兜底这条路仍是改造前的口径');
   assert.ok(!/MATCH/i.test(db.calls[1].sql));
-  assert.deepEqual(db.calls[1].params, [7, '%部署%口径%', '%部署%口径%', 8], 'LIKE 形态沿用改造前口径（词间加 %）');
+  // 参数顺序＝占位符顺序（LIKE 的两问号在最前——status 缺省守卫是**字面量**，不占位）
+  assert.deepEqual(db.calls[1].params, ['%部署%口径%', '%部署%口径%', 7, 8], 'LIKE 形态沿用改造前口径（词间加 %）');
+});
+
+test('② 状态守卫：缺省只搜"当前事实"；显式给了 status / includeHistorical 才放开（与 kbVisibleWhere 同名同义）', async () => {
+  // 会话侧的既有纪律（A6）：superseded/obsolete 不参与检索——这条**必须**在检索层成立，
+  // 否则"从 kb_search 调只搜当前事实、从管理面调连历史一起搜"就成了没人看得出的分叉。
+  const plain = fakeDb({ rows: [] });
+  await searchKnowledge('部署', { db: plain, ...SCOPE, includeHistorical: true }); // SCOPE.where 里已自带 status
+  const noGuard = fakeDb({ rows: [] });
+  await searchKnowledge('部署', { db: noGuard, where: 'account_id=?', params: [7] });
+  assert.match(noGuard.calls[0].sql, /AND status='active'/, '没给 status 又没要历史 ⇒ 必须补上 status=\'active\' 守卫');
+  const hist = fakeDb({ rows: [] });
+  await searchKnowledge('部署', { db: hist, where: 'account_id=?', params: [7], includeHistorical: true });
+  assert.ok(!/status='active'/.test(hist.calls[0].sql), 'includeHistorical:true ⇒ 不补守卫（管理视图要看到 superseded/obsolete）');
+  const explicit = fakeDb({ rows: [] });
+  await searchKnowledge('部署', { db: explicit, ...SCOPE });
+  assert.ok(!/AND status='active'/.test(explicit.calls[0].sql), 'where 里已经自己写了 status ⇒ 不重复插一条（同一件事不许两个出处）');
+  // 兜底那条路共用同一份过滤条件（不许 fts 带守卫、like 不带）
+  const fb = { calls: [], async query(sql, params) { this.calls.push({ sql: String(sql), params }); if (this.calls.length === 1) throw ftsKeyMissing(); return []; } };
+  await searchKnowledge('部署', { db: fb, where: 'account_id=?', params: [7] });
+  assert.match(fb.calls[1].sql, /status='active'/, 'LIKE 兜底也要带同一个守卫（两处口径必须一致）');
 });
 
 test('② 兜底判据是**窄**的：不是"索引不可用"的错一律如实抛（兜底不许吞掉真故障）', async () => {
@@ -275,6 +296,62 @@ test('⑦ 缺 db 是**编程错误**：如实抛，不静默返回空', async ()
   await assert.rejects(() => searchKnowledge('x', {}), /需要 opts\.db/);
   await assert.rejects(() => searchAvailable({}), /需要 opts\.db/);
 });
+
+// ---- ⑨ 管理面接线守卫（GET /api/knowledge 的 `q`）----
+//
+// 为什么用"读源码"的判据：`server/index.js` 是**入口模块**（`import` 它就会 Express 起服务、连库、跑 initSchema），
+// 没法在夹具里 import 进来打桩，这条路由也没有把处理逻辑抽成可注入的函数（抽出去＝重构，超出本笔范围）。
+// 本仓已有同形的源码级机检先例（`server/tools/registry.js` 的 `assertNoPermissionDeclarations`、
+// `test/schema-sync.test.mjs` 抠 db.js 建表语句），所以这里照做：**钉住"这一处走的是检索后端、没有再写一份 LIKE"**。
+const INDEX_SRC = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+function adminKnowledgeHandler() {
+  const start = INDEX_SRC.indexOf("app.get('/api/knowledge'");
+  assert.ok(start > 0, "找不到 app.get('/api/knowledge'（路由被改名/搬走了？这条守卫要跟着改）");
+  const end = INDEX_SRC.indexOf("app.patch('/api/knowledge/:id'", start);
+  assert.ok(end > start, '找不到紧随其后的 app.patch(\'/api/knowledge/:id\'（守卫的切片边界失效了）');
+  return INDEX_SRC.slice(start, end);
+}
+
+test("⑨ 管理面：带 q 时走 searchKnowledge，不再自己写一份 `title LIKE OR body LIKE`", () => {
+  const body = adminKnowledgeHandler();
+  assert.match(body, /searchKnowledge\(q,/, '带 q 的检索必须调检索后端（全仓唯一一份"知识怎么搜"）');
+  assert.ok(!/title LIKE/.test(body), '管理面不许再自己写 title/body 的 LIKE 检索（那样"怎么搜"就有两份口径）');
+  assert.ok(!/k\.body LIKE/.test(body), '同上（旧写法是 k.title LIKE ? OR k.body LIKE ?）');
+});
+
+test("⑨ 管理面：空 q 走纯列表（不碰检索层）、命中后仍按 id DESC 返回展示列", () => {
+  const body = adminKnowledgeHandler();
+  // 空 q = 没给：`String(req.query.q || '').trim()` 之后再判真假，所以 `?q=` / `?q=%20` 都走列表那条路
+  assert.match(body, /const q = String\(req\.query\.q \|\| ''\)\.trim\(\);/, 'q 要先 trim 再判真假（空白词不许当检索词）');
+  assert.match(body, /if \(q\) \{/, '带 q / 不带 q 必须是两条明确分开的路');
+  // 不带 q 那条路仍要 LEFT JOIN shells 取展示列（前端 web/dist 读 body_preview 与 shell_key）
+  assert.match(body, /LEFT JOIN shells s ON s\.id = k\.shell_id/, '展示列仍要取（shell_key/body_preview 是管理视图的列形状）');
+  assert.match(body, /LEFT\(k\.body, 200\) AS body_preview/, 'body_preview 必须在（前端读它）');
+  assert.match(body, /s\.skey AS shell_key/, 'shell_key 必须在（前端读它）');
+  // 顺序口径：FTS 那条路按分数、兜底按 id；管理面最后统一成 id DESC → 也就是管理视图的既有顺序
+  assert.match(body, /rows\.sort\(\(a, b\) => Number\(b\.id\) - Number\(a\.id\)\)/, '管理面顺序仍按 id DESC（不改展示口径）');
+});
+
+test('⑨ 管理面：治理视图要看得见历史条目（includeHistorical 跟着 status 筛）', () => {
+  const body = adminKnowledgeHandler();
+  assert.match(body, /includeHistorical: !status/, '没显式筛 status ⇒ 要历史（管理视图本来就返回 superseded/obsolete）');
+  // 组合过滤条件与检索层同名同义（不带表别名）：account_id/scope/shell_id/kind/status
+  for (const c of ["'account_id=?'", "'scope=?'", "'shell_id=?'", "'kind=?'", "'status=?'"]) {
+    assert.ok(body.includes(c), '管理面的过滤条件要与检索层同名同义：' + c);
+  }
+});
+
+// ---- ⑩ 归档：复核 server/lessonrecall.js 不能走同一接口（只报告，不改） ----
+
+test('⑩ lessonrecall 走的是 reviews 表（不是 knowledge），因此不该接 searchKnowledge', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server', 'lessonrecall.js'), 'utf8');
+  assert.match(src, /FROM reviews WHERE result='bug'/, '错题召回的候选来自 reviews 表——与 knowledge 全文索引无关');
+  assert.ok(!/FROM knowledge/.test(src), '它不查 knowledge，所以检索后端接不上（硬塞就是把两个不同的东西并成一个）');
+  assert.match(src, /export function pickLessons/, '它现在用的是"实词 2-gram 重叠"判据（纯函数、可夹具），不是关键词检索');
+});
+
+// ---- ⑪ 反向核对锚点：破坏上述任一条，本文件必须报红 ----
+// （实测记录见交付报告：把 db.js 的 WITH PARSER ngram 去掉 ⇒ ④ 报红；把 fts.js 的兜底去掉 ⇒ ② 报红）
 
 // ---- ⑧ 启动即失败：RW_KB_SEARCH 指到不存在的后端时进程起不来（照 exec 的同款夹具）----
 

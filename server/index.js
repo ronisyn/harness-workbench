@@ -22,6 +22,9 @@ import { SHELL_TEMPLATES } from './shelltemplates.js';
 import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skillNameOk } from './skillsmgr.js';
 import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
+// 知识检索走后端层（v0.3 §4.3「记忆」行「全文检索打底…向量留接口位置后补」）：管理面带 `q` 时也走它，
+// 全仓**唯一**一份"知识怎么搜"的口径（会话侧 kb_search 走的同一个函数）。
+import { searchKnowledge } from './kbsearch/index.js';
 import { kbInjectMode, kbBlock } from './kbgate.js';
 import { lessonMode, lessonBlock, pickLessons, recallLessons } from './lessonrecall.js';   // OP-12：错题进按需召回面（recallLessons 内含账号边界）
 import { streamPatch } from './streampatch.js';
@@ -2289,24 +2292,59 @@ app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
 
 // ---------- ④ 知识库管理 API（§6.3/§8：管理视图按账号展示；会话可见语义由 F19/kb_* 各自生效） ----------
 // 列表：GET /api/knowledge?scope=global|shell|conv[&kind=fact|progress|guide|skill|lesson][&status=active|superseded|obsolete][&shell_id=&q=]；scope=空=全部（管理视图）
+// 2026-09-16（v0.3 §4.3「记忆」行「全文检索（FTS5）打底…向量留接口位置后补」②）：带 `q` 时**不再**在这里写
+// `k.title LIKE ? OR k.body LIKE ?`，改调 `server/kbsearch/` 的检索接口（接口+选择点+实现，唯一一份"知识怎么搜"）。
+// 三条边界（都是为了**不动既有对外行为**，不是为了省事）：
+//   · **不带 `q` = 纯列表**，完全不碰检索层（这条路径与改造前逐字相同）；
+//   · 带 `q` 时**仍按 `k.id DESC` 返回、仍带 shell_key/body_preview 这些展示列**——管理视图是 MySQL 表视图
+//     （前端 `web/dist` 读的就是这些列），不是检索结果视图；顺序与列形状一变，页面上就看得见；
+//   · `q` 为空白视为没给（`?q=` 与不带 `q` 同义），避免"空白词"被当成合法检索词。
+// 组合过滤（scope/shell_id/kind/status）与检索层的 `opts.filter` **同名同义**（`server/knowledge.js` 的
+// `kbVisibleWhere` 是同一套选项名），所以 `conds/params` 的两份形状一致，不会各长歪。
+const KB_ADMIN_SEARCH_LIMIT = 200; // 检索层的取值上界（与 `server/kbsearch/fts.js` 的 limitOf 上界一致；展示条数仍由下面的 LIMIT 管）
 app.get('/api/knowledge', requireAuth, async (req, res) => {
   try {
-    const conds = ['k.account_id=?'];
+    const conds = ['account_id=?'];
     const params = [req.user.id];
     const scope = String(req.query.scope || '');
-    if (['global', 'shell', 'conv'].includes(scope)) { conds.push('k.scope=?'); params.push(scope); }
-    if (scope === 'shell' && Number(req.query.shell_id)) { conds.push('k.shell_id=?'); params.push(Number(req.query.shell_id)); }
+    if (['global', 'shell', 'conv'].includes(scope)) { conds.push('scope=?'); params.push(scope); }
+    if (scope === 'shell' && Number(req.query.shell_id)) { conds.push('shell_id=?'); params.push(Number(req.query.shell_id)); }
     // 2026-09-09 文档型升级：kind 过滤（管理 Tab 用；缺省=全部，不改变默认查询语义）
     const kind = String(req.query.kind || '');
-    if (kind && /^(fact|progress|guide|skill|lesson)$/.test(kind)) { conds.push('k.kind=?'); params.push(kind); }
+    if (kind && /^(fact|progress|guide|skill|lesson)$/.test(kind)) { conds.push('kind=?'); params.push(kind); }
     // A6 条目状态过滤（治理支撑 §7.3）：active|superseded|obsolete
     const status = String(req.query.status || '');
-    if (['active', 'superseded', 'obsolete'].includes(status)) { conds.push('k.status=?'); params.push(status); }
-    if (req.query.q) { const like = '%' + String(req.query.q).trim() + '%'; conds.push('(k.title LIKE ? OR k.body LIKE ?)'); params.push(like, like); }
+    if (['active', 'superseded', 'obsolete'].includes(status)) { conds.push('status=?'); params.push(status); }
+    const q = String(req.query.q || '').trim();
+    // ---- 带关键词：走检索后端（FTS 打底，索引不可用时它自己如实回落 LIKE 并报 mode:'like'）----
+    if (q) {
+      const r = await searchKnowledge(q, {
+        db, where: conds.join(' AND '), params,
+        limit: KB_ADMIN_SEARCH_LIMIT, snippet: 0,
+        // 管理视图是**历史视图**：没显式筛 status 时它本来就返回 active/superseded/obsolete 全部条目
+        // （见上面那条 status 过滤；治理 Tab 要能看到 superseded/obsolete 才能把它们改回来）。
+        // 而检索层缺省只认"当前事实"（status='active'）——这是**会话侧**的纪律，不该套到治理视图上。
+        // 所以这里把 status 的**缺省**如实转成 includeHistorical=true（显式筛了 status 就不用它）。
+        includeHistorical: !status,
+      });
+      if (!r.items.length) return res.json({ ok: true, knowledge: [], mode: r.mode, backend: r.backend });
+      // 检索层给的是"命中哪些条目"；管理面要的是"展示列"，所以按命中的 id 再取一次展示列。
+      // 只按 id 过滤（可见范围/分类/状态/关键词**已经由检索层判过**——这里再套一遍条件就等于把判据写两份）。
+      const ids = r.items.map((x) => Number(x.id)).filter((n) => Number.isFinite(n));
+      if (!ids.length) return res.json({ ok: true, knowledge: [], mode: r.mode, backend: r.backend });
+      const rows = await db.query(
+        `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
+         FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
+         WHERE k.id IN (${ids.map(() => '?').join(',')}) LIMIT 500`, ids);
+      // 顺序沿用改造前的 `k.id DESC`（管理面口径不变；检索的分数**不**改展示顺序）
+      rows.sort((a, b) => Number(b.id) - Number(a.id));
+      return res.json({ ok: true, knowledge: rows, mode: r.mode, backend: r.backend });
+    }
+    // ---- 不带关键词：纯列表（与改造前逐字相同）----
     const rows = await db.query(
       `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
        FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
-       WHERE ${conds.join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
+       WHERE ${conds.map((c) => 'k.' + c).join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
     res.json({ ok: true, knowledge: rows });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
