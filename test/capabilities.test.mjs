@@ -1,14 +1,24 @@
 // test/capabilities.test.mjs - RA-31 能力清单 + OP-16 降级语义夹具（2026-09-15）
 // 依据《RW-Agent 架构 v1.1》§10（① 结束原因 ② 用量 ③ 用了哪些能力 ④ 自述不可信）与 §7.2（enforcement 三值）。
-// 夹具的价值在**不许自夸**：层 1/2/4 一期确实没有，整体就必须是 partial；
+// 夹具的价值在**不许自夸**：层 1/4 一期确实没有，整体就必须是 partial 而不是 full；
 // 任何一次"把没有的能力写成 full"都会让这里的断言报红。
 // 2026-09-16 增补：候选 D（提示注入如实声明）——同一立场的第二个对象，见文件末尾三段。
+// 2026-09-16 语义变更（v0.3 §7.1 ⑰ 沙箱服务与分级）：**第 2 层（引擎自带沙箱）的 state 不再是常量，
+//   而是 `server/sandbox/` 的功能性探针结果**（拿不到 runner ⇒ none；探到 runner ⇒ partial）。
+//   因此本文件原来那条"一期没有沙箱 ⇒ 整体只能是 partial，绝不能报 full"的**反向锁改了口径**：
+//   不再锁"第 2 层必须是 none"（那会与"探到真 runner 也不许报"混为一谈），改成锁三件：
+//     ① 整体绝不许是 full（第 1/4 层未接入 ⇒ 这是硬上界）；
+//     ② 第 2 层的 state **必须与注入的探针结果一致**（探到 runner ⇒ partial，拿不到 ⇒ none）——
+//        这才是真正的"不许自夸"：不许无条件写死 none，也不许无条件写死 partial；
+//     ③ 探测以外的层（1/4）仍是常量 none，且每一层都要给出能读懂的话。
+//   改口的理由写在这里与夹具注释里（§0.5 逐项过账：判据变了要留痕，不许悄悄放宽）。
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { enforcementReport, capabilityManifest, capabilitySummary, DEGRADE_CATALOG, ENFORCEMENT_VALUES, PROMPT_INJECTION } from '../server/capabilities.js';
+import { composeEnforcement, fakeProbe } from '../server/sandbox/report.js';
 
 test('OP-16：enforcement 三值成立，且四层逐层给出状态（不许笼统说"有隔离"）', () => {
   const r = enforcementReport({ permission: 'full', root: '/' });
@@ -21,14 +31,33 @@ test('OP-16：enforcement 三值成立，且四层逐层给出状态（不许笼
   }
 });
 
-test('OP-16 负例：一期没有沙箱 ⇒ 整体只能是 partial，绝不能报 full', () => {
+test('OP-16 负例：整体绝不许报 full；第 2 层的 state 必须**跟着探测结果**走（探到 ⇒ partial / 拿不到 ⇒ none）', () => {
+  // ① 拿不到 runner（本机真实情形：没有可用沙箱）⇒ 第 2 层 none，整体 partial
+  const noRunner = enforcementReport({ permission: 'full', root: '/', sandbox: composeEnforcement({ permission: 'full', root: '/' }, fakeProbe({ ok: false, reason: '夹具：没有 runner' })) });
+  assert.equal(noRunner.level, 'partial', '第 1/4 层未接入 ⇒ 整体永远不可能是 full');
+  assert.equal(noRunner.layers.find((l) => l.id === 2).state, 'none', '探不到 runner ⇒ 第 2 层如实报 none');
   for (const perm of ['full', 'guard', 'write', 'read']) {
-    const r = enforcementReport({ permission: perm, root: '/srv/rw-workspace' });
-    assert.equal(r.level, 'partial', perm + ' 会话也不许报 full（层 1/2/4 未接入）');
+    const r = enforcementReport({ permission: perm, root: '/srv/rw-workspace', sandbox: composeEnforcement({ permission: perm, root: '/srv/rw-workspace' }, fakeProbe({ ok: false })) });
+    assert.equal(r.level, 'partial', perm + ' 会话也不许报 full');
+    assert.notEqual(r.level, 'full');
   }
-  const r = enforcementReport({ permission: 'full', root: '/' });
-  assert.equal(r.layers.find((l) => l.id === 1).state, 'none', '环境隔离未接入 = none');
-  assert.equal(r.layers.find((l) => l.id === 4).state, 'none', '网络出口未做白名单 = none');
+  assert.equal(noRunner.layers.find((l) => l.id === 1).state, 'none', '环境隔离未接入 = none');
+  assert.equal(noRunner.layers.find((l) => l.id === 4).state, 'none', '网络出口未做白名单 = none');
+
+  // ② 探到真 runner ⇒ 第 2 层**必须**报 partial（这正是本次改口的反向锁：报 none 也是不实）
+  const withRunner = enforcementReport({ permission: 'write', root: '/srv/ws', sandbox: composeEnforcement({ permission: 'write', root: '/srv/ws' }, fakeProbe({ ok: true, runner: 'bwrap' })) });
+  assert.equal(withRunner.layers.find((l) => l.id === 2).state, 'partial');
+  assert.equal(withRunner.sandbox.runner, 'bwrap');
+  assert.equal(withRunner.sandbox.probed, true);
+  assert.equal(withRunner.sandbox.enforcement, 'partial');
+  assert.match(withRunner.layers.find((l) => l.id === 2).note, /bwrap/, '第 2 层的实话要点名是哪个 runner');
+  assert.equal(withRunner.level, 'partial', '即便第 2 层工作，第 1/4 层未接入 ⇒ 整体仍不许报 full');
+
+  // ③ 未探测（没有拿到探测结果）⇒ 按"没有"上报，**不假装**探过
+  const unprobed = enforcementReport({ permission: 'write', root: '/srv/ws', sandbox: composeEnforcement({ permission: 'write', root: '/srv/ws' }, { probed: false, ok: false, runner: null }) });
+  assert.equal(unprobed.sandbox.probed, false);
+  assert.equal(unprobed.layers.find((l) => l.id === 2).state, 'none');
+  assert.match(unprobed.layers.find((l) => l.id === 2).note, /未探测|没有/, '未探测时要说清是"没拿到结果"，不许含糊');
 });
 
 test('OP-16：工具层围栏是唯一真在工作的一层，且 full 权限下降级为 partial 并说明原因', () => {
@@ -65,13 +94,18 @@ test('RA-31：能力清单成文暴露四件事（能力/约束/降级/诚实性
 });
 
 test('RA-31：事件里带的是紧凑版（别把整份清单塞进每条事件）', () => {
-  const s = capabilitySummary({ permission: 'full', root: '/' }, ['read_file', 'read_file', 'grep_search']);
+  const sandbox = composeEnforcement({ permission: 'full', root: '/' }, fakeProbe({ ok: false, reason: '夹具：没有 runner' }));
+  const s = capabilitySummary({ permission: 'full', root: '/', sandbox }, ['read_file', 'read_file', 'grep_search']);
   assert.equal(s.enforcement, 'partial');
   assert.equal(s.promptInjection, 'none', '候选 D：run_end 紧凑版同样要带诚实性取值');
   assert.deepEqual(s.layers, ['1:none', '2:none', '3:partial', '4:none'], '只带"没做到 full"的层');
   assert.deepEqual(s.used, ['read_file', 'grep_search'], 'used 去重且保序');
   assert.equal(JSON.stringify(s).length < 300, true, '紧凑版必须小（<300 字符）');
   assert.equal(s.tools, undefined, '紧凑版不带工具全名单');
+  // 沙箱这一维在逐次上报里**逐次如实**：拿不到 runner ⇒ none；探到 runner ⇒ partial（不许两处口径漂移）
+  const s2 = capabilitySummary({ permission: 'write', root: '/srv/ws', sandbox: composeEnforcement({ permission: 'write', root: '/srv/ws' }, fakeProbe({ ok: true, runner: 'bwrap' })) }, []);
+  assert.equal(s2.layers.includes('2:none'), false, '探到 runner 时第 2 层不该再报 none');
+  assert.equal(s2.layers.includes('2:partial'), true);
 });
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,13 @@ export const SPILL_BYTES = byteCeiling(4000);
 const READER_TOOLS = new Set(['read_file', 'read_file_range']);
 
 const safeName = (s) => String(s || 'x').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+// 会话归属：溢出文件一律落在 <SPILL_DIR>/<会话>/ 之下（写出与取回两处共用同一个算式，不许各写一份）。
+// 这条目录约定同时是 v0.3 §4.4「溢出文件的权限」的判据（取回时校验归属，见 readSpill）。
+export const spillOwnerDir = (conversationId) => path.join(SPILL_DIR, safeName(conversationId || 'anon'));
+// 同毫秒内多次落盘必须落到不同文件：并行工具调用里若没有 callId（工具内部落盘就是这种），
+// 只用 Date.now() 会互相覆盖（后写的把先写的顶掉，定位符指向别人的内容）。序号只用于消歧，不参与任何判定。
+let spillSeq = 0;
+const spillFileName = (tool, callId) => safeName(tool) + '-' + safeName(callId || Date.now().toString(36) + '-' + (++spillSeq)) + '.txt';
 
 // 预览几何：头 60% + 尾 30%（余下 10% 给省略提示本身）；按字符切，Unicode 码点安全
 // ⚠️ 调用方必须保证 budget ≤ s.length，否则头尾会重叠、省略量变成负数、输出比原文还长
@@ -79,6 +86,86 @@ function compose(parts, locator) {
   return parts.head + '\n…[已省略 ' + parts.omittedBytes + ' 字节（' + parts.omittedChars + ' 字符）；' + locator + ']…\n' + parts.tail;
 }
 
+// ── 「大结果」工具的明细落盘（v0.3 §6.1 通则：任何大结果工具都必须遵守溢出规范）────────────────
+// 背景（v0.3 §6.1 点名的 Excel 那一条）：工具**自己**先 slice(0, 20000) 再进上下文，进上下文后又被外层裁到 4000 ——
+// **中间数据丢了、token 照烧**，而被切掉的那段既无定位符也不落盘（符合性核对 §3.2 列出 5 个这样的工具）。
+// 通则：明细一律落盘，上下文只留「结构摘要 + 行列/行数信息 + 溢出路径」，需要明细时用 fetch_spill 按范围二次取数。
+// 下面两个函数是这条通则的唯一出处（spillToolResult 管的是"已经生成好的最终文本"那一层，两件事不要混）。
+export const DETAIL_PREVIEW_CHARS = Math.floor(READ_INLINE_CHARS / 2); // 预览占内联上限的一半：另一半留给摘要字段与定位符，
+// 免得"摘要"自身又超 4000 被外层 spill 再切一次（那会把定位符挤到预览之外，模型反而读不到路径）。
+
+/**
+ * 明细全文落盘（best-effort）。路径 = <SPILL_DIR>/<会话>/<工具>-<callId|时间戳>.txt。
+ * @param {string} text 明细全文
+ * @param {{tool?:string, conversationId?:*, callId?:string, redact?:Function}} meta
+ * @returns {{path:string, bytes:number}}
+ */
+export function writeSpill(text, meta = {}) {
+  const s = String(text ?? '');
+  const dir = spillOwnerDir(meta.conversationId);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, spillFileName(meta.tool, meta.callId));
+  const body = typeof meta.redact === 'function' ? meta.redact(s) : s; // 与落库同口径脱敏（密钥不入盘）
+  fs.writeFileSync(file, body, 'utf8');
+  return { path: file, bytes: Buffer.byteLength(s, 'utf8') };
+}
+
+/** 头部按行预览（按字符预算；切不动时退回字符切并如实标注，绝不静默给半行后说"完整"） */
+function headLines(s, budget) {
+  const totalLines = String(s).split('\n').length;
+  if (s.length <= budget) return { text: s, shownLines: totalLines, omittedChars: 0, charCut: false };
+  const lines = String(s).split('\n');
+  const out = [];
+  let used = 0;
+  for (const l of lines) {
+    if (used + l.length + 1 > budget) break;
+    out.push(l);
+    used += l.length + 1;
+  }
+  if (!out.length) return { text: s.slice(0, budget), shownLines: 1, omittedChars: s.length - budget, charCut: true };
+  const text = out.join('\n');
+  return { text, shownLines: out.length, omittedChars: s.length - text.length, charCut: false };
+}
+
+/**
+ * 「结构摘要 + 溢出路径」型工具的统一收口：明细落盘 + 头部预览 + 量。
+ * **调用方不得先截断**：先 slice 再传进来 = 中段静默丢失（这正是 v0.3 §6.1 要治的写法）。
+ * 落盘失败不静默丢：返回 degraded 原因，调用方必须如实带出去（信息不丢优先于省 token）。
+ * @param {string} text 明细全文
+ * @param {{tool?:string, conversationId?:*, callId?:string, redact?:Function}} meta
+ * @param {{previewChars?:number, force?:boolean}} opts
+ * @returns {{preview:string, previewLines:[number,number], totalLines:number, omittedChars:number,
+ *            chars:number, bytes:number, spillPath:string|null, degraded:string|null}}
+ */
+export function detailSummary(text, meta = {}, opts = {}) {
+  const s = String(text ?? '');
+  const budget = Number(opts.previewChars) > 0 ? Number(opts.previewChars) : DETAIL_PREVIEW_CHARS;
+  const bytes = Buffer.byteLength(s, 'utf8');
+  const totalLines = s.split('\n').length;
+  const preview = headLines(s, budget);
+  const over = opts.force === true || s.length > budget;
+  const base = {
+    preview: preview.text,
+    previewLines: [1, Math.max(1, preview.shownLines)],
+    totalLines,
+    omittedChars: preview.omittedChars,
+    chars: s.length,
+    bytes,
+    spillPath: null,
+    degraded: null,
+  };
+  if (!over) return base;
+  try {
+    const { path: file } = writeSpill(s, meta);
+    logSpill(meta.tool, meta.conversationId, bytes, 'detail-stored', file);
+    return { ...base, spillPath: file };
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    logSpill(meta.tool, meta.conversationId, bytes, 'detail-degraded', msg);
+    return { ...base, degraded: msg };
+  }
+}
+
 // 溢出事件留痕（与 [collapse] 同风格）：三条路径（读取类/已落盘/降级）都能在 journalctl 取证，C2 归因也用它
 function logSpill(tool, conv, bytes, outcome, extra) {
   console.log('[spill] tool=' + (tool || '-') + ' conv=' + (conv || '-') + ' bytes=' + bytes + ' outcome=' + outcome + (extra ? ' ' + extra : ''));
@@ -116,13 +203,9 @@ export function spillToolResult(text, cap, meta = {}) {
     logSpill(tool, meta.conversationId, bytes, 'reader', srcPath);
     return smaller(build('全文即源文件 ' + srcPath + '（共 ' + bytes + ' 字节）；用 read_file_range 带 offset/length 分段读'));
   }
-  // 1)+2) 落盘取回；失败降级
+  // 1)+2) 落盘取回；失败降级（落盘实现与 detailSummary 共用 writeSpill：一个落盘口径只留一处）
   try {
-    const dir = path.join(SPILL_DIR, safeName(meta.conversationId || 'anon'));
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, safeName(tool) + '-' + safeName(meta.callId || String(Date.now())) + '.txt');
-    const body = typeof meta.redact === 'function' ? meta.redact(s) : s; // 与落库同口径脱敏（密钥不入盘）
-    fs.writeFileSync(file, body, 'utf8');
+    const { path: file } = writeSpill(s, meta);
     const out = smaller(build('全文已存 ' + file + '（' + bytes + ' 字节），取回：fetch_spill {path:"' + file + '", offset:0, length:20000}'));
     if (out === s) { logSpill(tool, meta.conversationId, bytes, 'skipped-not-smaller', file); return s; }
     logSpill(tool, meta.conversationId, bytes, 'stored', file);
@@ -133,11 +216,25 @@ export function spillToolResult(text, cap, meta = {}) {
   }
 }
 
-/** 按范围取回溢出文件（仅供 fetch_spill 使用；路径必须落在 SPILL_DIR 内） */
-export function readSpill(p, offset, length) {
+/**
+ * 按范围取回溢出文件（仅供 fetch_spill 使用）。
+ * 两道围栏：① 路径必须落在 SPILL_DIR 内；② **必须是本会话自己写的**那份（v0.3 §4.4「溢出文件的权限」）。
+ * 第②条此前缺失（符合性核对 §3.5 缺陷②）：溢出文件按会话分目录存，但取回只查了第①条 ⇒ 任意会话
+ * （含 read 档）能读别的会话的溢出文件。归属判据就是目录名（写出时用 spillOwnerDir，两边同一个算式）。
+ * 取不到（或不归属）一律**如实报错**，不返回空内容——静默返回空会让模型以为"文件是空的"。
+ * @param {string} p 溢出文件路径（上下文里的定位符）
+ * @param {number} [offset] 起始字符偏移
+ * @param {number} [length] 读取字符数
+ * @param {*} [conversationId] 请求方会话 id（缺省按 'anon'，与写出侧同口径）
+ */
+export function readSpill(p, offset, length, conversationId) {
   const abs = path.resolve(String(p || ''));
   const root = path.resolve(SPILL_DIR);
   if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error('只能读取溢出目录内的文件：' + SPILL_DIR);
+  const owner = path.basename(path.dirname(abs));
+  if (owner !== safeName(conversationId || 'anon')) {
+    throw new Error('只能取回本会话自己的溢出文件：该文件由别的会话写出（溢出定位符只在写出它的那个会话里有效）。请用本会话自己的工具结果定位符，或重新取数。');
+  }
   const off = offset == null ? 0 : Number(offset);
   const len = length == null ? 20000 : Number(length);
   if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + offset);

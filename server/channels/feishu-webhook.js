@@ -4,10 +4,10 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import { db } from '../db.js';
-import { runAgent } from '../agent.js';
-import { config } from '../config.js';
 import { getToken as getFeishuToken } from '../tools/feishu.js';
-import { RW_WORKSPACE } from '../env.js';
+// 渠道「跑一轮并落账」的共享入口（v0.3 §4.7 G5「跨端一致」）：飞书/微信走同一套语义
+// （事件账本、投递记录、可停/可续、失败码），本文件只留平台协议这一层（验签/解密/收发消息）。
+import { runChannelTurn, makeChannelTurnDeps } from './run-turn.js';
 
 const FEISHU_API = 'https://open.feishu.cn/open-apis';
 
@@ -118,14 +118,15 @@ export function registerFeishuWebhook(app) {
       }
       console.log(`[feishu] 收到 ${chatId}: ${msg.text.slice(0, 60)}`);
       const conv = await findOrCreateConv(chatId);
-      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', msg.text]);
-      const hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conv.id]);
-      const messages = hist.map((m) => ({ role: m.role, content: m.content }));
-      const ctx = { permission: conv.permission || 'read', accountId: null, conversationId: conv.id, root: RW_WORKSPACE };
-      const result = await runAgent({ provider: 'deepseek', model: 'deepseek-v4-flash', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
-      const reply = result.content || '（无回复）';
+      // 跑一轮：历史组装、runAgent（带 emit）、事件账本、投递记录、现场登记全在共享入口里 ——
+      // 改前这里是"自己拼历史 + 直调 runAgent 不传 emit + 硬编码 deepseek/deepseek-v4-flash"，
+      // 于是飞书会话不可观测/不可停/不可续、失败无处落账（核对报告 §3.5 缺陷①）。对外行为不变：照样回一条文本。
+      const turn = await runChannelTurn({
+        channel: 'feishu', conversationId: conv.id, text: msg.text, deps: await makeChannelTurnDeps(),
+      });
+      const reply = turn.content || '（无回复）';
       await sendFeishuText(chatId, 'chat_id', reply);
-      await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'assistant', reply]);
+      // 注：user 消息与 assistant 回复的落库都已在共享入口内完成（顺序与 /api/chat 一致），这里不再重复写。
     } catch (e) {
       console.error('[feishu] 消息处理失败:', e.message);
       try { await sendFeishuText(ev.message?.chat_id, 'chat_id', '处理出错：' + e.message.slice(0, 100)); } catch { /* ignore */ }

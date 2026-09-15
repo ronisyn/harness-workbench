@@ -1,7 +1,10 @@
 // server/tools/repomap.js - P2-3 repo_map：代码库结构感知（借鉴 Aider tree-sitter repo map 的轻量版）
 // 目的：给长代码库任务一张"地图"——目录树 + 每文件行数/imports/顶层符号摘要，让 Agent 一次看清结构，
 //       少做盲目 list_dir/find/grep 探测。不引入完整 tree-sitter（工程重），用逐行轻量扫描，够用且快。
-// 输出纪律：容量受控（MAX_FILES / 符号与 imports 条数 / 总字符截断），避免地图本身撑爆上下文。
+// 输出纪律（2026-09-16 改，v0.3 §6.1 通则）：本模块**不再做字符截断**。原先 MAX_TEXT=30000 的写法是
+//       循环中途 break，被切掉的尾部**根本没被生成**，因此既落不了盘也没有定位符——那正是"静默丢中段"。
+//       现在改为：把地图**生成完整**（生成侧仍有两道如实上报的界：MAX_FILES 扫描上限、明细 200 条上限，
+//       两者都体现在 summary.truncated 与目录树的 (N files) 计数里），由上层 spill 决定"上下文留多少 + 明细存哪"。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -19,7 +22,7 @@ const TEXT_EXT = new Set(['.md', '.mdx', '.txt', '.json', '.jsonc', '.yaml', '.y
 const MAX_FILES = 400;        // 扫描文件上限（超出仅计数不再进明细，防大仓库爆炸）
 const MAX_SYMBOLS = 80;       // 每文件符号条数上限
 const MAX_IMPORTS = 30;       // 每文件 imports 条数上限
-const MAX_TEXT = 30000;       // 输出文本总字符上限（地图不是全文）
+const MAX_DETAIL_FILES = 200; // 文件明细条数上限（超出只进目录树计数；如实体现在 summary.truncated）
 const DEPTH_TREE = 5;         // 目录树最大深度（超出折叠为 "…"）
 
 function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch { return false; } }
@@ -158,28 +161,28 @@ export function buildRepoMap(dir) {
   };
   walk(root, 1);
   dirs.sort();
-  // 输出文本组装（受容量约束）
+  // 输出文本组装（**不截断**：容量交给上层 spill，见文件头"输出纪律"）
   const totalFiles = fileMeta.length;
   const tree = treeText(root, dirs, filesByDir, totalFiles);
-  const parts = ['repo_map: ' + root, '', tree, '', '── 文件明细（前 ' + Math.min(fileMeta.length, 200) + '，共 ' + totalFiles + ' 源/文本文件） ──'];
+  const parts = ['repo_map: ' + root, '', tree, '', '── 文件明细（前 ' + Math.min(fileMeta.length, MAX_DETAIL_FILES) + '，共 ' + totalFiles + ' 源/文本文件） ──'];
   let shown = 0;
   let truncated = false;
   for (const f of fileMeta) {
-    if (shown >= 200) { truncated = true; break; }
+    if (shown >= MAX_DETAIL_FILES) { truncated = true; break; }
     let block = '\n▪ ' + f.path + (f.lines > 0 ? '  (' + f.lines + ' 行)' : '');
     if (f.imports.length) block += '\n  imports: ' + f.imports.slice(0, 15).join(', ') + (f.imports.length > 15 ? ', …' : '');
     if (f.symbols.length) block += '\n  symbols: ' + f.symbols.join(', ');
-    if ((parts.join('\n').length + block.length) > MAX_TEXT) { truncated = true; break; }
     parts.push(block);
     shown++;
   }
-  const text = parts.join('\n') + (truncated ? '\n…（已达容量上限 ' + MAX_TEXT + ' 字符，地图截断）' : '');
+  // 结尾如实说明"还有什么没列"（原来是"已达容量上限 30000 字符"——那既说不清丢的是什么，也无处可查）
+  const text = parts.join('\n') + (truncated ? '\n…（本轮只列前 ' + MAX_DETAIL_FILES + ' 个文件的明细，共 ' + totalFiles + ' 个；其余见目录树的 (N files) 计数，或按目录细分再取）' : '');
   return {
     ok: true,
     root,
     text,
     summary: { files: totalFiles, dirs: dirs.length, skipped, truncated },
-    files: fileMeta.slice(0, 200).map((f) => ({ path: f.path, lines: f.lines, symbols: f.symbols.length, imports: f.imports.length })),
+    files: fileMeta.slice(0, MAX_DETAIL_FILES).map((f) => ({ path: f.path, lines: f.lines, symbols: f.symbols.length, imports: f.imports.length })),
   };
 }
 

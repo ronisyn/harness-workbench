@@ -60,7 +60,7 @@
         },
         {
           "file": "server/agent.js",
-          "pattern": "prefix:invalidate"
+          "pattern": "PREFIX_LEDGER.INVALIDATE"
         }
       ],
       "note": "只追加机检 + C4 账本；机检口径实测 0 行"
@@ -1002,7 +1002,7 @@
           "pattern": "RW_FS_ROOT"
         },
         {
-          "file": "server/shell.js",
+          "file": "server/exec/local.js",
           "pattern": "powershell.exe"
         },
         {
@@ -1131,6 +1131,32 @@
         }
       ],
       "note": "**2026-09-16 落地（D3/OP-01）**。做法是**先量后改**：把\"平台数据进模型上下文\"的每条通道过一遍——知识库块（`kbVisibleWhere` 按账号+范围过滤）、会话内数据（早期摘要/目标/现场/后台任务通知，都限本会话）、技能/壳/项目 AGENTS.md（平台配置，共享是设计）、运行时快照（本会话自己的用量）都成立；**只有一条没有边界**：错题召回（OP-12）的候选 SQL 写在 index.js 里、`SELECT ... FROM reviews WHERE result='bug' ...` **没有任何账号过滤** ⇒ 全平台所有账号的错题标题会被注进任意会话，而同一份数据在 HTTP 面（`GET /api/reviews`）是按 `account_id=?` 过滤的——两处口径不一致，模型上下文成了绕过账号边界的数据出口。**修法照 HTTP 面那一条口径**（不发明新规则）：SQL 与过滤条件收进 `lessonrecall.js:recallLessons`（缺账号就不召回、且不发查询），index.js 改走它；跨**会话**召回保留（OP-12 原意），跨**账号**召回不行。另加一等字段 `capabilities.dataEgress`，如实写出\"注入层按账号过滤 / 工具出口按会话权限放行 / `db_query` 是全库只读、不做行级账号隔离\"，边界报 `partial`（没有行级租户隔离——工作台形态的有意选择，但要写出来，不能让人以为已经隔离好了）。**真机验证**（真库）：造一条别的账号的、与问句强重叠的错题 → 管理员账号召回 **0 条**（不泄漏）；同一账号自己问 → 召回到（说明过滤没过头）；闲聊 → 0 条（原口径未退化）；清单字段就位；验完删除哨兵数据。夹具 6 条，**反向核对过**（去掉 account_id 过滤 → 前两条报红）。**沙箱本身随 D5 一起搁置**（不接外部引擎）。"
+    },
+    {
+      "id": "RA-60",
+      "title": "JSON-RPC 形态：通用方法门面（v0.3 §7.1 ⑳，P3）",
+      "owner": "agent",
+      "kind": "auto",
+      "milestone": "M2",
+      "anchors": [
+        {
+          "file": "server/jsonrpc.js",
+          "pattern": "export const JSONRPC_VERSION"
+        },
+        {
+          "file": "server/jsonrpc.js",
+          "pattern": "name: 'session.chat'"
+        },
+        {
+          "file": "scripts/rw-jsonrpc.mjs",
+          "pattern": "RW_JSONRPC_BASE_URL"
+        },
+        {
+          "file": "test/jsonrpc.test.mjs",
+          "pattern": "不许有孤儿"
+        }
+      ],
+      "note": "**2026-09-16 落地核心 + stdio 适配器（HTTP 挂载未做）**。v0.3 §0.4 的对外形态是 headless → MCP server → JSON-RPC 三级；我们原先停在第二级（`server/mcp-server.js` 就是 stdio 上的 JSON-RPC 2.0，但**绑死 MCP 的方法名与 `content[].text` 结果形状**，且已有真实第三方消费者不许改）⇒ 本轮补的是第三级的**通用门面**：`server/jsonrpc.js`（`Registry.register(name, handler, {description,contract,params})` + 单一 `dispatch` + `serveStdio`，方法名取 `资源.动作`）+ `scripts/rw-jsonrpc.mjs`（stdio 适配器，复用 MCP 适配器的后端封装：登录/建会话/chat SSE/messages/export-full/activity）。**照 DSH `dsh-sdk-jsonrpc-server` 的\"协议层薄、业务在核\"**：协议层只做分帧、分派、四个标准错误码（-32700/-32600/-32601/-32602），**一行业务判断都没有**；业务失败走结果里的 `isError`（与 MCP 门面同口径：调用方要能区分\"你不会说协议\"与\"这次没干成\"）。**不新造对外能力**：6 个方法逐条映射到 `docs/会话API契约-v1.md` §3 已冻结端点（`system.capabilities`→`GET /api/health`、`session.chat`→`POST /api/conversations`+`POST /api/chat`、`session.stop`→`POST /api/chat/stop`、`session.status`→`GET /api/conversations/:id/messages`、`session.export`→`GET /api/conversations/:id/export-full`、`session.activity`→`GET /api/conversations/:id/activity`）。夹具 11 条（`test/jsonrpc.test.mjs`，含**解析契约文档端点表**核对映射表无孤儿、粘包/半行/UTF-8 跨 chunk 分帧、通知不回、握手方法表从注册表出），`test/mcp-server.test.mjs` 8 条未受影响。**反向核对过**（6 处破坏各对应报红的用例）：错误码写错→③、去掉多余参数校验→④、业务失败写成 JSON-RPC error→②⑥、未知方法也回帧→⑦⑧、用 `toString()` 替掉 `StringDecoder`→⑧、映射表指向不存在的端点→①。**用桩平台（临时脚本，不入库）跑通全部 6 个方法**：握手（含方法表）/ chat（真解 SSE：`status=saved`、`runId`、`messageId`、`finishReason`、`usage`）/ status / export / activity / stop，并验证 `idempotencyKey` **真的进了 `Idempotency-Key` 请求头**（桩平台侧读到 `idem=k-1`）。**顺带撞出并修掉一个真缺陷（在适配器自己的代码里）**：读完 `run_end` 后在 `for await` 循环体内 `ac.abort()` 会让那个 `next()` 当场以 AbortError 拒绝、落进\"超时\"分支 ⇒ **流明明跑完却报 `status:'timeout'`**（内容靠回读落库消息兜住，所以肉眼不易发现）。改法是读满即 `break`、abort 只留给超时；两条分支都实测：桩平台正常收尾→`saved`，桩平台只发一帧就挂着→`timeout`（waitSeconds=5 时约 5 秒返回）。**同一写法在 `scripts/rw-mcp-server.mjs:102` 也有**（本轮按\"只碰必须碰的\"未改它，只报告）。**仍未做**：没有 HTTP 挂载（`server/index.js` 本轮被别的代理改，留到后续）；没有对**真平台**跑通一轮会话（需要活着的平台 + 账号，只到桩平台这一层）；审批/问询的裁决方法（`POST /api/approvals/:id`、`POST /api/asks/:id`）未纳入——缺 `GET /api/approvals`、`GET /api/asks` 两个列表方法，只给 id 的裁决口对调用方没用，要加先改契约。"
     }
   ]
 }

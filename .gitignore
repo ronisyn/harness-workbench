@@ -33,3 +33,8 @@ tmp/
 
 # Skills (F15) - runtime-authored skill content
 skills/
+
+# 溢出明细（server/tools/spill.js）：默认落盘位置是 RW_WORKSPACE 下的 spill/，
+# 本机跑夹具/脚本时 RW_WORKSPACE 可能落在仓库根，运行态产物就会出现在工作区里
+# ——磁盘运行态（可清理、可按需重建），不进版本库。服务器上 RW_WORKSPACE 在平台目录之外，不受影响。
+spill/

@@ -189,7 +189,7 @@
     },
     {
       "name": "extract_docx",
-      "description": "提取 Word 文本\n何时用：解析 Word 文本\n勿用：文本文件用 read_file\n例：extract_docx {path}",
+      "description": "提取 Word 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回\n何时用：解析 Word 文本\n勿用：文本文件用 read_file\n例：extract_docx {path}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -204,7 +204,7 @@
     },
     {
       "name": "extract_pdf",
-      "description": "提取 PDF 文本\n何时用：解析 PDF 文本\n勿用：文本文件用 read_file\n例：extract_pdf {path}",
+      "description": "提取 PDF 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回\n何时用：解析 PDF 文本\n勿用：文本文件用 read_file\n例：extract_pdf {path}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -219,7 +219,7 @@
     },
     {
       "name": "extract_pptx",
-      "description": "提取 PPT 文本\n何时用：解析 PPT 文本\n勿用：文本文件用 read_file\n例：extract_pptx {path}",
+      "description": "提取 PPT 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回\n何时用：解析 PPT 文本\n勿用：文本文件用 read_file\n例：extract_pptx {path}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -234,7 +234,7 @@
     },
     {
       "name": "extract_xlsx",
-      "description": "提取 Excel 内容\n何时用：解析 Excel 内容\n勿用：文本文件用 read_file\n例：extract_xlsx {path}",
+      "description": "提取 Excel 内容。**不会把整表灌进上下文**：返回 结构摘要（sheets：每表行数/列数）+ 行列信息（各表在溢出文件里的 offset/length 与 fromLine/toLine）+ 溢出文件路径 + 头部预览。需要明细时按范围二次取数：fetch_spill {path, offset, length}（offset/length 用某个表的区间即可只取那张表）\n何时用：解析 Excel 内容\n勿用：文本文件用 read_file\n例：extract_xlsx {path}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -835,7 +835,7 @@
     },
     {
       "name": "repo_map",
-      "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"<目录绝对路径>\"}",
+      "description": "生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要。地图较大时不会整份灌进上下文——只回 summary（文件/目录数）+ 头部预览 + 溢出文件路径，明细用 fetch_spill {path, offset, length} 按范围取回；较小时直接给 text。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测\n何时用：大仓库/陌生目录任务开始时先取结构地图（目录树+行数+imports+符号）\n勿用：小目录直接 list_dir；找符号位置用 grep_search\n例：repo_map {dir:\"<目录绝对路径>\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2727,6 +2727,7 @@
     "copy_move",
     "db_query",
     "edit_file",
+    "fetch_spill",
     "fetch_url",
     "find_file",
     "finish_task",

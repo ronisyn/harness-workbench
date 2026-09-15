@@ -10,7 +10,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart, restartPlan } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, APPROVAL_REQUIRED, assembleTools, registerToolSource, combine, registerDynamicTools } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
 import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepServed, grepRepeatNotice, markWritten } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
@@ -21,15 +21,20 @@ import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT, RW_OS } from '../env.js';
 import { runShellLine, spawnShellLine } from '../shell.js';
-import { readSpill, lineAlignedPreview, READ_INLINE_CHARS } from './spill.js';
+import { readSpill, lineAlignedPreview, detailSummary, READ_INLINE_CHARS } from './spill.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
 // guard 会话调用它们不弹审批卡（曾误写文档为 7 项已改回 5 项，现按契约档位补全为 7 项）。
-const GUARDED_TOOLS = new Set(['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits']);
+// 2026-09-16（v0.3 §4.2「审批声明化」/§7.1 ⑤）：集合**不再写在这里**，唯一出处＝tools/manifest.js 的 `approval: true`
+// （装配期校验取值；`scripts/security-check.mjs` 与 test/manifest.test.mjs 双向锁住"仍是这 7 项"，行为不变）。
+// 用函数而不是一次性 Set 快照：registry 的派生数组在热重载（RA-03）时**就地重填**，Set 快照会一直看到旧集合。
+const approvalRequired = (n) => APPROVAL_REQUIRED.includes(n);
 // 会改动**文件系统内容**的工具：成功后让本会话已记录的搜索结果作废（见 execTool 里的 markWritten 调用点）。
 // 故意不含 run_command —— 它可能改文件也可能不改，而多作废一次的代价只是"搜索结果多给一遍"，方向安全。
 const MUTATING_FILES = new Set(['write_file', 'append_file', 'edit_file', 'delete_file', 'mkdir', 'copy_move', 'undo_checkpoint']);
+// db_query 的结果内联行数上限＝**既有现值 50**（照抄，不新拍）；超出部分不再静默丢弃，而是落 spill 给定位符（v0.3 §6.1 通则）。
+const DB_INLINE_ROWS = 50;
 
 // —— 占位符污染统一检疫（2026-09 实测根因：长参数到达执行层前可能被替换为
 // "[内容已截断(原文 N 字符)/原文 N 字符已截断/上下文已裁剪中段/…已压缩归档/_archived"
@@ -128,8 +133,12 @@ export function inside(p, root) {
 }
 
 function runCmd(cmd, args, opts = {}, timeout = 30000) {
+  // raw=true：把完整 stdout/stderr 原样交回调用方（不在这里 clip），由调用方按 v0.3 §6.1 通则落 spill + 给定位符。
+  // 为什么要有这个开关：本函数另有 git_*/syntax_check/finish_task 等调用方，它们把 r.out 当**字符串**直接再处理
+  // （拼进自己的结果里），所以不能全局改形状——只有 run_command 需要"完整输出"。
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
+    const { raw, ...execOpts } = opts;
+    execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...execOpts }, (err, stdout, stderr) => {
       const pr = (s, cap) => {
         const t = String(s || '');
         if (t.length <= cap) return t;
@@ -137,7 +146,7 @@ function runCmd(cmd, args, opts = {}, timeout = 30000) {
         const tail = Math.floor(cap * 0.2);
         return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
       };
-      resolve({ ok: !err, code: err?.code ?? 0, out: pr(stdout, 8000), err: pr(stderr, 2000) });
+      resolve({ ok: !err, code: err?.code ?? 0, out: raw === true ? String(stdout || '') : pr(stdout, 8000), err: raw === true ? String(stderr || '') : pr(stderr, 2000) });
     });
   });
 }
@@ -233,6 +242,33 @@ function listShape(entries, dir) {
   };
 }
 export const __shapeTestables = { grepShape, listShape };
+
+// ── 「大结果」工具的统一收口（v0.3 §6.1 通则：任何"大结果"工具都必须遵守溢出规范）───────────────
+// §6.1 点名的 Excel 处置＝「只返回结构摘要 + 行列信息 + 溢出文件路径，需要明细时按范围二次取数」。
+// 这里把它做成 extract_* 同族的**唯一**出口：明细全文落盘（spill.js 的 detailSummary），返回值只带
+// 结构摘要（几个表/各多少行多少列）+ 量（行/字符/字节）+ 头部预览 + 溢出路径 + 取回指引。
+// 硬约束：**明细不许在这里截断**（截断只发生在 detailSummary 里，且它必然给定位符）——
+// 旧实现各写一个 slice(0, 20000)，进上下文后又被外层裁到 4000，中段丢了且无处可查。
+function extractToolResult(kind, raw, ctx) {
+  const text = typeof raw === 'string' ? raw : String((raw && raw.text) || '');
+  const d = detailSummary(text, { tool: 'extract_' + kind, conversationId: ctx && ctx.conversationId, redact: redactSecrets });
+  const out = { kind, lines: d.totalLines, chars: d.chars, bytes: d.bytes, preview: d.preview };
+  // 结构摘要：xlsx 有真正的行列结构（每表名字/行数/列数 + 它在溢出文件里的字符区间与行区间）
+  if (raw && Array.isArray(raw.sheets)) {
+    out.sheets = raw.sheets;
+    out.totalRows = raw.sheets.reduce((n, s) => n + (Number(s.rows) || 0), 0);
+  }
+  if (d.omittedChars > 0) out.previewLines = d.previewLines;
+  if (d.spillPath) {
+    out.spill = { path: d.spillPath };
+    out.hint = '明细全文（' + d.chars + ' 字符 / ' + d.bytes + ' 字节）已落盘：fetch_spill {path:"' + d.spillPath + '", offset:0, length:20000} 按范围取回；'
+      + '上面 preview 只是头部若干行。' + (out.sheets ? '各表的 offset/length（字符）与 fromLine/toLine（行）见 sheets 字段，可直接按范围取某一个表。' : '');
+  } else if (d.degraded) {
+    // 落盘失败**不静默丢**：说清"中段没给"以及原因（v0.3 §6.1"信息不丢"优先于省 token）
+    out.note = '⚠️ 明细未能存盘（' + d.degraded + '）：上面只有头部预览，中段未给出。请改用更小的输入，或先自行落盘再用 read_file_range 分段读。';
+  }
+  return out;
+}
 
 // 带行号的视图（read_file numbered=true 用）。抽成函数是为了"按行预览"和"加行号"能分别测。
 function numberedView(text) {
@@ -411,7 +447,8 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
-  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read', timeoutMs: 90000,
+  // 界限（timeoutMs: 90000）声明在 tools/manifest.js，这里不再写字面量（一个界限只留一个出处）。
+  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
     params: { path: { type: 'string', required: true, desc: '图片文件路径或 URL' } },
     run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
@@ -432,7 +469,8 @@ const RAW_TOOLS = [
           messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请识别这张图片中的所有文字并原样输出（OCR）。如果图中有版式，按从上到下、从左到右排列；没有文字就说没有文字。' }] }],
           max_tokens: 1200,
         }),
-        // 界限声明在工具定义上（timeoutMs: 90000），实现消费它——一个界限只留一个出处，且用户"停止"能打断它
+        // 界限声明在 tools/manifest.js（timeoutMs: 90000），execTool 据此派生 __signal/__deadline 换进 ctx——
+        // 一个界限只留一个出处，且用户"停止"能打断它
         signal: ctx.__signal,
       });
       const j = await res.json().catch(() => ({}));
@@ -441,7 +479,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full', timeoutMs: 300000,
+  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。换目录用 cwd 参数——每次调用都是新 shell，命令里写 cd 不保留。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full',
     params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, cwd: { type: 'string', desc: '工作目录；相对路径按工作区根解析（换目录用它，不要在命令里 cd）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
@@ -462,7 +500,7 @@ const RAW_TOOLS = [
         if (ctx.limitPath && !inside(abs, ctx.root)) throw inputError('cwd 超出工作区（本会话权限只允许访问 ' + ctx.root + '）');
         dir = abs;
       }
-      // timeout 参数是模型选的（5-300s）；声明的 timeoutMs=300s 是它的上限，两者取小即"一个界限一个出处"
+      // timeout 参数是模型选的（5-300s）；清单声明的 timeoutMs=300s 是它的上限，两者取小即"一个界限一个出处"
       const want = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
       const t = ctx.__deadline ? Math.min(want, Math.max(1, ctx.__deadline - Date.now())) : want;
       // 怎么执行由权限档位决定（2026-09-16，D2′ Windows 交付）：
@@ -472,9 +510,10 @@ const RAW_TOOLS = [
       // · read/write（上面那段白名单）：仍按空格拆 argv 直接 execFile，**不过 shell**——
       //   白名单是前缀匹配，一旦过 shell 就能"以白名单命令开头、再执行第二条命令"。
       let r;
-      if (ctx.limitPath) {
+      const viaShell = !ctx.limitPath;
+      if (!viaShell) {
         const [cmd, ...args] = String(a.cmd).split(/\s+/);
-        r = await runCmd(cmd, args, { cwd: dir }, t);
+        r = await runCmd(cmd, args, { cwd: dir, raw: true }, t); // raw：完整输出交回来，由下面统一落 spill
       } else {
         r = await runShellLine(String(a.cmd), { cwd: dir, timeout: t });
       }
@@ -482,7 +521,34 @@ const RAW_TOOLS = [
       // 模型照样看得见建议，但不必为一个写法白花一整轮。只在命中时出现，不占常驻前缀。
       const head = String(a.cmd).trim().split(/\s+/)[0];
       const readLike = /^(cat|ls|grep|find|sed|head|tail|wc|awk)$/.test(head) && !(head === 'sed' && /\s-i\b/.test(String(a.cmd)));
-      return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code, cwd: dir, ...(readLike ? { hint: '这条命令有专门工具，输出更省且带行号可导航：读文件 read_file / read_file_range、列目录 list_dir、搜内容 grep_search、找文件 find_file。本次已照常执行。' } : {}) };
+      // v0.3 §6.1 通则：命令输出是典型"大结果"。两条路分开处理，但**都不许静默丢中段**：
+      //   · read/write 档（execFile 那一臂，本文件内）：完整 stdout/stderr 到手 ⇒ 明细落 spill + 定位符；
+      //   · full 档（走 shell.js）：那边的 clip(8000/2000) 在**返回给我们之前**就把中段丢了，本模块拿不到完整输出
+      //     （server/shell.js 不归本批改动）⇒ 这里至少如实标注，并给出"要全文该怎么走"的正路，不让模型误以为拿全了。
+      const streams = { stdout: r.out, stderr: r.err };
+      const out = { ok: r.ok, code: r.code, cwd: dir, stdout: '', stderr: '' };
+      const spills = [];
+      const shellClipped = []; // shell 层已截断的流（正则与 shell.js 的 clip 标记同形）
+      for (const [k, v] of Object.entries(streams)) {
+        if (v === undefined || v === null || v === '') continue;
+        if (viaShell && /…\[输出超长已截断中段 \d+ 字符\]…/.test(String(v))) shellClipped.push(k);
+        const d = detailSummary(String(v), { tool: 'run_command', conversationId: ctx && ctx.conversationId, redact: redactSecrets });
+        out[k] = d.spillPath ? d.preview : String(v);
+        if (d.spillPath) spills.push({ stream: k, path: d.spillPath, chars: d.chars, bytes: d.bytes });
+        if (d.degraded) out[k + 'Degraded'] = '未能存盘：' + d.degraded;
+      }
+      if (spills.length) {
+        out.spill = spills;
+        out.hint = '输出较大，上下文只留了预览：' + spills.map((s) => s.stream + ' 全文在 ' + s.path).join('；')
+          + '。用 fetch_spill {path, offset, length} 按范围取回。';
+      }
+      if (shellClipped.length) {
+        out.clippedByShell = shellClipped;
+        out.hint = (out.hint ? out.hint + ' ' : '') + '另：' + shellClipped.join('/') + ' 在本机 shell 层已被截断（stdout 上限 8000 / stderr 2000 字符），'
+          + '**中段无法从本次调用取回**。要拿完整输出：改用 run_long_task 把输出落到日志文件（RW_JOBS_DIR 下），再用 read_file_range 按行读。';
+      }
+      if (readLike) out.hint = (out.hint ? out.hint + ' ' : '') + '这条命令有专门工具，输出更省且带行号可导航：读文件 read_file / read_file_range、列目录 list_dir、搜内容 grep_search、找文件 find_file。本次已照常执行。';
+      return out;
     } },
   { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },
@@ -550,7 +616,8 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
-  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read', timeoutMs: 15000,
+  // 界限（timeoutMs: 15000）声明在 tools/manifest.js，这里不再写字面量。
+  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read',
     params: { query: { type: 'string', required: true }, limit: { type: 'number' } },
     run: async (a, ctx) => {
       const base = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
@@ -562,21 +629,40 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B15 读网页 ----------
-  { name: 'fetch_url', description: '读取网页正文（简易提取）', permission: 'read', timeoutMs: 20000,
+  // 界限（timeoutMs: 20000）声明在 tools/manifest.js，这里不再写字面量（一个界限只留一个出处）。
+  { name: 'fetch_url', description: '读取网页正文（简易提取）', permission: 'read',
     params: { url: { type: 'string', required: true } },
     run: async (a, ctx) => {
       const r = await fetch(a.url, { signal: ctx.__signal, headers: { 'User-Agent': 'Mozilla/5.0' } });
       const html = await r.text();
       const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '')
         .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      return { title: (html.match(/<title>(.*?)<\/title>/i) || [])[1] || '', text: text.slice(0, 8000) };
+      const title = (html.match(/<title>(.*?)<\/title>/i) || [])[1] || '';
+      // v0.3 §6.1 通则：网页正文是典型"大结果"。旧写法 text.slice(0, 8000) 把尾部**静默**丢掉（既无定位符也不落盘）；
+      // 现在小的照旧原样给 text（**形状一个字节都不动**：A1 提示注入防线夹具锁着 `{title, text}` 这两个键），
+      // 大的落 spill 并给定位符（明细可回查，上下文只留预览）。
+      const d = detailSummary(text, { tool: 'fetch_url', conversationId: ctx && ctx.conversationId, redact: redactSecrets });
+      if (!d.spillPath && !d.degraded) return { title, text };
+      const out = { title, chars: d.chars, lines: d.totalLines, bytes: d.bytes, preview: d.preview };
+      if (d.spillPath) {
+        out.spill = { path: d.spillPath };
+        out.hint = '正文较长（' + d.chars + ' 字符），已省略中段：全文在 ' + d.spillPath
+          + '，用 fetch_spill {path:"' + d.spillPath + '", offset:0, length:20000} 按范围取回。';
+      } else {
+        // 落盘失败也不静默丢：给头部预览 + 说清"中段没给"的原因
+        out.note = '⚠️ 正文未能存盘（' + d.degraded + '）：上面只有头部预览，中段未给出。';
+      }
+      return out;
     } },
 
-  // ---------- B16-B19 文档解析 ----------
-  { name: 'extract_pdf', description: '提取 PDF 文本', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractPdf(a.path)).slice(0, 20000) }) },
-  { name: 'extract_docx', description: '提取 Word 文本', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractDocx(a.path)).slice(0, 20000) }) },
-  { name: 'extract_xlsx', description: '提取 Excel 内容', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractXlsx(a.path)).slice(0, 20000) }) },
-  { name: 'extract_pptx', description: '提取 PPT 文本', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractPptx(a.path)).slice(0, 20000) }) },
+  // ---------- B16-B19 文档解析（v0.3 §6.1：只回"结构摘要 + 行列信息 + 溢出文件路径"） ----------
+  // 旧写法 `(await extractXxx(a.path)).slice(0, 20000)` 是 §6.1 点名的那条毛病：工具层先切一刀，上下文层再切一刀，
+  // **中间数据丢了、token 照烧**，且被切掉的部分既无定位符也无处可查。现在四件同族走 extractToolResult（唯一出口）：
+  // 明细全文落盘 ⇒ 返回值只有摘要/量/头部预览/溢出路径，明细用 fetch_spill 按范围二次取数。
+  { name: 'extract_pdf', description: '提取 PDF 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pdf', await extractPdf(a.path), ctx) },
+  { name: 'extract_docx', description: '提取 Word 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('docx', await extractDocx(a.path), ctx) },
+  { name: 'extract_xlsx', description: '提取 Excel 内容。**不会把整表灌进上下文**：返回 结构摘要（sheets：每表行数/列数）+ 行列信息（各表在溢出文件里的 offset/length 与 fromLine/toLine）+ 溢出文件路径 + 头部预览。需要明细时按范围二次取数：fetch_spill {path, offset, length}（offset/length 用某个表的区间即可只取那张表）', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('xlsx', await extractXlsx(a.path), ctx) },
+  { name: 'extract_pptx', description: '提取 PPT 文本。返回：行数/字符数/字节数 + 头部预览 + 溢出文件路径（明细全文落在溢出文件里，不进上下文）——需要明细用 fetch_spill {path, offset, length} 按范围取回', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a, ctx) => extractToolResult('pptx', await extractPptx(a.path), ctx) },
 
   // ---------- B21/B22 数据库（全局权限） ----------
   // 界限口径（有意**不**声明 timeoutMs）：慢查询不是错误，砍它只会掩盖问题（该看的是慢查询日志）；
@@ -589,7 +675,21 @@ const RAW_TOOLS = [
         throw new Error('仅支持单条 SELECT（当前语句被拒）。不支持 SHOW/EXPLAIN/多语句/写操作。查表清单：SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()；查某表列：SELECT column_name FROM information_schema.columns WHERE table_name=\'<表名>\'。请改用 SELECT 或先查 information_schema。');
       }
       const rows = await db.query(a.sql, undefined, { signal: ctx.__signal });
-      return { rowCount: rows.length, rows: rows.slice(0, 50) };
+      // v0.3 §6.1 通则：旧写法 rows.slice(0, 50) 把第 51 行起的**明细静默丢掉**（只给 rowCount 一个数字，无处可查）。
+      // 现在前 50 行照旧内联（既有现值，照抄），超出的行落 spill 并给定位符 ⇒ 明细可回查。
+      const inline = rows.slice(0, DB_INLINE_ROWS);
+      if (rows.length <= DB_INLINE_ROWS) return { rowCount: rows.length, rows: inline };
+      const d = detailSummary(JSON.stringify(rows), { tool: 'db_query', conversationId: ctx && ctx.conversationId, redact: redactSecrets });
+      const out = { rowCount: rows.length, shownRows: inline.length, omittedRows: rows.length - inline.length, rows: inline };
+      if (d.spillPath) {
+        out.spill = { path: d.spillPath, chars: d.chars, bytes: d.bytes };
+        out.hint = '结果 ' + rows.length + ' 行，这里只内联前 ' + inline.length + ' 行；其余 ' + out.omittedRows
+          + ' 行（含全部 ' + rows.length + ' 行）的 JSON 已落盘：fetch_spill {path:"' + d.spillPath + '", offset:0, length:20000} 按范围取回，'
+          + '或收窄 SQL（加 WHERE/LIMIT）重查。';
+      } else if (d.degraded) {
+        out.note = '⚠️ 全部 ' + rows.length + ' 行未能存盘（' + d.degraded + '）：上面只有前 ' + inline.length + ' 行，其余未给出。';
+      }
+      return out;
     } },
   { name: 'db_write', description: '数据库写入（高危，留痕）', permission: 'global',
     params: { sql: { type: 'string', required: true } },
@@ -679,7 +779,8 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 图片理解（视觉模型分析图片） ----------
-  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read', timeoutMs: 60000,
+  // 界限（timeoutMs: 60000）声明在 tools/manifest.js，这里不再写字面量。
+  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',
     params: { path: { type: 'string', required: true, desc: '本地图片路径或 URL' } },
     run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
@@ -701,7 +802,7 @@ const RAW_TOOLS = [
           messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请详细描述这张图片的内容（中文）' }] }],
           max_tokens: 800,
         }),
-        signal: ctx.__signal, // 同上：界限 = 工具定义上的 timeoutMs: 60000
+        signal: ctx.__signal, // 界限 = tools/manifest.js 上的 timeoutMs: 60000
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error('视觉调用失败: ' + (j.error?.message || res.status));
@@ -1205,12 +1306,13 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 飞书文档（F7/F9/F10/F11，v2.0 渠道一期） ----------
-  // 界限口径：一次调用最多 1 次取 token + 2 次 API GET，沿用原有数值 15000 + 2×20000 = 55000（不新造数）
-  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', timeoutMs: 55000, params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
+  // 界限口径（timeoutMs: 55000 声明在 tools/manifest.js）：一次调用最多 1 次取 token + 2 次 API GET，
+  // 沿用原有数值 15000 + 2×20000 = 55000（不新造数），但只写在清单一处。
+  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuDoc(a.url, ctx.__signal) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容', permission: 'read', timeoutMs: 55000, params: { url: { type: 'string', required: true }, range: { type: 'string' } },
+  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容', permission: 'read', params: { url: { type: 'string', required: true }, range: { type: 'string' } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuSheet(a.url, a.range, ctx.__signal) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', timeoutMs: 55000, params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
+  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
     run: async (a, ctx) => feishuConfigured() ? await readFeishuBitable(a.appToken, a.tableId, ctx.__signal) : { error: '未配置飞书凭证' } },
 
   // ---------- 会话归档（WS5e：conv_summarize → conv_summaries；v2=语义摘要（LLM），失败/关闭时回退结构化 v1） ----------
@@ -1492,7 +1594,7 @@ export async function execTool(name, args, ctx) {
     }
     // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队。
     // P6：access 规则 allow 命中（hookStop.allowed）→ 免审批（规则=管理员显式放行）；hooks 未拦且未被规则放行才弹卡
-    if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
+    if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && approvalRequired(name)) {
       if (eff.__autonomous) {
         // 命名避开外层的 `payload`（hook 载荷）：同名遮蔽过一次就会有人读错对象
         const needInput = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
@@ -1645,22 +1747,42 @@ RAW_TOOLS.push({
 });
 
 // P2-3 repo_map：代码库结构地图（借鉴 Aider tree-sitter repo map 的轻量版——目录树+行数+imports+顶层符号摘要）
-// 价值：长代码库任务先取一张"地图"，少做盲目 list_dir/find/grep 探测；容量受控（repomap.js 内 MAX_TEXT 截断）
+// 价值：长代码库任务先取一张"地图"，少做盲目 list_dir/find/grep 探测；容量由**溢出**约束（v0.3 §6.1 通则），
+// 不再由工具自己截断：地图大 ⇒ 明细落 spill + 头部预览 + 定位符；小 ⇒ 原样返回 text（老行为不变）。
 RAW_TOOLS.push({
   name: 'repo_map',
-  description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
+  description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要。地图较大时不会整份灌进上下文——只回 summary（文件/目录数）+ 头部预览 + 溢出文件路径，明细用 fetch_spill {path, offset, length} 按范围取回；较小时直接给 text。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
   permission: 'read',
   params: { dir: { type: 'string', required: false, desc: '目标目录，缺省=当前工作区' } },
   run: async (a, ctx) => {
     const dir = a.dir || ctx.root || RW_WORKSPACE;
     const r = buildRepoMap(dir);
     if (!r.ok) return { error: r.error };
-    return { ok: true, root: r.root, summary: r.summary, text: r.text, files: r.files };
+    const d = detailSummary(r.text, { tool: 'repo_map', conversationId: ctx && ctx.conversationId, redact: redactSecrets });
+    const out = { ok: true, root: r.root, summary: r.summary, lines: d.totalLines, chars: d.chars, bytes: d.bytes };
+    if (d.spillPath) {
+      // 大仓库：text 明细落盘，上下文只留摘要 + 预览 + 定位符（files 明细也不再重复给——它本身就是大结果，
+      // 而且溢出文件里已有每文件的路径/行数/符号/imports 明细）。
+      out.preview = d.preview;
+      out.spill = { path: d.spillPath };
+      out.hint = '地图较大（' + d.chars + ' 字符 / ' + d.totalLines + ' 行），已省略中段：全文在 ' + d.spillPath
+        + '，用 fetch_spill {path:"' + d.spillPath + '", offset:0, length:20000} 按范围取回（目录树在前、文件明细在后）。';
+    } else if (d.degraded) {
+      out.preview = d.preview;
+      out.note = '⚠️ 地图未能存盘（' + d.degraded + '）：上面只有头部预览，中段未给出。可改用更小的 dir，或先自行落盘再读。';
+    } else {
+      out.text = r.text;
+      out.files = r.files;
+    }
+    return out;
   },
 });
 
 // 步6 fetch_spill：溢出的取回端（与 spill.js 成对）——上下文出现"全文已存 <路径>"时的闭环。
 // 恒可用（PLATFORM_EXEMPT）：模型拿到定位符却没有取回工具，等于把信息丢了。
+// 2026-09-16：① 清单已标 `light: true`——轻量会话（LIGHT_TOOLSET）里 repo_map 等工具也会溢出，
+//   取回端不在轻量面上就是"闭环断开"（符合性核对 §3.5 缺陷⑤）；
+// ② 取回带**会话归属校验**（把当前会话 id 传进去，spill.js 校验该文件确属本会话，见 v0.3 §4.4「溢出文件的权限」）。
 RAW_TOOLS.push({
   name: 'fetch_spill',
   description: '取回被溢出（spill）的工具结果全文。上下文里出现"已省略 N 字节…全文已存 <路径>"时，用它按范围分段读回',
@@ -1670,7 +1792,7 @@ RAW_TOOLS.push({
     offset: { type: 'number', desc: '起始字符偏移（默认 0）' },
     length: { type: 'number', desc: '读取字符数（默认 20000）' },
   },
-  run: async (a) => readSpill(a.path, a.offset, a.length),
+  run: async (a, ctx) => readSpill(a.path, a.offset, a.length, ctx && ctx.conversationId),
 });
 
 // ===== 装载（架构 §4.3「一次性声明化，不分批」）：清单 × 实现 → 运行时工具表 =====
@@ -1682,4 +1804,4 @@ export const TOOLS = [];
 registerToolSource(RAW_TOOLS, (next) => { TOOLS.length = 0; TOOLS.push(...next); });
 TOOLS.push(...combine()); // 静态（清单 × 实现）× 动态来源（MCP）：一个工具面、一条装配路径
 // 元数据/集合由清单派生后在此转发，保持"从 tools/index.js 一处取用"的既有引用面
-export { TOOL_META, TOOL_CN, DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, TOOL_TIER_CN } from './registry.js';
+export { TOOL_META, TOOL_CN, DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, TOOL_TIER_CN, TOOL_POLICY, APPROVAL_REQUIRED } from './registry.js';

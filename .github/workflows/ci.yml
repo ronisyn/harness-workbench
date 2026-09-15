@@ -32,3 +32,32 @@ jobs:
       # 且**白名单之外零漂移**——工具描述/参数是进前缀的字节，改一个字就是一次换纪元；
       # 以前只靠"记得同步快照"，这条把它变成提交即红的门禁。
       - run: node scripts/tools-face-diff.mjs
+      # 金标门禁（v0.3 §4.8「金标回归随引擎打包」/ §0.4 M3 准入前置「金标回归 + 失效监控必须在位」）：
+      # 金标集随包在 eval/（shells.eval_ref 引用），判据就是 canary.js 的 passed===total（0/1，不设通过线）。
+      # 为什么这么写：**CI 上没有 MySQL**，库不可达时必须**如实跳过并说明**、不能报红（本仓既有做法＝
+      # 不可达就跳过；节点/本地跑时它真判）。退出码口径：0=全绿或如实跳过；1=某壳 passed!==total（真红）；
+      # 其他＝工具/环境错。结果文件无论哪种情况都会写出来，所以放在 if/else 之后上传。
+      - name: 金标门禁（金标随包自检；无库时如实跳过）
+        run: |
+          set +e
+          node scripts/golden-report.mjs --out tmp/golden-report.json
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "金标：通过或如实跳过（详见上面的逐壳输出）"
+          elif [ "$code" -eq 1 ]; then
+            echo "::error::金标门禁未通过（金标集随包回归，passed!==total 阻断合并）"
+            exit 1
+          else
+            echo "::error::金标检查未能完成（工具/环境错误，退出码 $code）"
+            exit "$code"
+          fi
+      # 金标结果是**评测产物**（§4.8「评测结果可导出」）：给人看、给 ㉔ 指标回归门禁当输入——
+      # 必须存成 CI artifact，否则"这次为什么红/为什么跳过"又要回服务器上重跑一遍才知道。
+      - name: 保存金标结果（评测产物）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-report
+          path: tmp/golden-report.json
+          if-no-files-found: error

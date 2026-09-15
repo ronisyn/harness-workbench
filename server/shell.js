@@ -1,68 +1,32 @@
-// server/shell.js - "把一条命令串交给本机 shell 执行"的唯一出处
+// server/shell.js - "把一条命令串交给本机 shell 执行"的**对外门面**（API 一字未改）
 // 使用者：run_command / run_test / run_long_task（tools/index.js）、任务契约验收钩子（driver.js）。
 //
-// 为什么需要这一层：这些入口收的都是**命令串**（模型按 shell 语法写：引号、管道、重定向、变量），
-// 而 execFile 不过 shell。按空格拆 argv 在 Linux 上就会破坏引号，在 Windows 上更彻底——npm/npx 只有
-// .cmd 形式（execFile 直呼 ENOENT，显式 .cmd 在 Node 22 上 EINVAL），管道、重定向、内建命令全不存在。
+// 2026-09-16（v0.3 §4.2 三层分离 / §5 跨平台）：执行本体已搬到 server/exec/ 的执行后端层——
+// 本文件保留原样的对外 API（SHELL_FILE / SHELL_CN / shellArgs / shellFileFor / runShellLine / spawnShellLine），
+// 内部只做转发。**为什么保留旧 API 而不是让调用方改用后端接口**：
+//   ① 本轮的验收口径就是"对外行为逐字节不变"，调用方（tools/index.js、driver.js、agent.js、index.js）一行不改——
+//      这才使得"先把接口抽出来"与"四个调用点切过去"能分成两步做、各自可验收；
+//   ② 这些名字回答的是"**本机 shell 是什么**"（提示层要如实告诉模型本机是哪一种系统，driver.js 要在模块顶层
+//      拿到可执行文件），那是外壳的问题；"谁来执行"才是后端的问题。两者今天一一对应，但换后端时（例如将来的
+//      容器/远端后端）"本机 shell"这个名字仍要在这里回答。
+// 谁能用哪一层：新增代码要执行命令请直接用执行后端接口 `import ... from './exec/index.js'`（那里有 argv 级接缝，
+// ⑰ 沙箱的挂点）；本文件只为**既有调用方**留存，语义与实现见 server/exec/。
 //
-// 选型依据（都实测过，不是推演）：
-//   · DSH 的做法是每个平台各给一个 shell 工具（dsh-tool-bash / dsh-tool-pwsh，内部都是 `shell -c/-Command 脚本`）；
-//     同一份代码两边跑，等价写法就是"按平台选 shell"。
-//   · Windows 上选 Windows PowerShell 5.1（powershell.exe）：Server 2019/2022 自带，客户机不用额外装东西。
-//   · 实测对比：`node -e "console.log(1+1)"` 经 powershell.exe -Command 得到 `2`、中文与 emoji 正常、退出码透传；
-//     而经 cmd.exe /c 会因 Node 的 MSVCRT 转义被吞掉内层引号——**返回空输出且 code=0**（最坏的一类错：看起来成功）。
-//   · 前置的 UTF-8 前言照抄 DSH（dsh-pwsh-local 的 ENCODING_PREAMBLE）：不设的话中文/emoji 会按控制台代码页输出成乱码。
-import { execFile, spawn } from 'node:child_process';
+// 为什么需要"命令串"这一层（而不是让调用方自己 execFile）：这些入口收的都是模型按 shell 语法写的命令串，
+// 而 execFile 不过 shell；按空格拆 argv 在 Linux 上就会破坏引号，在 Windows 上更彻底——npm/npx 只有 .cmd 形式。
 import { RW_OS } from './env.js';
+import { argvFor, execLine, shellFor, spawnLine } from './exec/index.js';
 
-const PS_PREAMBLE = '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); ';
-
-// 本机是哪种 shell。`platform` 是测试缝（夹具要在同一台机器上把两条臂都断言掉，与 DSH 的
-// workerSpawnEnv(platform = process.platform) 同一写法）。
-export const shellFileFor = (platform = RW_OS) => (platform === 'win32' ? 'powershell.exe' : '/bin/bash');
+// 本机是哪种 shell（`platform` 是测试缝：夹具要在同一台机器上把两条臂都断言掉）
+export const shellFileFor = (platform = RW_OS) => shellFor(platform).file;
 export const SHELL_FILE = shellFileFor();
-export const SHELL_CN = RW_OS === 'win32' ? 'Windows PowerShell' : 'bash';
+export const SHELL_CN = shellFor().name;
 
-// 一条命令串 → 交给本机 shell 的完整 argv（纯函数，夹具直接断言这一层，不依赖真的起进程）
-export function shellArgs(line, platform = RW_OS) {
-  const s = String(line);
-  return platform === 'win32'
-    ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PS_PREAMBLE + s]
-    : ['-c', s];
-}
-
-// 输出截断：长输出保留头 70% + 尾 20%，中段标明丢了多少（沿用 run_command 既有口径，别处不要再写一套）
-function clip(s, cap) {
-  const t = String(s || '');
-  if (t.length <= cap) return t;
-  const head = Math.floor(cap * 0.7);
-  const tail = Math.floor(cap * 0.2);
-  return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
-}
+// 一条命令串 → 交给本机 shell 的完整 argv 里**除可执行文件以外**的那部分（纯函数，夹具直接断言这一层）
+export function shellArgs(line, platform = RW_OS) { return argvFor(line, platform).slice(1); }
 
 // 跑一条命令串，返回 { ok, code, out, err }（与旧 runCmd 同形状，调用方不用改）
-export function runShellLine(line, { cwd, timeout = 30000, maxBuffer = 2 * 1024 * 1024 } = {}) {
-  return new Promise((resolve) => {
-    const done = (r) => resolve(r);
-    const ch = execFile(
-      SHELL_FILE,
-      shellArgs(line),
-      { timeout, windowsHide: true, maxBuffer, ...(cwd ? { cwd } : {}) },
-      (err, stdout, stderr) => {
-        let e = clip(stderr, 2000);
-        // 超时：execFile 终止的是**我们起的那个 shell 进程**。POSIX 上 `bash -c '<单条命令>'` 会直接 exec
-        // 成那条命令（同 pid，杀得到）；PowerShell 起的是子进程，超时后子进程可能仍活着——这与 DSH 在同一
-        // 平台上的行为一致（它的 pwsh 工具也是终止 pwsh 自身）。如实说出来，别让"超时了但进程还在"变成隐形状态。
-        if (err && err.killed) e = (e ? e + '\n' : '') + '[超时] 命令已被终止（shell 已杀；Windows 上被它拉起的子进程可能仍在，必要时用 taskkill /IM <名> /F 清理）';
-        done({ ok: !err, code: err?.code ?? 0, out: clip(stdout, 8000), err: e });
-      },
-    );
-    // shell 本身起不来（缺可执行文件等）时 execFile 发的是异步 error 事件，没有监听器会带走整个进程。
-    ch.on('error', (e) => done({ ok: false, code: e.code ?? 1, out: '', err: 'shell 启动失败（' + SHELL_CN + '）: ' + e.message }));
-  });
-}
+export function runShellLine(line, opts = {}) { return execLine(line, opts); }
 
 // 后台长任务：detached 起一条命令串（stdio 由调用方给，通常是日志文件 fd）
-export function spawnShellLine(line, { cwd, detached = true, stdio = 'ignore' } = {}) {
-  return spawn(SHELL_FILE, shellArgs(line), { cwd, detached, stdio, windowsHide: true });
-}
+export function spawnShellLine(line, opts = {}) { return spawnLine(line, opts); }

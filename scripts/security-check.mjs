@@ -37,12 +37,16 @@ try {
   step('access_rules_guard 在位(P6)', hooksSrc.includes("'access_rules_guard'"));
 } catch (e) { step('hooks 安全网检查', false, e.message); }
 
-// 3. 危险工具受控（GUARDED_TOOLS 含核心高危）
+// 3. 危险工具受控（受控工具＝清单里 approval:true 的那 7 项）
+// 2026-09-16（v0.3 §4.2 审批声明化）：集合的唯一出处从 server/tools/index.js 的硬编码搬到 server/tools/manifest.js，
+// 本检查随之改为读清单（旧的再按 `GUARDED_TOOLS = new Set([...])` 正则去 index.js 里找已经找不到东西了）。
 try {
   const idx = fs.readFileSync(path.join(ROOT, 'server/tools/index.js'), 'utf8');
-  const m = idx.match(/GUARDED_TOOLS = new Set\(\[([^\]]+)\]\)/);
-  const guarded = m ? m[1].split(',').map((s) => s.trim().replace(/'/g, '')) : [];
-  step('GUARDED_TOOLS 7 项完整', guarded.length === 7 && ['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits'].every((t) => guarded.includes(t)), guarded.join(','));
+  const man = fs.readFileSync(path.join(ROOT, 'server/tools/manifest.js'), 'utf8');
+  const MUST = ['delete_file', 'db_write', 'git_pull_push', 'run_command', 'kill_process', 'reload_platform', 'set_limits'];
+  const approved = [...man.matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{[^\n]*\bapproval: true/gm)].map((m) => m[1]);
+  step('受控工具 7 项完整（清单 approval:true）', approved.length === 7 && MUST.every((t) => approved.includes(t)), approved.join(','));
+  step('审批门禁读清单而非硬编码集合', idx.includes('approvalRequired(name)') && !/GUARDED_TOOLS = new Set\(\[/.test(idx));
   step('plan_mode/exit_plan_mode 已退役', !idx.includes("name: 'plan_mode'") && !idx.includes("name: 'exit_plan_mode'"));
 } catch (e) { step('受控工具检查', false, e.message); }
 

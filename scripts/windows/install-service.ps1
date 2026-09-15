@@ -50,6 +50,7 @@ param(
   [switch]$SkipBuild,        # 跳过 npm ci / npm run build
   [switch]$SkipFirewall,     # 不碰防火墙
   [switch]$SkipSelfCheck,    # 不跑自检
+  [switch]$SkipGolden,       # 不跑金标随包自检
   [switch]$WhatIfOnly        # 只做检查与打印，不下载、不写文件、不装服务、不改防火墙
 )
 
@@ -221,6 +222,38 @@ function Invoke-SelfCheck() {
   }
 }
 
+# 金标随包自检（v0.3 §4.8「金标回归随引擎打包」/ §7.1 ⑲「金标随包自检 + 自助安装包」：
+# 客户形态机器（无外网 + Windows Server）装上后要能跑随包金标、且结果留得下来）。
+# 为什么这里**只告警不阻断**：金标跑的是"库里已启用壳的 eval.goldenSetRef"，刚装好的机器可能还没导入
+# 壳包、或库还没通——那都属于"没得判"（脚本会如实报 skipped），不是装坏了；发布侧的真门禁在
+# scripts/release.mjs 与 CI（那里才该红）。读不到库同理：跳过并说明。
+function Invoke-GoldenCheck() {
+  $golden = Join-Path $PlatformDir 'scripts\golden-report.mjs'
+  if (-not (Test-Path -LiteralPath $golden)) {
+    Write-Warn2 "金标自检脚本不存在，跳过：$golden（若平台刚升级，确认代码已 pull 到位）"
+    return
+  }
+  if ($WhatIfOnly) { Write-Info "WhatIf：会执行 & `"$NodeExe`" `"$golden`" --out `"$GoldenOut`""; return }
+  Write-Info "执行金标自检：& `"$NodeExe`" `"$golden`" --out `"$GoldenOut`""
+  $r = Invoke-Native $NodeExe @($golden, '--out', $GoldenOut)
+  Write-Host ''
+  foreach ($line in $r.Out) { Write-Host "  $line" }   # 原样打印，不改写结论（含 skipped 的原因）
+  Write-Host ''
+  $summary = (($r.Out | Select-Object -Last 1) -join '').Trim()
+  if ($r.Code -eq 0) {
+    # 也可能"如实跳过"（无壳可跑 / 库不通）——脚本会自己说清，这里只区分"没红"
+    Write-Ok "金标自检不阻断（通过或如实跳过）：$summary"
+  }
+  elseif ($r.Code -eq 1) {
+    Write-Warn2 "金标未通过（passed !== total）——本次安装不中止，但这台机器的行为级回归已经红了："
+    Write-Warn2 "  按上面逐条明细定位（哪条断言的期望/实际不一致），产物：$GoldenOut"
+    Write-Warn2 "  发布前必须先在开发/服务器侧修掉（release.mjs 与 CI 都会因此阻断）。"
+  }
+  else {
+    Write-Warn2 "金标自检未能完成（退出码 $($r.Code)：工具/环境错误）。产物若已写出：$GoldenOut"
+  }
+}
+
 # ============================ 主流程 ============================
 
 Write-Host ''
@@ -253,6 +286,9 @@ $script:WrapperExe = Join-Path $ServiceDir "$WrapperName.exe"
 $script:XmlPath = Join-Path $ServiceDir "$WrapperName.xml"
 $script:Description = "Roni Workbench · Agent 平台（Node.js，端口 $Port）"
 $script:ServiceEnv = @()
+# 金标自检结果落点（v0.3 §4.8「评测结果可导出」）：与 release.mjs / CI 用同一个默认口径 tmp\golden-report.json，
+# 装完就能在机器上直接翻这次自检判了什么（tmp\ 在 .gitignore 里，git pull 不会冲突）。
+$GoldenOut = Join-Path $PlatformDir 'tmp\golden-report.json'
 
 Write-Info "平台目录   ：$PlatformDir"
 Write-Info "Agent 工作区：$Workspace"
@@ -567,7 +603,12 @@ if ($SkipSelfCheck) { Write-Warn2 '按 -SkipSelfCheck 跳过自检。' }
 elseif (-not (Test-Path -LiteralPath $selfCheck)) { Write-Warn2 "自检脚本不存在，跳过：$selfCheck" }
 else { Invoke-SelfCheck }
 
-# 18) 收尾
+# 17.5) 金标随包自检（⑲：金标随包 + 自助安装包）
+$script:Step = '金标自检'
+if ($SkipGolden) { Write-Warn2 '按 -SkipGolden 跳过金标自检。' }
+else { Invoke-GoldenCheck }
+
+# 18) 收尾（金标自检在第 17.5 步：⑲ 金标随包 + 自助安装包）
 Write-Section '安装完成'
 Write-Host "  服务名      ：$ServiceName"
 Write-Host "  包装器      ：$script:WrapperExe"

@@ -6,17 +6,27 @@
 // 热重载（RA-03 的另一半）：清单文件变更 → 动态 import（带缓存破坏参数）→ 重建派生结构**就地**更新 → 工具面即时生效，**不重启进程**。
 // 本模块**不 import tools/index.js**（避免循环依赖）：实现侧通过 registerToolSource() 反向注入。
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TOOL_MANIFEST, TOOL_TIER_CN } from './manifest.js';
 
 const MANIFEST_PATH = fileURLToPath(new URL('./manifest.js', import.meta.url));
+let reloadSeq = 0; // 模块缓存破坏参数里的序号（同一毫秒内两次重载也不能撞 URL）
 const TIERS = ['core', 'pro', 'expert'];
 const ENABLED = (m) => m && m.enabled !== false; // 缺省启用；enabled:false = 留痕式下线
+// 能力清单规范（v0.3 §4.2/§7.1 ③⑤）新声明的取值域。**不许放宽**：非法值/缺字段一律装配期抛错。
+//   execBackend  该工具干活要不要落到"可替换的执行后端"（② 的落地字段）：local=本机实现（文件/命令/进程/网络/数据库）｜none=不落后端（纯内存态/上下文编排/委托）
+//   cacheImpact  该工具是否进请求前缀（§4.4.1 规则5）：tools-face=工具定义在请求 tools 数组里（改这批字节=整段前缀作废，对应 prefix-participants 的 tools-face）｜none=不进前缀
+//   parallelSafe 能否与同一步的兄弟调用并发（v0.3 §2.4 CD「并行安全」/ 架构 v1.1 §4.4）：照 DSH `isConcurrencySafe` 的口径——**只有显式 true 才算可并行**，故本清单要求逐条显式声明
+const EXEC_BACKENDS = ['none', 'local'];
+const CACHE_IMPACTS = ['tools-face', 'none'];
 
 // ---- 派生结构（**对象身份稳定**：热重载时就地清空重填，所有引用方自动看到新值）----
 export { TOOL_TIER_CN };
 export const TOOL_META = {};
 export const TOOL_CN = {};
+export const TOOL_POLICY = {};       // name -> {approval, timeoutMs, cacheImpact, execBackend, parallelSafe}
+export const APPROVAL_REQUIRED = []; // 受控工具（guard 会话执行前需审批）：唯一出处＝清单的 approval:true
 export const DEFAULT_TOOLSET = [];
 export const PLATFORM_EXEMPT = [];
 export const LIGHT_TOOLSET = [];
@@ -25,27 +35,58 @@ export const MANIFEST_NAMES = [];
 let activeManifest = TOOL_MANIFEST;
 let rawTools = [];          // 实现侧条目（由 tools/index.js 注入）
 let onRebuild = null;       // 重建后回调（tools/index.js 用它就地刷新 TOOLS）
+// 由清单附加过 timeoutMs 的实现条目。用途只有一个：区分"清单声明的界限"与"实现里自带的字面量"
+// （后者是漂移的源头——旧实现把 8 个界限散在工具定义里，改一处忘一处没人发现）。
+// 用 WeakSet 而不是普通集合：装配会重复执行（热重载/动态来源变化），附加过的条目不该被回收不掉。
+const TIMEOUT_FROM_MANIFEST = new WeakSet();
+
+/**
+ * 清单字段校验（纯函数，装配期与夹具共用）。**只回答"这份清单自己合不合法"**，
+ * 与实现是否对得上由 assembleStatic 负责（两层分开，报错才能指到人）。
+ * @returns {string[]} 问题清单（空数组 = 合规）
+ */
+export function validateManifest(manifest) {
+  const problems = [];
+  for (const [name, m] of Object.entries(manifest || {})) {
+    if (!ENABLED(m)) continue;
+    if (!TIERS.includes(m.tier)) problems.push('档位非法（必需 core|pro|expert）：' + name + ' tier=' + m.tier);
+    if (!m.cn) problems.push('缺中文名（cn）：' + name);
+    if (m.approval !== undefined && typeof m.approval !== 'boolean') problems.push('approval 必须是布尔（缺省=false=不弹审批卡）：' + name + ' = ' + m.approval);
+    if (m.timeoutMs !== undefined && !(Number.isFinite(Number(m.timeoutMs)) && Number(m.timeoutMs) > 0)) {
+      problems.push('timeoutMs 必须是正有限数（未声明就不要写）：' + name + ' = ' + m.timeoutMs);
+    }
+    if (!CACHE_IMPACTS.includes(m.cacheImpact)) problems.push('cacheImpact 必须声明且取 ' + CACHE_IMPACTS.join('|') + '：' + name + ' = ' + m.cacheImpact);
+    if (!EXEC_BACKENDS.includes(m.execBackend)) problems.push('execBackend 必须声明且取 ' + EXEC_BACKENDS.join('|') + '：' + name + ' = ' + m.execBackend);
+    if (typeof m.parallelSafe !== 'boolean') problems.push('parallelSafe 必须显式声明布尔（只有 true 才算可并行）：' + name + ' = ' + m.parallelSafe);
+  }
+  return problems;
+}
 
 function refillDerived(manifest) {
-  for (const o of [TOOL_META, TOOL_CN]) for (const k of Object.keys(o)) delete o[k];
-  for (const a of [DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, MANIFEST_NAMES]) a.length = 0;
+  const problems = validateManifest(manifest);
+  if (problems.length) throw new Error('[registry] 清单字段非法（能力清单规范，v0.3 §4.2/§7.1 ③⑤）：\n  - ' + problems.join('\n  - '));
+  for (const o of [TOOL_META, TOOL_CN, TOOL_POLICY]) for (const k of Object.keys(o)) delete o[k];
+  for (const a of [DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, MANIFEST_NAMES, APPROVAL_REQUIRED]) a.length = 0;
   for (const [name, m] of Object.entries(manifest)) {
     if (!ENABLED(m)) continue;
-    if (!TIERS.includes(m.tier)) throw new Error('[registry] 清单档位非法：' + name + ' tier=' + m.tier);
     MANIFEST_NAMES.push(name);
     TOOL_META[name] = { tier: m.tier, when: m.when || '', not: m.not || '', ex: m.ex || '' };
     TOOL_CN[name] = m.cn || name;
+    TOOL_POLICY[name] = {
+      approval: m.approval === true,
+      timeoutMs: m.timeoutMs === undefined ? undefined : Number(m.timeoutMs),
+      cacheImpact: m.cacheImpact,
+      execBackend: m.execBackend,
+      parallelSafe: m.parallelSafe === true,
+    };
     if (m.defaultOn) DEFAULT_TOOLSET.push(name);
     if (m.exempt) PLATFORM_EXEMPT.push(name);
     if (m.light) LIGHT_TOOLSET.push(name);
+    if (m.approval === true) APPROVAL_REQUIRED.push(name);
   }
 }
+// 装配期检查（怕清单本身写错）：抛出即启动失败——宁可起不来，也不要装载一张说谎的清单
 refillDerived(activeManifest);
-// 校验期检查（怕清单本身写错）：抛出即启动失败——宁可起不来，也不要装载一张说谎的清单
-for (const [name, m] of Object.entries(activeManifest)) {
-  if (!ENABLED(m)) continue;
-  if (!TIERS.includes(m.tier)) throw new Error('[registry] 清单档位非法：' + name + ' tier=' + m.tier);
-}
 
 /** 实现侧注入（tools/index.js 调用一次；热重载靠它重新装配） */
 export function registerToolSource(tools, rebuild) {
@@ -137,38 +178,74 @@ export function combine() {
 }
 
 /** 静态部分：清单 × 实现（默认拒绝未进清单者） */
-export function assembleStatic(tools) {
+export function assembleStatic(tools, manifest = activeManifest) {
   const list = tools || rawTools;
+  const enabledNames = Object.entries(manifest || {}).filter(([, m]) => ENABLED(m)).map(([n]) => n);
   const problems = entryProblems(list);
   const seen = new Set((list || []).map((t) => t && t.name).filter(Boolean));
-  for (const n of MANIFEST_NAMES) if (!seen.has(n)) problems.push('清单声明了不存在的工具（无实现）：' + n);
+  for (const n of enabledNames) if (!seen.has(n)) problems.push('清单声明了不存在的工具（无实现）：' + n);
+  // 清单声明 × 实现事实的两条交叉核对（v0.3 §4.4.1 规则5 + §7.1 ⑤）——"声明"与"实现"不一致必须当场报错：
+  //   ① cacheImpact:'none' = 声称不进前缀，可它就在装载列表里（必然进 tools 数组）⇒ 说谎；
+  //   ② timeoutMs 只允许在清单声明：实现条目上自带一个界限字面量 = 两处声明，早晚漂移（旧实现正是散在 8 处）。
+  for (const t of list || []) {
+    const m = t && manifest[t.name];
+    if (!m || !ENABLED(m)) continue;
+    if (m.cacheImpact === 'none') {
+      problems.push('cacheImpact 声明不进前缀，但实现会进工具面（请求的 tools 数组）：' + t.name + '（要么把声明改成 tools-face，要么别装载它）');
+    }
+    if (t.timeoutMs !== undefined && !TIMEOUT_FROM_MANIFEST.has(t)) {
+      problems.push('工具界限两处声明（timeoutMs 只允许在 tools/manifest.js 声明，实现里不要写）：' + t.name);
+    }
+  }
   if (problems.length) throw new Error('[registry] 工具装载失败（清单与实现不一致）：\n  - ' + problems.join('\n  - '));
 
-  const disabled = Object.entries(activeManifest).filter(([, m]) => !ENABLED(m)).map(([n]) => n);
-  const unlisted = (list || []).map((t) => t.name).filter((n) => !MANIFEST_NAMES.includes(n));
+  // 清单是 timeoutMs 的**唯一出处**：装配时把它附加到工具定义上（execTool / scripts/tool-bounds.mjs 读的就是它）。
+  // 就地改属性而不是复制对象：TOOLS 里的条目身份必须稳定（热重载/引用方都按同一个对象读）。
+  for (const t of list || []) {
+    const m = manifest[t.name];
+    if (!m || !ENABLED(m)) continue;
+    if (m.timeoutMs === undefined) {
+      if (TIMEOUT_FROM_MANIFEST.has(t)) delete t.timeoutMs;
+    } else {
+      t.timeoutMs = Number(m.timeoutMs);
+      TIMEOUT_FROM_MANIFEST.add(t);
+    }
+  }
+
+  const disabled = Object.entries(manifest || {}).filter(([, m]) => !ENABLED(m)).map(([n]) => n);
+  const unlisted = (list || []).map((t) => t.name).filter((n) => !enabledNames.includes(n));
   if (unlisted.length) console.warn('[registry] 未进清单，已按默认拒绝不装载：' + unlisted.join(', ') + '（要启用请在 tools/manifest.js 补一行）');
   if (disabled.length) console.log('[registry] 清单标注 enabled:false，未装载：' + disabled.join(', '));
 
-  return (list || []).filter((t) => MANIFEST_NAMES.includes(t.name));
+  return (list || []).filter((t) => enabledNames.includes(t.name));
 }
 
 /**
  * 装载实现：清单 × 实现 → 运行时工具表（顺序沿用实现声明顺序）。
+ * @param {Array} [tools] 实现条目（缺省＝已注入的实现表）
+ * @param {object} [manifest] 清单（缺省＝当前生效清单）。允许注入是**测试缝**：夹具要验
+ *   "清单声明与实现漂移会被拦下"（例如把某条的 cacheImpact 改成 none、或给实现塞一个字面量 timeoutMs）。
  * @returns {Array} 通过校验、且**在清单里的**工具
  */
-export function assembleTools(tools) {
-  return assembleStatic(tools);
+export function assembleTools(tools, manifest = activeManifest) {
+  return assembleStatic(tools, manifest);
 }
 
 /**
  * 热重载（RA-03）：重新读取清单文件（动态 import + 缓存破坏参数）→ 就地更新派生结构 → 重新装配工具面。
  * 失败**不破坏现有工具面**（保留旧清单继续服务，如实报错）。
+ * @param {string} manifestPath 清单路径。缺省＝本模块旁的 tools/manifest.js；
+ *   允许注入是**测试缝**（与 assembleStatic(tools, manifest) 同一手法）：夹具要在临时文件上验成功/回滚/语法错误三条路径，
+ *   而**绝不能去改 server/tools/manifest.js 本体**。注入只换"读哪个文件"，不动任何模块级状态。
  */
-export async function reloadManifest() {
+export async function reloadManifest(manifestPath = MANIFEST_PATH) {
   const before = MANIFEST_NAMES.length;
   let mod;
   try {
-    mod = await import('file://' + MANIFEST_PATH + '?t=' + Date.now());
+    // pathToFileURL 而不是拼 'file://'：Windows 上拼字符串会得到 file://E:\…（盘符与反斜杠都不是合法 file URL 形态），
+    // 注入相对路径时更是直接失效。查询串用来打破 ESM 模块缓存（同一毫秒内连续两次重载也必须互不干扰 ⇒ 带序号）。
+    const href = pathToFileURL(path.resolve(manifestPath)).href + '?t=' + Date.now() + '-' + (++reloadSeq);
+    mod = await import(href);
   } catch (e) {
     console.warn('[registry] 热重载失败（清单语法/导入错误），保持现有工具面：' + (e && e.message ? e.message : e));
     return { ok: false, error: String((e && e.message) || e) };

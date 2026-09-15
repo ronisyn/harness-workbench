@@ -13,7 +13,10 @@
 //     宁可报错让人 chmod，也不从一个全世界可读的文件里发凭据）；
 //   · 每次操作现取、不跨操作缓存（DSH："Consumers resolve per operation… that read is the
 //     hot-update mechanism"）——换钥匙下一轮就生效，不必重启；
-//   · 空值等于没配：空串绝不冒充"已配置的密钥"（DSH："a blank never masquerades as a configured secret"）。
+//   · 空值等于没配：空串绝不冒充"已配置的密钥"（DSH："a blank never masquerades as a configured secret"）；
+//   · 轮换＝往同一个文档里写新值（原子替换、旧值随即不可见）：DSH 口径是"下一次现取就拿到新值，不必重启、
+//     不动配置文件"，写入本身是 `dsh-atomic-write` 的原子替换（"Atomic, not crash-durable"）——
+//     所以不造版本链，见下方 `rotateSecret`（v0.3 §4.6 的"存放、引用、**轮换**"三件里最后那件）。
 //
 // 我们**不照搬**的三样（DSH 有、我们没有消费者，理由写在报告）：跨进程文件锁（单机 systemd 单进程）、
 // 文件监视热重载（现取即可）、`records`（`<owner>/<id>` 授权凭据那一半）。
@@ -22,6 +25,7 @@
 // 不引 YAML 依赖：我们的值就是 token/URL 这类不含换行的标量，行式格式更少依赖也更好排障。
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { config } from './config.js';
 
 /** 凭据文档位置：部署用 `RW_CREDENTIALS_FILE` 指定；默认放**平台目录**（`.env` 的同一层）。
@@ -155,6 +159,64 @@ export function unsetSecret(name) {
   delete store[name];
   writeStore(store);
   return { name, removed: true };
+}
+
+/**
+ * 值的短指纹：`sha256(值)` 的前 8 位十六进制。**它不是校验和，也不是加密**——只回答一件事：
+ * "这次换的钥匙与上次是不是同一把"。轮换之后想核对"到底换没换"，手上不会有旧值，只会有上一次的指纹。
+ * 为什么是 8 位：够短才便于人眼对账（账本 detail 里一行就能放下），而它的用途只有比对，不参与任何鉴权。
+ * 已知边界（如实记）：对**低熵**的值（人手设的口令）8 位十六进制的哈希可被离线穷举；所以它只随轮换返回值
+ * 与审计账本出现，不进配置、不进提示词、不进会话。
+ */
+export function secretFingerprint(value) {
+  return createHash('sha256').update(String(value)).digest('hex').slice(0, 8);
+}
+
+/**
+ * 轮换（v0.3 §4.6 保障面「客户系统凭证的存放、引用、**轮换**」——存放/引用见上文，2026-09-16 补的就是这一档）。
+ *
+ * 为什么轮换只有"写新值"这一步（不造密钥版本链、不接 KMS、不排生效期）：照 DSH `dsh-credentials` 的口径——
+ * README：「A rotated stored key applies to the next request **without a restart or configuration edit**」
+ * 「rotating a secret **touches no configuration file**」；写入走 `dsh-atomic-write`，该包 README 的
+ * Known Limitations 明写「**Atomic, not crash-durable**」。这三句落到我们这边正好三条：
+ *   ① **单一路径**：本函数就是 `setSecret`（同一写入路径）——名字文法、空值拒绝、env 遮蔽只读、原子写
+ *      全部复用，没有第二套轮换专属规则（两条路径就会有两套边界，边界一多必有一条是错的）；
+ *   ② **原子替换**：`writeStore` 是同目录临时文件 + rename，"读到写了一半的文件"不存在，
+ *      所以"先写新值成功、旧值才不可见"是**构造保证**的——不需要一个"作废旧值"的中间步骤，
+ *      "中间态不可用"这个窗口在 rename 语义下压根不存在（夹具 `credentials-rotate` 锁住"写失败时旧值仍可用"）；
+ *   ③ **旧值不再可见**：`getSecret` 每次现取、不跨操作缓存（同上 README：「Consumers resolve per operation…
+ *      that read is the hot-update mechanism」）⇒ 换完下一轮就是新值，没有缓存要作废，
+ *      也就没有"旧值还可能被谁拿着"的清单要维护。
+ * 为什么不做"版本链"：DSH 没有，我们也没有第二个使用者——回滚需求（"换错了要换回去"）由**再轮换一次**满足，
+ * 而保留历史值等于把明文多留几份，与 C-18"明文不进业务表、只留一份托管存储"的方向相反。
+ *
+ * 失败语义（顺序即安全性）：
+ *   · 写不进去 → **原样抛错**，旧值仍在、仍可用（`.credentials.yaml` 一个字没动）；此时**不落账**
+ *     （"没换成功"不该在审计里留下换过的痕迹）；
+ *   · 落账失败 → **不改判轮换结果**（钥匙确实已经换了；报失败会让人以为没换而复跑一次），但必须出声。
+ *
+ * @param {string} name 凭据名（须为 POSIX 标识符）
+ * @param {string} newValue 新值（空值拒绝；与 setSecret 同口径）
+ * @param {{db?:object, accountId?:number|null}} [opts] 传 db 才落账（沿用 `migrateMcpSecrets(db)` 的同款注入缝：
+ *   本模块不 import db.js —— 凭据文档的读写不该依赖"库连得上"，夹具也就能用假库）
+ * @returns {Promise<{name:string, updatedAt:string, fingerprint:string}>} 描述里**永远不含值**
+ */
+export async function rotateSecret(name, newValue, { db = null, accountId = null } = {}) {
+  const fingerprint = secretFingerprint(newValue); // 先算：值随后只进文档，本函数不再引用它
+  setSecret(name, newValue);                       // 唯一写路径；抛错＝没换成功，旧值一个字没动
+  const updatedAt = new Date().toISOString();
+  if (db) {
+    try {
+      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+        [accountId, 'cred:rotate', 'name=' + name + ' fingerprint=' + fingerprint]);
+    } catch (e) {
+      let msg = String((e && e.message) || e);
+      // 兜底脱敏（日志出口的纪律）；脱敏本身失败不得盖住原错，更不得让"已经换好了"变成抛错
+      try { msg = redactSecretValues(msg); } catch { /* 脱敏不可用＝保持原样 */ }
+      console.error('[cred] 轮换落账失败（轮换本身已生效，勿复跑）：' + msg);
+    }
+  }
+  return { name, updatedAt, fingerprint };
 }
 
 /**

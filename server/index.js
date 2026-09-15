@@ -34,6 +34,10 @@ import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
 import { REAL_WHERE } from './cohort.js';      // 复测口径单一来源（首页指标与复跑脚本同一份判据）
 import { checkEpochAndWarm } from './epoch.js'; // M2 换纪元检测与一次预热
+// 2026-09-16（核对报告 §3.5③）：跨轮前缀指纹 —— C4 在"两次请求之间"这个维度上的机检
+import { detectPrefixRewrite, parsePrefixRecord, formatPrefixRecord, PREFIX_RECORD_ACTION } from './history.js';
+import { PREFIX_LEDGER } from './prefix-participants.js';
+import { prefixHash } from './prefix.js';
 import { capabilityManifest, capabilitySummary } from './capabilities.js'; // RA-31 能力清单 / OP-16 降级语义
 import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
@@ -46,6 +50,7 @@ import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
 import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR } from './env.js';
 import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
+import { STORAGE_UNSUPPORTED } from './storage/index.js'; // v0.3 §7.1 ⑦：存储实现"能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）
 import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
 import { wrapAsyncHandlers } from './asyncwrap.js'; // Express 4 的 async 处理器兜底（出错 500，不再挂住请求）
 
@@ -472,7 +477,10 @@ const AUDIT_CATS = {
   task: ['task:%', 'route:%', 'review:%'],
   model: ['model:%', 'provider:%', 'settings:%', 'skill:%', 'evo:%'],
   auth: ['auth:%', 'login%', 'logout%'],
-  prefix: ['prefix:%'], // 步5：缓存失效账本（prefix:invalidate=C4 非预期；prefix:exempt/prefix:collapse=C5 豁免归因）
+  prefix: ['prefix:%'], // 步5：缓存失效账本。2026-09-16 起四类各有明确语义（见 prefix-participants.js 的 PREFIX_LEDGER）：
+                        //   prefix:invalidate=C4 非预期整段作废（含跨轮组装改写，src=assemble）
+                        //   prefix:exempt / prefix:collapse=C5 豁免（只报数，不设 0）
+                        //   prefix:assemble=每轮组装的跨轮指纹（C4 判据的对照来源）
 };
 function auditCatConds(cat) {
   const pats = AUDIT_CATS[cat];
@@ -876,17 +884,32 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // P25(O-24)：不再用首条消息 24 字符截断占位标题（曾致 LLM 自动标题恒 skip）——标题保持「新对话」，
   // 由回复完成后的 LLM 自动标题生成；LLM 失败时 autotitle.js 内兜底截断（见 autotitle.js）
 
-  // 组装历史（长对话压缩 P1-F8：>40 条用摘要 + 最近 30 条；摘要异步懒生成不阻塞对话）
+  // 组装历史（**只追加**，v0.3 §4.4.1 规则1）────────────────────────────────────────────────
+  // 2026-09-16 改（核对报告 §3.5③）：原实现在这里做**会话内滑窗**——`hist.length > 40` 就只发最近 30 条
+  //   并把早期消息压成一句摘要。那是"在同一会话内改写请求前缀"：越过 40 条那条线之后，**每一轮发出去的
+  //   中段历史都比上一轮缺了一段**，前缀从被丢掉的那一条起整段作废（缓存按逐字节匹配）。
+  //   它与 §4.4.1 规则1「只追加：禁止中途改写早期消息；折叠只在**段边界整段替换一次**」直接冲突，删除。
+  // 现在的体积控制只有一处、且是规则1 允许的那一处：agent.js 的 `maybeCollapseEarly`
+  //   （段边界**整段替换一次**：早期轮次折成 1 条 system，落 prefix:collapse 账本、不计 C4）。
+  //   它按"总字符数 + 距上次折叠的轮数"触发，本来就在控体积；滑窗那 40/30 条是一套多余的、且会破坏前缀的机制。
+  // 同一处还删掉了 assistant 长文的**每轮重新截断**（原 `c.slice(0,2400) + 标记 + c.slice(-1600)`）：
+  //   那个截断的输入是 DB 全文，输出字节恒定 —— 但它**不是"只追加"**，而是"把历史中间那段换掉"，
+  //   与滑窗是同一类改写（原实现里唯一比滑窗轻的地方是它只命中 >4000 字符的 assistant 消息）。
+  //   实测（本库只读核对）：全库 451 条消息里只有 **2 条** assistant 消息越线，
+  //   即"去掉它换取前缀纯净"的代价可忽略；体积控制交给折叠与 spill（§4.4.1 规则4 的手段在别处）。
+  //   原文仍在 DB messages 表（UI 回看与导出都不受影响）。
+  // 早期摘要（>40 条时懒生成，旁路 LLM 异步不阻塞本轮）：注入位置**不动**（仍在历史之前，
+  //   prefix-participants 的 `history-early-summary` 有登记）。它只在"刚生成"那一次让前缀分叉一次，
+  //   此后摘要内容恒定 ⇒ 前缀稳定；这条稳定性**不靠自觉**，由上面的跨轮指纹账本判（见本轮组装末尾）。
+  //   注意摘要只生成一次（conv_summaries 有行即不再生成），所以它不会每轮变——这正是它能留在前缀里的理由。
   let hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id', [conversationId]);
-  let earlySummary = null;
-  if (hist.length > 40) {
-    const s = (await db.query('SELECT summary FROM conv_summaries WHERE conversation_id=?', [conversationId]))[0];
-    earlySummary = s?.summary || null;
-    if (!earlySummary) {
-      const early = hist.slice(0, -30).map((m) => `${m.role}: ${String(m.content || '').slice(0, 400)}`).join('\n---\n');
-      generateSummary(provider, early, conversationId).catch(() => {});
-    }
-    hist = hist.slice(-30);
+  const earlySummaryRow = hist.length > 40
+    ? (await db.query('SELECT summary FROM conv_summaries WHERE conversation_id=?', [conversationId]))[0]
+    : null;
+  const earlySummary = earlySummaryRow?.summary || null;
+  if (hist.length > 40 && !earlySummary) {
+    const early = hist.map((m) => `${m.role}: ${String(m.content || '').slice(0, 400)}`).join('\n---\n');
+    generateSummary(provider, early, conversationId).catch(() => {});
   }
   const messages = [];
   if (earlySummary) messages.push({ role: 'system', content: '【早期对话摘要，无需回复】\n' + earlySummary });
@@ -920,14 +943,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 【尾巴区】只读意图 / 高成本自荐 的注入已移至 hist 之后（见下方尾巴区块）
 
   // 历史消息统一放最后（所有固定 system 注入之后）：2026-09 token 优化，
-  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化；
-  // assistant 超长文逐条截断（保留头+尾，DB messages 表仍有全文，不影响 UI 回看）
+  // 前缀 = 固定注入 + 按时间增长的历史，跨请求前缀缓存命中最大化。
+  // 2026-09-16（§3.5③）：这里原先还逐条截断 >4000 字符的 assistant 内容（头 2400 + 尾 1600）。
+  //   截断**只在首次越过 4000 字符那一轮**改变字节，此后恒定，所以它不是"每轮重写"——
+  //   但它**不是只追加**（把历史中间那段换掉了），与刚删掉的滑窗同属 §4.4.1 规则1 禁止的改写。已删除。
   for (const m of hist) {
-    let c = String(m.content || '');
-    if (m.role === 'assistant' && c.length > 4000) {
-      c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
-    }
-    messages.push({ role: m.role, content: c });
+    messages.push({ role: m.role, content: String(m.content || '') });
   }
 
   // ── 尾巴区（每轮可能变 → 放最后，变化只影响自身尾部 token）──────────────────────
@@ -1021,6 +1042,8 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 裁决：**不注入**。需要"最近提交"时由 `git_status`/`run_command` 现查 —— 事实源从"注入的快照
   // 变成"按需查询"，不会过时，也不再污染前缀。
   // 说明：原先的注入意图是"防记忆滞后于实现"；这条纪律已在系统提示词与行为准则里，不依赖这份快照。
+  // 前缀在这里**组装完毕**（固定注入 + 完整历史 + 尾巴区）；跨轮指纹账本在下方 agentCtx 之前落
+  //   —— 那里 `light`/`enabledTools`/`shellSchema` 都已定型，lane 才与真正发出去的工具面同源。
 
   // SSE 头
   res.writeHead(200, {
@@ -1182,6 +1205,35 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       // P6 allow/deny 规则层：settings access_rules 读入 ctx（execTool hooks 的 access_rules_guard 消费）
       let accessRules = null;
       try { const ar = await getSetting('access_rules', null); accessRules = Array.isArray(ar) ? ar : null; } catch { accessRules = null; }
+      // ── 跨轮前缀指纹（核对报告 §3.5③ 的地基，v0.3 §4.4.1 规则1/规则5）─────────────────────────
+      // 为什么必须有它：agent.js 的 `diffCore/prevCore` 机检每 run 重置（`prevCore = null`），
+      //   所以它**只看得见一次 run 之内的轮次**。而"同一会话两次请求之间前缀被改短/换头"发生在组装侧，
+      //   没有任何机检看得见 —— 核对报告 §3.5③ 记的正是这个洞（滑窗改写前缀但 C4 机检=0）。
+      // 判据**不设阈值**（不发明数字）：上一轮记下的 cnt 条必须逐字节仍是本轮前缀的开头。
+      //   逐字节相同 = 只追加（合规）；变短或换头 = prefix:invalidate（C4 非预期，如实归因）。
+      // 车道不同（换模型/工具面变更）不计：那是 C5 的预期失效，agent.js 的 prefix:exempt 已记过一次，
+      //   在这里再记一次就是把同一件事数两遍（`lane` 用**工具面的源件**拼，不含派生值）。
+      // 写入位置刻意选在"发送前、且参数已全部定型"：`light`/`enabledTools`/`shellSchema` 都已算出，
+      //   所以 lane 与真正发出去的工具面同源；同时请求还没发给模型，不会把"没发出去的请求"记成账。
+      try {
+        const laneSrc = JSON.stringify([wantProvider, wantModel, light, convPreset, convMode, permission, convShellCtx ? convShellCtx.key : null,
+          enabledTools ? [...enabledTools].sort() : null,
+          shellSchema ? [shellSchema.presetBase, [...shellSchema.forceOn].sort(), [...shellSchema.forceOff].sort(), shellSchema.mcpAllow] : null]);
+        const lane = prefixHash(laneSrc);
+        const prevRow = (await db.query('SELECT detail FROM audit_log WHERE conversation_id=? AND action=? ORDER BY id DESC LIMIT 1',
+          [conversationId, PREFIX_RECORD_ACTION]))[0];
+        const prev = parsePrefixRecord(prevRow && prevRow.detail);
+        const d = detectPrefixRewrite(prev, hist, lane);
+        if (d.state === 'rewrite') {
+          console.warn('[prefix-rewrite] 跨轮前缀改写：conv=' + conversationId + ' cnt ' + (prev ? prev.cnt : '?') + '→' + d.cnt
+            + (d.lost ? '（少 ' + d.lost + ' 条）' : '（条数未少但头部已不同：中段被丢/换头）')
+            + '；早期消息被改写或丢弃 = C4 非预期失效，已落 ' + PREFIX_LEDGER.INVALIDATE);
+          await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+            [req.user.id, PREFIX_LEDGER.INVALIDATE, formatPrefixRecord(d) + ' src=assemble', convShellId, conversationId]);
+        }
+        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+          [req.user.id, PREFIX_RECORD_ACTION, formatPrefixRecord(d), convShellId, conversationId]);
+      } catch (e) { console.warn('[prefix-assemble] 指纹落账失败（不影响对话）：' + ((e && e.message) || e)); }
       const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? RW_FS_ROOT : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff, __shellSchema: shellSchema };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），
       // 避免"同会话 1 小时内多次执行"把历史消耗重复计入观测（观察口径=本执行真实消耗）。
@@ -1521,6 +1573,11 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     // 主指标：近 7 天真实流量的**逐轮**命中率分布（中位/P90）
     let perRequest = { median: null, p90: null, rounds: 0, convs: 0 };
     let cumulative = { rate: f(avg7), hit: 0, miss: 0, rounds: 0 };
+    // C2 每轮新增（未命中 tokens）/ C3 单位成本 / C4 非预期失效 / C5 豁免失效
+    let c2 = { median: null, p90: null, rounds: 0 };
+    let c3 = { perRun: null, perConv: null, total: 0, runs: 0, convs: 0 };
+    let c4 = { count: 0, definition: '非预期整段前缀作废次数（不含首轮/切模型/折叠边界/长空闲/工具面变更）', lastAt: null, fromLedger: null };
+    let c5 = { rounds: 0, exempt: 0, collapse: 0, total: 0, byReason: {}, reasons: [] };
     try {
       const pr = await db.query(
         `SELECT u.cache_hit_tokens h, u.cache_miss_tokens m, u.conversation_id cid
@@ -1537,17 +1594,75 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
       };
       const h = pr.reduce((s, r) => s + Number(r.h), 0), m = pr.reduce((s, r) => s + Number(r.m), 0);
       cumulative = { rate: (h + m) > 0 ? f(100 * h / (h + m)) : null, hit: h, miss: m, rounds: pr.length };
+      // C2：每轮真正新增的 prompt tokens = 该轮未命中。**只报数不设线**（见下方 definition 的取舍说明）
+      const misses = pr.map((r) => Number(r.m)).filter((x) => x > 0);
+      c2 = { median: misses.length ? Math.round(q(misses, 0.5)) : null, p90: misses.length ? Math.round(q(misses, 0.9)) : null, rounds: misses.length };
     } catch { /* 双轨指标取不到不影响旧字段 */ }
+    // ── C3 / C4 / C5（2026-09-16 补，核对报告 §3.5⑦：仪表只到 C1/C2）────────────────────────────
+    // **只报数、不设线**（用户裁定 + v0.3 §3.5 的取舍，写在下面 definition 里）：
+    //   v0.3 §0.3 给 C3 的目标是"比基线 ↓≥50%"、给 C4 的目标是"0"；本仓已有实测结论与 RA-35 撤回数值线的裁定，
+    //   所以这里照用户"遇冲突以 v0.3 为准 ⇒ 规则4 按如实上报可监控实现"的指示：**如实上报，不新拍数字**。
+    //   唯一的例外是 v0.3 明文点名的"每次失效必须能说出触发原因"——那是归因要求，不是阈值，故照做（c4.lastAt + C5 分因）。
+    // 口径说明（如实，别混用）：
+    //   · C4 机检 = prefix:invalidate 行数（含 src=assemble 的跨轮组装改写）。历史近似口径（命中=0 且未命中>5000）
+    //     是另一把尺，**两口径不可混用**（v0.3 §0.3 C4 行原文）。
+    //   · C5 只统计"本轮有多少真实流量轮次，其中多少轮被豁免"，外加两类豁免的条数与分因。
+    try {
+      const cost = await db.query(
+        `SELECT COALESCE(SUM(cost),0) total, COUNT(DISTINCT agent_run_id) runs, COUNT(DISTINCT conversation_id) convs
+           FROM usage_stats WHERE account_id=?`, [req.user.id]);
+      const c = (cost && cost[0]) || {};
+      const runs = Number(c.runs || 0), convs = Number(c.convs || 0), total = Number(c.total || 0);
+      c3 = { perRun: runs ? Number((total / runs).toFixed(4)) : null, perConv: convs ? Number((total / convs).toFixed(4)) : null, total: Number(total.toFixed(2)), runs, convs };
+    } catch { /* 成本取不到不影响其它字段 */ }
+    try {
+      // C4/C5 账本与 C1/C2 不同：它们本来就跨账号（预热/换纪元账没有账号），且是**平台级**失效，
+      // 所以这里不按 account_id 过滤 —— 口径差异如实公布在 definition 里，避免"两个数各说各话"。
+      const led = await db.query(
+        `SELECT action, COUNT(*) n FROM audit_log WHERE action IN (?,?,?) GROUP BY action`,
+        [PREFIX_LEDGER.INVALIDATE, PREFIX_LEDGER.EXEMPT, PREFIX_LEDGER.COLLAPSE]);
+      const lastInv = await db.query(`SELECT created_at, detail FROM audit_log WHERE action=? ORDER BY id DESC LIMIT 1`, [PREFIX_LEDGER.INVALIDATE]);
+      const ex = await db.query(`SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=? GROUP BY r ORDER BY n DESC`, [PREFIX_LEDGER.EXEMPT]);
+      const byAction = (a) => Number(((led || []).find((r) => r.action === a) || {}).n || 0);
+      const byReason = {};
+      for (const r of (ex || [])) byReason[String(r.r || '?')] = Number(r.n || 0);
+      c4 = {
+        count: byAction(PREFIX_LEDGER.INVALIDATE),
+        definition: '非预期整段前缀作废次数（不含首轮、切模型、折叠边界、长空闲、工具面变更）；机检口径=账本 prefix:invalidate 行数',
+        lastAt: lastInv && lastInv[0] ? lastInv[0].created_at : null,
+        lastDetail: lastInv && lastInv[0] ? redactSecrets(String(lastInv[0].detail || '')).slice(0, 200) : null,
+        fromLedger: 'audit_log（全账号；C1/C2 是当前账号口径——两者范围不同，勿混用）',
+      };
+      const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+      c5 = {
+        rounds: perRequest.rounds, // 真实流量轮次（近 7 天，与 C1/C2 同源）：读作"多少轮里有几次豁免"
+        exempt: byAction(PREFIX_LEDGER.EXEMPT),
+        collapse: byAction(PREFIX_LEDGER.COLLAPSE),
+        byReason,
+        total: byAction(PREFIX_LEDGER.EXEMPT) + byAction(PREFIX_LEDGER.COLLAPSE),
+        note: '只报数、不设 0：首轮/长空闲/切模型/工具面变更/折叠边界都属**预期**失效，必须归因而不是消灭',
+        reasons: Object.keys(byReason).sort(),
+        sumCheck: sum(byReason), // 分因必须加总等于 exempt —— 对不上就是归因漏了一类（前端不显示，供对账）
+      };
+    } catch { /* 账本取不到不影响其它字段 */ }
     res.json({
       ok: true, target,
       todayHit: todayRow ? Number(todayRow.hit) : 0, todayMiss: todayRow ? Number(todayRow.miss) : 0,
       todayRate: f(todayRate), avg7: f(avg7),
       perRequest, cumulative,
+      c2, c3, c4, c5,
       todayRounds: todayRow ? Number(todayRow.n) : 0, windowRounds: rows.slice(-7).reduce((s, r) => s + Number(r.n || 0), 0),
       daily: rows.slice(-30).map((r) => ({ d: String(r.d), hit: Number(r.hit), miss: Number(r.miss), rounds: Number(r.n || 0) })),
       definition: {
         perRequest: '单请求命中率（近7天真实流量逐轮，中位/P90）——每轮质量',
         cumulative: '命中/输入的累计比（近7天真实流量）＝DSH 同口径；≈1−2/N，随轮数趋近 100%，须与轮数同看',
+        c2: '每轮真正新增的未命中 prompt tokens（近7天真实流量逐轮，中位/P90）。v0.3 §4.4.1 规则4 要求给"每轮新增"设阈值；'
+          + '本仓既有实测结论与 RA-35 已撤回数值线，按用户"遇冲突以 v0.3 为准 ⇒ 规则4 按如实上报可监控实现"的指示：**只报数，不设线**',
+        c3: '单位成本（每 run / 每会话 / 累计，当前账号全量 usage_stats 口径）。v0.3 §0.3 的目标值"比基线 ↓≥50%"是**口径与基线**问题，'
+          + '不在本端点内拍数字——这里给的是可对比的实测值，判定由报告会话做',
+        c4: c4.definition + '。**目标 0 是 v0.3 定义的目标，本端点不设闸门**；每次失效必须能说出触发原因（lastDetail 即归因）',
+        c5: c5.note,
+        scope: 'C1/C2/C3 = 当前账号；C4/C5 = 全账号账本（含平台级预热/换纪元事件）。两段范围不同，跨段比较前先看这一行',
       },
       alert: target > 0 && avg7 != null && avg7 < target,
     });
@@ -2727,7 +2842,12 @@ async function main() {
         await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
           [null, 'eventlog:archive', JSON.stringify(a).slice(0, 800)]).catch(() => {});
       }
-    } catch (e) { console.error('[eventlog-archive] 失败:', e.message); }
+    } catch (e) {
+      // 存储实现没有 SQL 面时（RW_STORAGE=jsonfile）归档这条能力缺失是**如实报的**，别报成"失败"：
+      // 能力缺失与故障在排障时是两件事（v0.3 §4.6：显式降级要留痕、要客户可见，但也不能谎报成故障）。
+      if (e && e.code === STORAGE_UNSUPPORTED) console.log('[eventlog-archive] ' + when + '：该存储实现不支持归档，跳过（' + e.message + '）');
+      else console.error('[eventlog-archive] 失败:', e.message);
+    }
   };
   await runEventArchive('启动归档');
   const eventArchTimer = setInterval(() => { runEventArchive('定时归档'); }, 6 * 60 * 60 * 1000);
@@ -2809,6 +2929,17 @@ async function main() {
   // 飞书 webhook（F1-F5，需公网 HTTPS 回调；PROD 域名阶段启用，TEST 可用隧道）
   if (process.env.RW_FEISHU_WEBHOOK === '1') {
     registerFeishuWebhook(app);
+  }
+  // v0.3 §4.6 沙箱启动门禁（⑰ 在 server/sandbox/degrade.js 里备好的挂点）：
+  //   · RW_SANDBOX_REQUIRED=1 ⇒ 拿不到沙箱模式就**拒绝启动**（文档字面语义）；
+  //   · 默认（开关关）⇒ 只落一条 sandbox:degrade 账、按实际 enforcement 如实上报，然后继续启动
+  //     ——迁移期不拿"服务不可用"换"安全"（登记偏离见 proposals/架构文档冲突登记-20260915.md 的 C-45）。
+  // 放在监听之前：启动时真探一次（不吃缓存），探测结果同时给 /api/capabilities 用。
+  const { guard: sandboxStartupGuard } = await import('./sandbox/index.js');
+  const sbGuard = await sandboxStartupGuard();
+  if (!sbGuard.ok) {
+    console.error(sbGuard.message || '[sandbox] 拿不到沙箱模式，RW_SANDBOX_REQUIRED=1 下拒绝启动');
+    process.exit(1);
   }
   app.listen(config.port, () => {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);

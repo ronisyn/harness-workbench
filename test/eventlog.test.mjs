@@ -55,7 +55,11 @@ test('唯一写入点：只有 eventlog.js 往 events 表写，且挂在**对外
   };
   walk('server');
   const inserters = files.filter((f) => /INSERT INTO events\b/i.test(read(f)));
-  assert.deepEqual(inserters, ['server/eventlog.js'], 'events 账本只能有一个写入点，实际：' + inserters.join(', '));
+  // v0.3 §7.1 ⑦（存储抽象）之后，写账本的**语句**归存储实现层 —— SQL 是介质的方言，留在调用方就等于
+  // 换实现还得改调用方（那样的抽象是假的）。判据**没有放宽**：语句落点、调用方两边都仍然只许有一个。
+  assert.deepEqual(inserters, ['server/storage/mysql.js'], 'events 的 INSERT 只许有一个落点（存储实现层），实际：' + inserters.join(', '));
+  const appenders = files.filter((f) => /\.events\.append\(/.test(read(f).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^\S\n])\/\/[^\n]*/gm, '$1')));
+  assert.deepEqual(appenders, ['server/eventlog.js'], 'events 账本只能由 eventlog.js 追加（唯一写入点），实际：' + appenders.join(', '));
   // 落账点必须在 `send`（run 边界由 index.js 直接发、agent 侧事件也转到它）——挂在 agent.js 的 emitEv 上会漏掉
   // intent/run_start/done/run_end，而那正是投影最需要的事件（第一版就是这么错的，端到端取证当场发现）。
   const idx = read('server/index.js');

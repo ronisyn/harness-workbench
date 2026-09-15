@@ -99,7 +99,11 @@ async function chatStream(conversationId, message, waitSeconds) {
           else if (ev.type === 'error') errMsg = ev.message;
         }
       }
-      if (runEnd || done) { try { ac.abort(); } catch { /* 已结束 */ } break; }
+      // 读满即 **break**，**不要**在这里 `ac.abort()`（2026-09-16 实测，由 ⑳ JSON-RPC 的核对撞出来）：
+      // abort 会让这个 `for await` 的 next() 当场以 AbortError 拒绝、落进下面的"超时"分支 ⇒
+      // **流明明跑完了却报 status:'timeout'、run_id 丢成 null**（内容靠回读落库那条兜住了，肉眼很难发现）。
+      // abort 只留给真正的超时（上面的 timer）。
+      if (runEnd || done) break;
     }
   } catch (e) {
     if (e.name === 'AbortError' || /aborted/i.test(String(e.message))) {

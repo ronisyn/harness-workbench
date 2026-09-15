@@ -58,3 +58,16 @@ export const RW_IDLE_MIN = Number(process.env.RW_IDLE_MIN || 60);               
 export const RW_STORAGE = process.env.RW_STORAGE || 'mysql';
 // 执行后端（v0.3 §4.2 三层分离的第三层 / §5 跨平台）：选择 server/exec/ 下的实现。
 export const RW_EXEC_BACKEND = process.env.RW_EXEC_BACKEND || 'local';
+
+// ---- v0.3 §4.6 沙箱的严格语义开关 ----
+// 默认 **关**：拿不到沙箱（本机没有可用 runner）时按"显式降级"走——如实上报 enforcement:'none'、
+// 留一条 sandbox:degrade 账、提高审批，而不是打死服务。这是**迁移期的登记偏离**（见冲突登记 C-45），
+// 理由：客户端机器上 bwrap/nsjail 往往不存在，装不上的机器直接起不来服务，比"降级但可见"更糟。
+// 开（=1/true/yes/on）＝v0.3 §4.6 的字面语义：拿不到沙箱模式就**拒绝启动/拒绝执行**。
+// 装上 bwrap 或配好 RW_SANDBOX_RUNNER 之后把开关打开，即完全落到文档口径，无需改代码。
+// 为什么是函数而不是常量：判据要**调用时**读环境（夹具会在同进程里改 process.env 断言两种语义），
+// 常量会在模块加载时就定死；收 env 参数是给夹具的缝（不传就读真实 process.env）。
+// 真值表只有这一份实现——`server/sandbox/degrade.js` 的 sandboxRequired() 直接转调它。
+export function sandboxRequiredEnv(env = process.env) {
+  return /^(1|true|yes|on)$/i.test(String(env.RW_SANDBOX_REQUIRED ?? '').trim().toLowerCase());
+}

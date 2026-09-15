@@ -139,6 +139,16 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
             {`会话累计 ${hitSum.cumulative?.rate ?? '-'}%（DSH 同口径 · ≈1−2/N · ${hitSum.cumulative?.rounds ?? 0} 轮）`}
             {hitSum.target > 0 ? ` ｜ 目标 ${hitSum.target}%` : '（未启用目标——设置→观测组可设阈值告警）'}
             {hitSum.alert ? '　⚠️ 累计低于目标——进化集已生成建议，可转行动' : ''}
+            {/* C2–C5（2026-09-16 补，核对报告 §3.5⑦：仪表原先只到 C1/C2）——
+                **只报数、不设线**：v0.3 §4.4.1 规则4 要求给"每轮新增"设阈值，但按用户"遇冲突以 v0.3 为准
+                ⇒ 规则4 按如实上报可监控实现"的指示，这里一个数字都不拍；读数与口径说明（title）同源来自
+                /api/cache-hit/summary 的 definition，前端不自己解释指标。 */}
+            <div style={{ marginTop: 2 }}
+              title={[hitSum.definition?.c2, hitSum.definition?.c3, hitSum.definition?.c4, hitSum.definition?.c5, hitSum.definition?.scope].filter(Boolean).join('\n')}>
+              {`每轮新增 中位 ${hitSum.c2?.median ?? '-'} / P90 ${hitSum.c2?.p90 ?? '-'} tok · 成本 ¥${hitSum.c3?.perRun ?? '-'}/run · ¥${hitSum.c3?.perConv ?? '-'}/会话 · 累计 ¥${hitSum.c3?.total ?? 0}`}
+              {' ｜ '}
+              {`C4 非预期失效 ${hitSum.c4?.count ?? 0} 次${hitSum.c4?.lastAt ? '（最近 ' + String(hitSum.c4.lastAt).slice(5, 16) + '）' : ''} · C5 豁免 ${hitSum.c5?.total ?? 0} 次`}
+            </div>
           </div>
         )}
         {/* 迷你对话 */}

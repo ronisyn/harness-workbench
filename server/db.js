@@ -410,13 +410,20 @@ const SCHEMA = [
     updated_at DATETIME DEFAULT NOW(),
     INDEX idx_contract_status (status)
   )`,
+  // 2026-09-16（v0.3 §0.5「不留两套」的过账判定，登记 C-39 第 ② 条）：`contract_events` 是 `events` 账本的
+  // **投影**，写入点唯一（`server/eventlog.js` 的 persistContractEvent：同一次调用先落账本行、再落这一行）。
+  // `event_id` ＝ 那条账本行的 id：可追溯靠它（机检见 test/contract-events-source.test.mjs），
+  // 它同时是重放去重键 —— 唯一索引 ⇒ 同一条账本行被投影两次仍只有一行（去重口径照抄 projection.js
+  // 的"按账本行 id 去重"）。存量库走 migrations.js 的 0006；两条建库路径一起改（schema-sync 夹具机器核对）。
   `CREATE TABLE IF NOT EXISTS contract_events (
     id INT AUTO_INCREMENT PRIMARY KEY,
     contract_id INT NOT NULL,
     kind VARCHAR(24),
     detail TEXT,
+    event_id BIGINT NULL,
     created_at DATETIME DEFAULT NOW(),
-    INDEX idx_ce_contract (contract_id)
+    INDEX idx_ce_contract (contract_id),
+    UNIQUE KEY uk_ce_event (event_id)
   )`,
   // ---- B1 壳定义层（v2.6 基线 §3）：shells 壳行 / shell_tools 三态 / shell_settings 壳级覆盖 ----
   `CREATE TABLE IF NOT EXISTS shells (

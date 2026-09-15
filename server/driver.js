@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from './db.js';
+import { persistContractEvent } from './eventlog.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
 import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
@@ -20,8 +21,12 @@ const MAX_AUTO_ROUNDS = 60;        // 单契约每次激活最多自动轮次（
 const MAX_IDLE_CONCLUDE = 2;       // 连续"没调用 finish_task 就收尾"几次后请你裁决
 let running = new Set();           // 正在执行的 contract id（驱动器自身并发 ≤2）
 
-async function addEvent(contractId, kind, detail) {
-  try { await db.query('INSERT INTO contract_events (contract_id, kind, detail) VALUES (?,?,?)', [contractId, kind, String(detail || '').slice(0, 2000)]); } catch { /* ignore */ }
+// 契约事实**只从账本走**（v0.3 §0.5「不留两套」的过账判定 C-39 第 ② 条：`contract_events` 与 `events` 同源）：
+// 这里不再自己 INSERT `contract_events`，而是把事实交给 `eventlog.persistContractEvent` —— 账本一行
+// （`events`，唯一账本）＋ `contract_events` 一行（它的投影，带回指账本行的 `event_id`）由那一次调用写完。
+// 失败仍与改造前一样吞掉：契约事件属观测面，不许因为写不进账而让整轮驱动失败（同 eventlog 的落账口径）。
+async function addEvent(contractId, kind, detail, conversationId) {
+  try { await persistContractEvent(contractId, kind, detail, { conversationId }); } catch { /* ignore */ }
 }
 
 async function setStatus(c, status, extra = {}) {
@@ -109,18 +114,23 @@ async function runAcceptance(c) {
 }
 
 // 无人值守时用户输入的排队钩子（ask_user / 审批 触发）
-async function needInput(c, payload) {
+async function needInput(c, payload, conversationId) {
   await db.query('UPDATE task_contracts SET last_ask=?, status="need_input", updated_at=NOW() WHERE id=?', [JSON.stringify(payload), c.id]);
-  await addEvent(c.id, 'need_input', JSON.stringify(payload).slice(0, 500));
+  await addEvent(c.id, 'need_input', JSON.stringify(payload).slice(0, 500), conversationId);
 }
 
 async function driveContract(c) {
   if (running.has(c.id)) return;
   running.add(c.id);
+  // 契约事实的归属会话：账本按会话归属（见 addEvent），所以它在 try 外先声明 —— 异常路径也要能报出
+  // 归属；首次执行时 `task_contracts.conv_id` 还是 NULL，会话是下面 findOrCreateConv 才建的。
+  let convId = null;
   try {
     await setStatus(c, 'running');
-    await addEvent(c.id, 'start', '驱动器开始一轮执行');
-    const convId = await findOrCreateConv(c);
+    // 先取/建会话再落 'start'：顺序反过来（改造前的写法）意味着第一条契约事实没有归属会话可写，
+    // 而账本不接受无归属的账（eventlog 的既有口径）—— 那就会丢掉这轮执行的起点。
+    convId = await findOrCreateConv(c);
+    await addEvent(c.id, 'start', '驱动器开始一轮执行', convId);
     // 历史（最多最近 30 条 用户/助手 文本，早期并入一行提示）
     let hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 30', [convId]);
     hist = hist.reverse();
@@ -146,7 +156,7 @@ async function driveContract(c) {
     const ctx = {
       permission: 'full', accountId: c.account_id ?? null, conversationId: convId, root: RW_FS_ROOT,
       __autonomous: true, __accessRules: accessRules,
-      __needInput: (payload) => needInput(c, payload),
+      __needInput: (payload) => needInput(c, payload, convId),
     };
     const result = await runAgent({ provider: c.provider || 'deepseek', model: c.model || 'deepseek-v4-flash', messages: msgs, permission: 'full', ctx, keys: config.keys });
     const finished = (result.toolLog || []).some((t) => t.name === 'finish_task');
@@ -161,15 +171,15 @@ async function driveContract(c) {
     if (finished) {
       // Q3=A：跑验收钩子
       const acc = await runAcceptance(refresh);
-      await addEvent(c.id, 'finish_task', '自检完成；验收' + (acc.pass ? '通过' : '未通过'));
+      await addEvent(c.id, 'finish_task', '自检完成；验收' + (acc.pass ? '通过' : '未通过'), convId);
       if (acc.pass) {
         await appendConvMsg(convId, 'assistant', summary + (acc.results.length ? '\n\n[验收钩子全部通过 ✅]' : ''));
         await setStatus(refresh, 'candidate_done', { lastResult: summary, attempts });
-        await addEvent(c.id, 'candidate_done', '等待用户复测确认');
+        await addEvent(c.id, 'candidate_done', '等待用户复测确认', convId);
       } else {
         await appendConvMsg(convId, 'user', '【驱动器验收未通过】\n' + acc.results.filter((r) => !r.ok).map((r) => '- ' + r.check + ' → ' + r.detail).join('\n') + '\n请修复后重新调用 finish_task。');
         await setStatus(refresh, 'queued', { attempts });
-        await addEvent(c.id, 'acceptance_fail', '打回修复');
+        await addEvent(c.id, 'acceptance_fail', '打回修复', convId);
       }
     } else if ((result.toolLog || []).length === 0) {
       // 直接收尾且没干活 → 驱动器要求继续（进展型护栏；连续多次后请你裁决）
@@ -177,7 +187,7 @@ async function driveContract(c) {
         await appendConvMsg(convId, 'assistant', summary);
         await db.query('UPDATE task_contracts SET last_ask=?, status="need_input", updated_at=NOW() WHERE id=?',
           [JSON.stringify({ kind: 'judge', question: '任务未完成但 Agent 已停止（连续多次未继续）。接受当前结果结束，还是让它继续？', options: [{ label: '接受并结束', value: 'accept' }, { label: '让它继续', value: 'continue' }] }), c.id]);
-        await addEvent(c.id, 'need_input', '请用户裁决：接受当前结果或继续');
+        await addEvent(c.id, 'need_input', '请用户裁决：接受当前结果或继续', convId);
       } else {
         await appendConvMsg(convId, 'user', '【驱动器】目标尚未验收完成且本轮未调用 finish_task。请继续执行直到完成并调用 finish_task（可先说明卡点）。');
         await setStatus(refresh, 'queued', { attempts });
@@ -186,14 +196,16 @@ async function driveContract(c) {
       // 干了活但没收尾 → 继续
       await appendConvMsg(convId, 'user', '【驱动器】本轮执行了：' + (toolNames.join('、') || '工具') + '，但尚未调用 finish_task。请继续完成目标，完成后调用 finish_task。');
       await setStatus(refresh, 'queued', { attempts });
-      await addEvent(c.id, 'continue', '已驱动下一轮');
+      await addEvent(c.id, 'continue', '已驱动下一轮', convId);
     }
     if (attempts >= MAX_AUTO_ROUNDS && refresh.status === 'queued') {
       await setStatus(refresh, 'blocked', { lastResult: '超过自动轮次上限(' + MAX_AUTO_ROUNDS + ')，已停止。' });
-      await addEvent(c.id, 'blocked', '超过自动轮次上限');
+      await addEvent(c.id, 'blocked', '超过自动轮次上限', convId);
     }
   } catch (e) {
-    await addEvent(c.id, 'error', '驱动器执行异常: ' + e.message.slice(0, 300));
+    // 会话还没建起来时（findOrCreateConv 自己失败）没有归属可写 ⇒ 这条事实落不了账（eventlog 明确返回
+    // false，不是假装写了）；错误本身仍在下一行的 last_result 里留痕，不是静默丢。
+    await addEvent(c.id, 'error', '驱动器执行异常: ' + e.message.slice(0, 300), convId);
     try { await setStatus(c, 'queued', { lastResult: '驱动器异常：' + e.message.slice(0, 300) }); } catch { /* ignore */ }
   } finally {
     running.delete(c.id);

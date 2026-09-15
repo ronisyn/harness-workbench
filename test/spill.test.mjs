@@ -31,8 +31,8 @@ test('超内联上限 → 预览 + 精确省略量 + 定位符；全文落盘且
   assert.ok(out.includes('AAAA'), '预览需保留头部内容');
   const file = /全文已存 ([^（]+)（/.exec(out)[1];
   assert.equal(fs.readFileSync(file, 'utf8'), text, '落盘内容 = 原全文（模型看到的同一份）');
-  // 按定位符分段取回
-  const part = readSpill(file, 100, 50);
+  // 按定位符分段取回（第 4 个参数＝请求方会话 id：溢出文件按会话隔离，见下方"会话归属"一条）
+  const part = readSpill(file, 100, 50, 7);
   assert.equal(part.total, text.length);
   assert.equal(part.content, text.slice(100, 150));
 });
@@ -175,6 +175,24 @@ test('readSpill 拒绝溢出目录之外的路径', () => {
   CLEAN();
   assert.throws(() => readSpill('/etc/passwd', 0, 100), /只能读取溢出目录内的文件/);
   assert.throws(() => readSpill(path.join(SPILL_DIR, '..', '..', 'etc', 'passwd'), 0, 100), /只能读取溢出目录内的文件/);
+});
+
+// ── 溢出文件的会话归属（v0.3 §4.4「溢出文件的权限」；符合性核对 §3.5 缺陷②）────────────────────
+// 旧状态：取回只校验"路径在 SPILL_DIR 内"，**不校验这份文件是谁写的** ⇒ 任意会话（含 read 档）
+// 能读别的会话的溢出文件。归属判据＝目录名（写出与取回共用 spillOwnerDir 一个算式）。
+test('会话归属：本会话取得到；别的会话 / 不带会话 id 一律如实报错（不返回空内容）', () => {
+  CLEAN();
+  const text = JSON.stringify({ text: 'S'.repeat(9000) });
+  const out = spillToolResult(text, 4000, { tool: 'repo_map', conversationId: 7, callId: 'own-1' });
+  const file = /全文已存 ([^（]+)（/.exec(out)[1];
+  assert.equal(file.startsWith(SPILL_DIR + path.sep + '7' + path.sep), true, '溢出文件必须落在本会话目录下');
+  assert.equal(readSpill(file, 0, 10, 7).content, text.slice(0, 10), '本会话按范围取回');
+  assert.throws(() => readSpill(file, 0, 10, 8), /只能取回本会话自己的溢出文件/);
+  assert.throws(() => readSpill(file, 0, 10), /只能取回本会话自己的溢出文件/);
+  // 反面：anon 会话（无会话上下文）自己写的仍然取得到——读写两侧同一个算式，不然会把自己锁死
+  const anonOut = spillToolResult(text, 4000, { tool: 'repo_map', callId: 'anon-1' });
+  const anonFile = /全文已存 ([^（]+)（/.exec(anonOut)[1];
+  assert.equal(readSpill(anonFile, 0, 5).content, text.slice(0, 5));
 });
 
 // ── 按行对齐预览（2026-09-15）：read_file 大文件不再"切在行中间 + 中段静默丢失" ──────────────

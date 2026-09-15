@@ -177,6 +177,19 @@ export const VERSIONS = [
       INDEX idx_deliveries_state (state, id)
     )`],
   },
+  {
+    id: '0006_contract_events_event_link', note: '契约事件并入 events 账本：投影行回指账本行（C-39 第 ② 条）',
+    // 2026-09-16（v0.3 §0.5「不留两套」的过账判定，登记 C-39）：事件四处里 `contract_events` 的裁决是
+    // **改造/迁移：与 `events` 同源** —— 契约状态事实此后只由 `server/eventlog.js` 的 persistContractEvent
+    // 落一次账（`events` 是唯一账本），`contract_events` 是它的投影，靠 `event_id` 指回账本行。
+    // **只增不删**：老行的 `event_id` 为 NULL —— 它们当年根本没进过账本，**无从回填**（不伪造来源），
+    // 所以这一列可空；唯一索引允许多行 NULL，存量库因此能直接加上，不需要任何数据搬迁。
+    // 新库路径由 db.js 的 SCHEMA 建到最终形状（含本列与唯一键），两条路径一起改。
+    statements: [
+      'ALTER TABLE contract_events ADD COLUMN event_id BIGINT NULL',
+      'ALTER TABLE contract_events ADD UNIQUE KEY uk_ce_event (event_id)',
+    ],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (

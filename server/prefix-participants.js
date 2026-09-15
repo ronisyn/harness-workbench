@@ -13,6 +13,22 @@
 //   cacheImpact   breaks-prefix=会让整段前缀作废｜tail-only=只影响其后的增量｜warms-prefix=主动把前缀打热｜none=不影响
 //   anchors       源码锚点数组（夹具会核对每一条**确实还在**，防这张表烂掉）
 //   note          一句实话：为什么是这个影响、有什么已知风险
+//
+// 2026-09-16 补登记（核对报告 §3.5④：声明表漏登记组件 = C4 的假阴性）：
+//   原表 12 条**集中在 agent.js 与尾巴区**，而 `/api/chat` 在历史**之前**还注入了 4 条 system
+//   （早期摘要 / 用户自定义指令 / 项目 AGENTS.md / 壳语境），运行期还有 COMPLETION_HINT 与四类护栏、
+//   打回提示。它们全部**只追加**（不改写既有消息），但"只追加"这件事本身必须被声明出来 ——
+//   否则将来有人把其中任一条改成"插到前面/就地改写"，无人会察觉（老表里根本没有这一行可改）。
+
+// 账本动作名：`prefix:*` 是 C4/C5 的**唯一账本**（audit_log，不新造表）。常量化的理由很实际：
+//   写账的三处（agent.js 的 invalidate、index.js 的 assemble、审计分类）各写各的字符串，
+//   错一个字母就是**静默不计**——C4 会假装是 0。夹具直接核对常量值，改名人必须一起改。
+export const PREFIX_LEDGER = {
+  INVALIDATE: 'prefix:invalidate', // C4 非预期：整段前缀作废（首轮/切模型/折叠边界/工具面变更**之外**的断链）
+  EXEMPT: 'prefix:exempt',         // C5 豁免：首轮 / 长空闲 / 切模型 / 工具面变更（只报数，不设 0）
+  COLLAPSE: 'prefix:collapse',     // C5 豁免：段边界整段折叠（§4.4.1 规则1 允许的那一次改写）
+  ASSEMBLE: 'prefix:assemble',     // 2026-09-16 新增：`/api/chat` 组装前缀后的跨轮指纹（**跨 run 改写**的证据）
+};
 
 export const PREFIX_PARTICIPANTS = [
   {
@@ -36,7 +52,8 @@ export const PREFIX_PARTICIPANTS = [
   {
     id: 'collapse', where: 'rewrite', cacheImpact: 'breaks-prefix',
     anchors: [{ file: 'server/agent.js', pattern: 'maybeCollapseEarly' }],
-    note: '段边界整段替换一次 —— 这是唯一允许的改写（§5.3 纪律1）。属预期失效：落 prefix:collapse 账本、不计 C4',
+    note: '段边界整段替换一次 —— 这是唯一允许的改写（§5.3 纪律1）。属预期失效：落 prefix:collapse 账本、不计 C4。'
+      + ' 2026-09-16 起它也是 /api/chat 长会话**唯一**的体积控制手段：原来那条"历史 >40 条就只发最近 30 条"的滑窗已按 §4.4.1 规则1 删除（见 index.js 组装段注释）',
   },
   {
     id: 'epoch-warmup', where: 'out-of-band', cacheImpact: 'warms-prefix',
@@ -67,6 +84,50 @@ export const PREFIX_PARTICIPANTS = [
     id: 'resume-hint', where: 'tail', cacheImpact: 'tail-only',
     anchors: [{ file: 'server/index.js', pattern: 'resumeHint(' }],
     note: '断点恢复现场提示，追加尾部',
+  },
+  {
+    id: 'history-early-summary', where: 'system', cacheImpact: 'breaks-prefix',
+    anchors: [{ file: 'server/index.js', pattern: '【早期对话摘要，无需回复】' }],
+    note: '**2026-09-16 补登记**：长会话（>40 条）的早期摘要注入在历史之前。它只在"摘要刚生成/刚变化"那一次让前缀分叉一次，此后摘要内容不变 ⇒ 前缀稳定；跨轮有没有真的改写，看 prefix:assemble 的指纹判定（不在这里写死数字，数字会过期）',
+  },
+  {
+    id: 'history-user-prompt', where: 'system', cacheImpact: 'breaks-prefix',
+    anchors: [{ file: 'server/index.js', pattern: '【用户自定义指令】' }],
+    note: '**2026-09-16 补登记**：settings.systemPrompt 注入在历史之前，改一次它=换前缀（与改系统提示同级）。它不在会话内变，所以不会每轮断链；但改设置后所有会话下次请求都会整段重建——这一条必须被看见',
+  },
+  {
+    id: 'history-project-agents', where: 'system', cacheImpact: 'breaks-prefix',
+    anchors: [{ file: 'server/index.js', pattern: '说明（AGENTS.md）】' }],
+    note: '**2026-09-16 补登记**：projects/<project>/AGENTS.md 全文（≤16000 字符）注入在历史之前。文件一改，该项目的每条会话下次请求都整段重建——这就是"进前缀就必须声明"的典型例子',
+  },
+  {
+    id: 'history-shell-context', where: 'system', cacheImpact: 'breaks-prefix',
+    anchors: [{ file: 'server/index.js', pattern: '【壳语境：' }],
+    note: '**2026-09-16 补登记**：壳 persona/领域说明注入在历史之前（非 default 壳才注入）。换壳=换前缀（§4.4.1 规则3 的"新段"同源）',
+  },
+  {
+    id: 'completion-hint', where: 'tail', cacheImpact: 'tail-only',
+    anchors: [{ file: 'server/agent.js', pattern: 'const COMPLETION_HINT = [' }],
+    note: '**2026-09-16 补登记**：每轮工具结果后的"完成度评估"提示。按 5.8 消息卫生**每轮只保留最新一条**（pop 旧条 + 追加新条）：新条在尾部、旧条在被 pop 的位置——但两者内容**逐字节相同**（常量），所以前缀一个字节都不变，仍是只追加',
+  },
+  {
+    id: 'guard-hints', where: 'tail', cacheImpact: 'tail-only',
+    anchors: [
+      { file: 'server/agent.js', pattern: '【平台强制检测：本轮声称完成但无工具调用】' },
+      { file: 'server/agent.js', pattern: '【平台强制检测：本轮只输出行动承诺、未调用任何工具】' },
+      { file: 'server/agent.js', pattern: '请【停止原样重试】' },
+      { file: 'server/agent.js', pattern: '请【改变策略】' },
+      { file: 'server/agent.js', pattern: '【新段】' },
+    ],
+    note: '**2026-09-16 补登记**：护栏与打回提示（假完成打回 / 假开始打回 / 连败提示 / 死循环提示 / 新段提示）全部 append 到尾部；它们出现与否只影响其后的增量，不改写任何既有消息（原表连一条都没登记，等于"这些注入点无人看着"）',
+  },
+  {
+    id: 'prefix-assemble', where: 'out-of-band', cacheImpact: 'none',
+    anchors: [
+      { file: 'server/history.js', pattern: 'export function detectPrefixRewrite' },
+      { file: 'server/index.js', pattern: 'PREFIX_RECORD_ACTION' },
+    ],
+    note: '**2026-09-16 新增（核对报告 §3.5③ 的地基）**：不进请求，只在每次组装完前缀后落一行跨轮指纹（prefix:assemble）。它是 **C4 在"跨 run"维度上的唯一机检** —— agent.js 的 diffCore 每 run 重置 prevCore，看不见"同一会话两次请求之间历史被改短/换头"。判据不设阈值：上一轮记的 cnt 条必须逐字节仍是本轮前缀的开头，否则记 prefix:invalidate',
   },
   {
     id: 'readonly-intent', where: 'tail', cacheImpact: 'tail-only',

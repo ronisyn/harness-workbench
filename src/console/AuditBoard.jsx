@@ -3,7 +3,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api.js';
 
-const CAT_CN = { tool: '工具', knowledge: '知识', ext: '扩展', shell: '壳管理', task: '任务', model: '模型/技能', auth: '登录' };
+// prefix = 缓存失效账本（v0.3 §4.4.1 规则5 / §0.3 C4–C5）：2026-09-16 补中文名——它此前没有条目，
+// 于是后台筛选项里只会显示裸 key "prefix"，看审计的人不知道那一类就是 C4/C5 的证据来源。
+const CAT_CN = { tool: '工具', knowledge: '知识', ext: '扩展', shell: '壳管理', task: '任务', model: '模型/技能', auth: '登录', prefix: '缓存前缀' };
 
 export default function AuditBoard({ onGoChat }) {
   const [rows, setRows] = useState([]);

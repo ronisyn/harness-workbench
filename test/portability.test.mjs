@@ -32,10 +32,15 @@ test('环境事实由代码自身位置推导（换机器不用改代码）', ()
 
 test('server/ 下不再有平台专属路径与命令字面量（字面量只许留在它该在的那一处）', () => {
   // 允许保留的三处（各自是"某个平台的事实"的唯一落点）：
-  //   env.js      —— 注释里解释"为什么不写死 /srv"
-  //   restart.js  —— Linux 那一条臂就是 systemctl
-  //   shell.js    —— POSIX 那一条臂就是 /bin/bash
-  const ALLOW = new Set(['env.js', 'restart.js', 'shell.js']);
+  //   env.js         —— 注释里解释"为什么不写死 /srv"
+  //   restart.js     —— Linux 那一条臂就是 systemctl
+  //   exec/local.js  —— POSIX 那一条臂就是 /bin/bash（2026-09-16 从 shell.js 搬来这里：实现挪进了执行后端层，
+  //                     见 v0.3 §4.2「三层分离」的第三层 / §5 跨平台；shell.js 只剩门面，不再含平台字面量）
+  const ALLOW = new Set(['env.js', 'restart.js']);
+  // 平台层的**整个子树**都允许出现平台字面量（它们的职责就是"这一层是平台相关的"）：
+  //   exec/    —— 执行后端（POSIX 那条臂就是 /bin/bash；Windows 那条是 powershell.exe / taskkill）
+  //   sandbox/ —— 沙箱后端（bwrap / unshare / 将来 Windows 的 ACL runner）：v0.3 §4.6 + §7.1 ⑰
+  const ALLOW_PREFIX = ['exec/', 'sandbox/'];
   const bad = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -43,7 +48,8 @@ test('server/ 下不再有平台专属路径与命令字面量（字面量只许
       if (e.isDirectory()) { walk(p); continue; }
       if (!p.endsWith('.js')) continue;
       const rel = path.relative(path.join(ROOT, 'server'), p);
-      if (ALLOW.has(rel.replace(/\\/g, '/'))) continue;
+      const relNorm = rel.replace(/\\/g, '/');
+      if (ALLOW.has(relNorm) || ALLOW_PREFIX.some((p) => relNorm.startsWith(p))) continue;
       const s = fs.readFileSync(p, 'utf8');
       for (const [re, what] of [[/\/srv\//, '/srv/'], [/\/tmp\//, '/tmp/'], [/\bsystemctl\b/, 'systemctl'], [/'\/bin\/bash'/, "'/bin/bash'"]]) {
         if (re.test(s)) bad.push(rel + ' 含 ' + what);
@@ -51,7 +57,7 @@ test('server/ 下不再有平台专属路径与命令字面量（字面量只许
     }
   };
   walk(path.join(ROOT, 'server'));
-  assert.deepEqual(bad, [], '这些字面量在客户机（Windows Server）上不成立，应改为从 env.js / shell.js 取：' + bad.join('；'));
+  assert.deepEqual(bad, [], '这些字面量在客户机（Windows Server）上不成立，应改为从 env.js 取（平台事实一律落在 server/exec/ 的实现里）：' + bad.join('；'));
 });
 
 test('自我重启：有配置用配置，Linux 默认 systemctl，两者都没有时**如实说没有**（不假装重启过）', () => {
@@ -144,7 +150,11 @@ test('代码里用到的 RW_* 环境事实，每个都要在本文件里 import 
   // 免得注释里提到某名字也误报）与"本文件 import 到的那几个"对齐。
   const ENV_EXPORTS = fs.readFileSync(path.join(ROOT, 'server', 'env.js'), 'utf8')
     .match(/export const (RW_[A-Z0-9_]+)/g).map((s) => s.replace('export const ', ''));
-  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  // ⚠️ 先归一 CRLF 再剥注释（2026-09-16 由凭证/触发器那位同事撞出来的**夹具自身缺陷**）：
+  // `/\/\/.*$/` 的 `$` 在 CRLF 文本里匹配不到行尾（行尾是 `\r`），于是"被注释掉的 RW_* 提及"会被当成真引用，
+  // 报出假红（实测 `'x // RW_STORAGE y\r'.replace(/\/\/.*$/,'')` 原样返回）。工作区文件一旦被别的工具改成 CRLF
+  // 就会触发——夹具自己先坏掉，比漏报更糟（会让人去改没错的代码）。
+  const strip = (s) => s.replace(/\r\n?/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
   const files = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {

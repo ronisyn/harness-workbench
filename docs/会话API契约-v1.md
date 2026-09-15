@@ -1,9 +1,16 @@
 # 会话 API 契约 v1
 
 > **结论先行**：对外会话 API 现在就这一条链——登录取 Token → `POST /api/chat`（SSE 流）→ 用 `messageId` 取 `/messages`、用 `id:` 续订 `/stream`、用 `/export` 取机器可读导出。
-> 事实源是**代码**，不是方案文档；每条描述都指到 `文件:行`（行号对工作区当前 `server/index.js`，共 2809 行）。不确定的写"未确认"，没定的写成触发条件。
+> 事实源是**代码**，不是方案文档；每条描述都指到 `文件:行`（行号对工作区当前 `server/index.js`，共 2861 行）。
+> ⚠️ **行号会随代码增长而漂移**：本文只保证"写这一行时的行号 + 那段代码的形状"（括号里给的是可 grep 的符号锚点）。
+> 改了行号不重编本文，**以符号锚点为准**；发现某个锚点 grep 不到，就是这段契约描述已经过期，当场修文档（§6 规则 6）。
+> 不确定的写"未确认"，没定的写成触发条件。
 > 冻结基线：`scripts/selfcheck.mjs`、`scripts/agent-smoke.mjs` 两个脚本逐条断言的字段与帧顺序（§8），它们红了就是破坏契约。
 > 依据：`proposals/架构文档冲突登记-20260915.md:148-167`（D4 拍板）、`proposals/D4-会话API契约-方案.md`。
+>
+> **2026-09-16 补（核对报告 §3.4/§3.5⑧ 的交互契约漏项）**：溢出提示（§4.1）、逐轮成本事件（§4.2）、
+> **可回滚**及其边界（§4.3）、跨端一致的真实状态（§7）。按 v0.3 §4.7 的四要素（可观测/可控制/可信/跨端一致）
+> 逐项对齐：**可观测 ✓、可控制 ✓、可信=部分（回滚有边界，见 §4.3）、跨端一致 ✗（未成立，见 §7）**。
 
 ---
 
@@ -115,7 +122,50 @@
 
 **`id:` 与 `seq` 的语义（如实写）**：`seq` 是 `server/agent.js:54` 的 `actSeq`——**进程内存的全局单调计数器，重启归零**；事件环只留最近 300 条、本轮结束后 60s 回收（`server/agent.js:55`、`85`、`100`）。所以**续订只对"带 `id:` 的帧"成立**，且只在**同一进程、事件还在环里**时成立；跨重启接不上；无 seq 的帧（`intent`/`route`/`done`/`error`）本来就无法当锚点。
 
-**断连即中止（最要命的一条）**：`req.on('close')` / `res.on('close')` → `actrl.abort('disconnect')`（`:1104-1106`）。**调用方在收到 `done` 之前断开，活就停下**，不是"后台继续跑"。服务端随后落一条中断占位消息并给 `run_end{status:'stopped', reason:'disconnect'}`（`:1326-1338`）。
+**断连即中止（最要命的一条）**：`req.on('close')` / `res.on('close')` → `actrl.abort('disconnect')`（`server/index.js:1135-1136`，`onDisconnect`）。**调用方在收到 `done` 之前断开，活就停下**，不是"后台继续跑"。服务端随后落一条中断占位消息并给 `run_end{status:'stopped', reason:'disconnect'}`（`:1326-1338`）。
+
+### 4.1 溢出提示（v0.3 §7.1 ⑩ 点名；此前契约与前端全 0 命中）
+
+工具结果超过内联上限时，**不是硬截断丢弃**，而是换成"预览 + 精确省略量 + 定位符"再进上下文
+（`server/tools/spill.js` 的 `spillToolResult`，调用点在 `server/agent.js:832`）。
+⚠️ **本节用文案本身当锚点、不写 `spill.js` 的行号**：那个文件正在被并行改动（行号当天就漂了），
+而下面这三句提示**就是**接口面本身 —— grep 文案比 grep 行号可靠。三种形态的**原文**（逐字节，客户端要照它识别）：
+
+| 形态 | 触发 | 上下文里的提示（前缀） | 取回方式 |
+|---|---|---|---|
+| 读取类 | 工具在 `READER_TOOLS` 且带 `path` 参数 | `全文即源文件 <绝对路径>（共 <N> 字节）；用 read_file_range 带 offset/length 分段读` | 同路径直接 `read_file_range` 分段读 |
+| 已落盘 | 其余工具超限 | `全文已存 <绝对路径>（<N> 字节），取回：fetch_spill {path:"<绝对路径>", offset:0, length:20000}` | `fetch_spill` 按 offset/length 分段取回 |
+| 降级 | 落盘失败 | `⚠️ 全文未能存盘（<原因>），已按内联截断降级：请改用分段/过滤参数缩小结果，或自行落盘后再读` | **取不回**：这是显式降级，不是静默截断（登记在 `server/capabilities.js:89` 的 `spill-degraded`） |
+
+- **提示的位置**：它是**工具结果内容本身**（`tool` 角色的消息），不是新的事件帧 —— 所以客户端**不需要**新增帧类型；模型能否自己取回取决于它的工具面里有没有 `fetch_spill`（会话级工具集/壳裁剪会收窄工具面）。
+- **溢出文件的保留期与清理**（`server/tools/spill.js` 的 `cleanupSpill` / `SPILL_MAX_AGE_DAYS`、`server/index.js` 的 `runSpillCleanup`）：按龄 **7 天**、按量 **64MB**，启动跑一次 + 每 6h 一次，清理结果落 `spill:cleanup` 审计。**这条直接决定"定位符能用多久"**：超过 7 天的 `全文已存 …` 路径可能已被清理，取回会失败——客户端此时应如实提示"该溢出文件已过期"，不要假装成功。
+- **不进本契约的部分**：前端目前**不展示**溢出提示（`src/` 全 0 命中），它只在对话正文里由模型转述。这是如实登记的缺口，不是"已达成"。
+- **一处实现坑（如实登记，防复现）**：原 `/api/chat` 在生成早期摘要时写的是 `hist.slice(0, -30)` ——
+  那取的是"**去掉最后 30 条**"（几乎全部历史），而作者显然想取"早期那段"。它只影响喂给摘要模型的输入、
+  不影响发给主模型的历史，所以此前没被发现；2026-09-16 已随滑窗一并删除。**这类"切片方向写反"的坑在本仓出现过两次**，
+  改这里时请直接看语义（要"早期"就 `slice(0, N)`），别信注释。
+
+### 4.2 逐轮成本可见（帧序里此前没写的那一帧）
+
+帧序里除了 `done` / `run_end` 带的成本，还有一条**每轮**都发的成本帧（`server/agent.js:544`，在每轮 LLM 调用**之前**发）：
+
+- `agent_thinking`：`{type, round, costCum}` —— `round` 从 1 起；`costCum` = **本次任务累计费用（元，四舍五入到 2 位）**，取值时点在调用**之前**，所以它**不含本轮**的消耗（本轮的消耗要等 `done`/`run_end`）。
+- **口径别混**（四个数不是一回事）：`agent_thinking.costCum` = 本任务累计；`done.totals` = 本任务总计（含本轮）；`run_end.spentYuan` = 本次执行的增量；`GET /api/usage/stats` = 账号/会话累计（含折叠、摘要等旁路 kind）。
+- 另有段级指纹帧 `prefix_face`（`server/agent.js:566`）：只在**每段第一轮**发一次，`{type, toolsHash, sysHash, nTools, light, preset, permission}` —— 它的用途是"当时那条前缀面到底是什么"的可对账证据（`usage_stats.prefix_tools_hash` 记的是整份工具定义面，两者不同源）。
+
+### 4.3 可回滚（v0.3 §4.7「可信」要求：说清有什么、以及边界在哪）
+
+**没有统一的"撤销这一轮"接口**。现有的回滚手段是三条**作用域完全不同**的机制，各自的边界必须一起读：
+
+| 层次 | 手段 | 能回滚什么 | 边界（不得当成"都能撤"） |
+|---|---|---|---|
+| 文件 | `undo_checkpoint` 工具（`server/tools/checkpoint.js:88-117`） | 写类工具执行**前**的自动快照：`existed=true` 恢复原内容；`existed=false`（新建）删除该文件 | ① 只覆盖 `write_file`/`append_file`/`edit_file`/`delete_file` 四类（`checkpoint.js:15`）；② 单次最多 20 个文件、单文件 >5MB **不快照**（`:16-17`）；③ 每会话只保留最近 60 个快照，超出淘汰最旧（`:18`）；④ **只回滚文件系统**：shell 命令的副作用、`db_write`、git 推送、`reload_platform` 重启一律**撤不回** |
+| 会话 | `/export` 与 `/export-full` + `POST /api/conversations/import`（§3.6） | 会话的**副本**：导出一份、以后导回成一个**新会话** | **不是原地回滚**：没有 `rollback`/`restore` 端点，也不能把已有会话退回某个 `messageId`。`formatVersion` 不认识时显式拒绝（不降级、不部分导入） |
+| 现场 | `agent_runs` 现场 + `resumeHint` 注入（`server/runtrack.js`、`server/index.js:1007` 的 `resumeHint(conversationId)`） | 中断/挂起的任务**接着跑**（续，不是退） | 它是"接着往下做"，不撤销已做的动作 |
+
+- **契约面缺一项（如实登记）**：目前**没有** `POST /api/conversations/:id/rollback` 这类端点，也没有"回滚到第 N 条消息"的语义。
+  触发条件：出现真实调用方需要"整轮撤销"（而不是"改坏了用 `undo_checkpoint` 回文件"）时再立项——按 §6 规则 1，新增端点属只增不改。
+- **模型侧的自述不可信**：模型说"已回滚"只能当线索，最终以文件系统/DB 实时查询为准（`server/capabilities.js:133` 的 `selfReportUntrusted`）。
 
 ---
 
@@ -165,6 +215,11 @@
 4. **废弃流程**：先标注（文档 + 响应头），观察无调用方后再下线；不静默下线。
 5. **破坏性变更**：新开端点或新开路径版本（`规范/04:154`），旧的至少并行保留一个迭代周期。
 6. 本文档与代码不一致时，**以代码为准**，并当场改文档。
+7. **新增"进请求前缀"的注入点必须同时登记缓存影响**（v0.3 §4.4.1 规则5）：在 `server/prefix-participants.js` 的声明表里加一行，
+   `where`/`cacheImpact` 二选一并附**源码锚点**；夹具 `test/prefix-participants.test.mjs` 会核对锚点是否还在。
+   2026-09-16 起，`/api/chat` 每次组装前缀后还会落一行 `prefix:assemble`（跨轮指纹），
+   上一轮的 cnt 条若不再逐字节是本轮前缀的开头 → 记 `prefix:invalidate`（C4 非预期，`server/history.js` 的判据）。
+   **这条是"只追加"纪律在跨 run 维度上的唯一机检**——agent.js 的 `diffCore` 每 run 重置，看不见这一层。
 
 ---
 
@@ -177,6 +232,20 @@
 - **续订的物理边界**：事件环 300 条 / 结束 60s 回收 / `seq` 进程内存值 / 跟播上限 10 分钟（§4）。注释里写的 `stream_gap` 帧**未实现**——续订只按 `seq > after` 补发，客户端拿不到"你接丢了一段"的信号。
 - **`GET .../messages` 不带执行归属**：没有 `runId`/`seq`（§3.5）；**`code` 只覆盖部分路径**（§5.3）；429 **故意不给 `Retry-After`**（§5.2）。
 - **`GET /api/deliveries` 没有分页游标**：只有 `limit`（≤100）与 `state` 过滤（`server/deliveries.js:98-102`），行数涨上去后翻不动。
+- **跨端一致**❌ **仍未成立**（v0.3 §4.7 的第四要素；2026-09-16 核对报告 §3.5① 当初是用代码反证的）。
+  飞书与微信**不走本契约**：各自是 `POST /api/feishu/webhook`（webhook）与 iLink 长轮询（`client.on('message')`），
+  没有 SSE 通道，所以 §4 的帧与续订语义**在渠道上不存在**。**2026-09-16 已改（这一条按改动后的实情写）**：
+  两个渠道改走共享入口 `server/channels/run-turn.js`（`runChannelTurn`），与 `/api/chat` **语义对齐**的部分：
+  ① **可观测**：事件落 `events` 账本（`run_start` = 含 `channel`/provider/model/permission → 引擎侧 emit 逐条 → 终结事件 `run_end`/`stopped`/`error`），形状与 `/api/chat` 的对应帧同字段；`events.seq` 为 **0**（`seq` 是 `server/agent.js` 内存事件环的计数器，渠道不走那条环，不是"漏写"）。
+  ② **可信**：投递记录照记（`beginDelivery`/`finishDelivery`，`account_id=NULL`）——成功 `succeeded` 并存接受结果，失败 `failed` + `code`（`STOPPED_BY_USER`/`ABORTED`/`INTERNAL`，取自 `server/failures.js`）；渠道**没有幂等键**，所以 §5.1 的回放/重发语义**对渠道不成立**，投递记录在这里只是留证。
+  ③ **可控制（一半）**：每轮登记 `agent_runs` 现场（`ensureRun`/`markRun`），"可续"的前提有了；停止只有**进程内**入口 `abortChannelTurn()`（`run-turn.js`），**HTTP 面没有接线**——`POST /api/chat/stop` 读的是 `server/index.js` 的私有 `abortMap`（键 `accountId:conversationId`；渠道会话的 `account_id` 是 NULL），本轮按"不改 `/api/chat` 那条链"的约束**没有动它**。
+  ④ **仍未做（逐条如实）**：**运行中打断 = 无入口**（只有进程内函数）；**`/api/chat/stop` 停不了渠道会话**；**续订 = 无**（渠道没有 SSE 与事件环，要事件只能读 `events` 表，而 `readEvents` 至今零调用方，见上一条）；**审批/问询 = 只有一半**——卡片事件现在会落账本，但 `GET /api/approvals`、`GET /api/asks` 与 `POST /api/asks/:id`（§3.7）**都没有按渠道路由**，所以渠道里发起的 `ask` 既不在渠道里回答、也没有一个"这个问询属于飞书会话"的入口；人在渠道里**无法**回答 agent 的提问（要登录 GUI 才看得到、答得上）。
+  三端现在共用的仍是**内核 + 这一层语义**；契约面与端上 UX（谁发事件、谁来答问询）仍未收敛到一处。
+  **收口方向**（未做）：渠道改走 `POST /api/chat` 拿事件流，或按 v0.3 §4.7 的对外形态（headless → MCP → JSON-RPC）做同一个适配器面。
+  在收口完成之前，**"端到端语义完全一致"这个结论仍然是错的**；本契约的帧序、停止、幂等三节只覆盖 `/api/chat` 这一条链。
+  **本轮改了哪一半**：两侧行为由夹具 `test/channel-turn.test.mjs` 锁住（事件入账本 / 投递随成败 / 失败码 / 模型取自会话不再硬编码 / 中止与后续轮次）；**渠道真机收发消息本轮没有条件验证**——夹具只证明"语义这一层"，不证明飞书/微信的线上链路。
+- **能力清单的诚实性字段只在两条出口**：`promptInjection` / `dataEgress` 走 `/api/agent/capabilities` 与 `run_end.capabilities`（给人看），
+  **不进模型上下文**（`server/capabilities.js:30-31`、`:50`）——所以别拿它当"模型也知道自己受什么约束"的证据。
 
 ---
 

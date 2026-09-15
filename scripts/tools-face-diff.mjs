@@ -27,6 +27,14 @@ const WHITELIST = {
   feishu_doc_read: 'A1：外部来源工具描述加不可信声明',
   feishu_sheet_read: 'A1：外部来源工具描述加不可信声明',
   feishu_bitable_read: 'A1：外部来源工具描述加不可信声明',
+  // 2026-09-16 ⑥ 溢出规范收口（v0.3 §6.1：大结果一律"预览 + 定位符 + 省略量，可取回"）：
+  // 四个解析器与代码地图此前只在返回值里做溢出，描述里没说"明细在溢出文件里、用 fetch_spill 按范围取回"
+  // ⇒ 模型不知道能取回、会重复解析或改用别的工具。描述补的是这一句（不含行为改动，行为在 ⑦/⑤ 已落地）。
+  extract_pdf: '⑥ 溢出规范收口（v0.3 §6.1）：描述补"明细落在溢出文件里 + fetch_spill 按范围取回"',
+  extract_docx: '⑥ 溢出规范收口（v0.3 §6.1）：描述补"明细落在溢出文件里 + fetch_spill 按范围取回"',
+  extract_xlsx: '⑥ 溢出规范收口（v0.3 §6.1）：描述补"结构摘要 + 逐表 offset/length + fetch_spill 按范围取数"',
+  extract_pptx: '⑥ 溢出规范收口（v0.3 §6.1）：描述补"明细落在溢出文件里 + fetch_spill 按范围取回"',
+  repo_map: '⑥ 溢出规范收口（v0.3 §6.1）：描述补"地图过大时只回摘要+预览+溢出路径，明细用 fetch_spill 取回"',
 };
 
 const J = (x) => JSON.parse(JSON.stringify(x));

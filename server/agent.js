@@ -8,6 +8,9 @@ import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN, RW_OS_CN 
 import { SHELL_CN } from './shell.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
 import { diffCore, isUnexpectedBreak, prefixHash } from './prefix.js';
+// 账本动作名（§4.4.1 规则5）：与 /api/chat 的跨轮指纹（index.js）**共用同一份常量**——
+// 两边各写各的字符串时，错一个字母就是静默不计（C4 会假装是 0，而这正是本轮要修的那类洞）。
+import { PREFIX_LEDGER } from './prefix-participants.js';
 import { newProgressState, judgeRound, stallMessage, fuseDecision } from './progress.js';
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { effectiveCollapseChars } from './modelwindow.js';
@@ -479,7 +482,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       if (faceChanged) reasons.push('tool-face-changed');
       if (reasons.length) {
         await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, 'prefix:exempt', reasons.join(' '), ctx.shellId ?? null, ctx.conversationId]);
+          [ctx.accountId ?? null, PREFIX_LEDGER.EXEMPT, reasons.join(' '), ctx.shellId ?? null, ctx.conversationId]);
       }
     } catch { /* 归因失败不影响执行 */ }
     if (faceChanged) {
@@ -545,7 +548,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       collapseRound = round;
       console.warn('[collapse] 段边界整段替换（conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + ' → 替换后 ' + msgs.length + ' 条）');
       db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-        [ctx.accountId ?? null, 'prefix:collapse', 'round=' + (round + 1) + ' msgs=' + msgs.length, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+        [ctx.accountId ?? null, PREFIX_LEDGER.COLLAPSE, 'round=' + (round + 1) + ' msgs=' + msgs.length, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
     }
     // 前缀不变量（缓存三纪律机检之一 · 只追加）：本轮与上轮的**非 system** 消息序列必须逐条同一对象。
     // system 消息都是随轮易变的提示（快照/后台通知/护栏提示/完成度提示），不参与比对；
@@ -570,7 +573,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           + '（上轮 ' + d.prevLen + ' 条 → 本轮 ' + d.curLen + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
         // C4 计数落 audit_log（唯一账本；不新造表）
         db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, 'prefix:invalidate', 'first-diff-idx=' + d.broke + ' core ' + d.prevLen + '→' + d.curLen + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+          [ctx.accountId ?? null, PREFIX_LEDGER.INVALIDATE, 'first-diff-idx=' + d.broke + ' core ' + d.prevLen + '→' + d.curLen + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
       }
       prevCore = core;
       if (process.env.RW_PREFIX_DEBUG === '1') {

@@ -1,5 +1,6 @@
 // E2E FINAL-REGRESSION 今日全部任务最终态：核心链路+各批次数据面往返+孤儿
 import { db } from '/srv/harness-workbench/server/db.js';
+import { persistContractEvent } from '/srv/harness-workbench/server/eventlog.js';
 import xlsx from '/srv/harness-workbench/node_modules/xlsx/xlsx.js';
 import { kbVisibleWhere } from '/srv/harness-workbench/server/knowledge.js';
 const BASE = 'http://127.0.0.1:880';
@@ -61,7 +62,9 @@ async function main() {
   /* 2) 会话删除级联 contract_events + 无 bg_tasks 报错 */
   const cX = await mk(P + 'X', {});
   const tc = await db.query('INSERT INTO task_contracts (account_id, title, goal, conv_id, status) VALUES (?,?,?,?,?)', [lg.b.user.id, P + 'ct', 'g', cX.id, 'queued']);
-  await db.query('INSERT INTO contract_events (contract_id, kind, detail) VALUES (?,?,?)', [tc.insertId, 'start', P + 'e']);
+  // 契约事件只有一个写入者（server/eventlog.js 的 persistContractEvent：账本行 + 它的投影一次写完），
+  // 这里也不再自己 INSERT contract_events（2026-09-16 C-39 第 ② 条：contract_events 与 events 同源）。
+  await persistContractEvent(tc.insertId, 'start', P + 'e', { conversationId: cX.id });
   const delX = await j('/api/conversations/' + cX.id, { method: 'DELETE', headers: A });
   const orphanCe = (await db.query('SELECT COUNT(*) c FROM contract_events WHERE detail LIKE ?', [P + '%']))[0].c;
   chk('6 删会话级联清 contract_events', delX.status === 200 && orphanCe === 0, 'orphan=' + orphanCe);
