@@ -836,6 +836,15 @@ const RAW_TOOLS = [
     run: async (a, ctx) => {
       if (!ctx.accountId) throw new Error('缺少账号上下文');
       const scope = ['global', 'shell', 'conv'].includes(a.scope) ? a.scope : 'conv';
+      // 2026-09-16（提示注入防线的"最锋利一条"，两个子代理独立点到）：`kb_add` 是 `permission:'read'`，
+      // 而 `scope=global` 的条目会被**所有会话以 role:system 注入** ⇒ 只读会话（含渠道会话默认档）
+      // 就能把一段文本变成跨会话的系统级长期记忆。这里按**生效范围**分级，而不是改工具档位：
+      // 写入影响面 = 跨会话全局 ⇒ 要求写类权限；scope=conv/shell 只影响本会话/本壳，维持现状。
+      // 边界如实（别把它当安全边界）：只拦工具路径——`db_write`（permission:'global'，checkPerm 对 global 恒真）
+      // 与直连 SQL 仍能改 knowledge 表；真正结构性的那一半是"知识注入降到 role:user"（＝已拍板缓的 A2-b）。
+      if (scope === 'global' && !['write', 'full', 'guard'].includes(ctx.permission)) {
+        return fail('TOOL_PERMISSION_DENIED', 'scope=global 的知识条目会对**所有会话**以系统层注入，因此需要 write 级及以上权限（当前 ' + ctx.permission + '）。本轮可改用 scope=conv（仅本会话）或请用户提权后重试。');
+      }
       const kind = ['fact', 'progress', 'guide', 'skill', 'lesson'].includes(a.kind) ? a.kind : 'fact';
       const title = String(a.title || '').trim().slice(0, 200);
       const body = String(a.body || '').slice(0, 8000);

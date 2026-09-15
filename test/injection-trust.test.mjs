@@ -184,12 +184,14 @@ test('A2/负例：声明文本只能来自工具结果 —— system 层（系�
 // ── A2-a：写入归属 ───────────────────────────────────────────────────────────────
 test('A2-a：kb_add 的返回值带 source（谁写的、写在哪个会话、什么权限档），冲突分支同样带', async () => {
   calls.length = 0; rows.length = 0;
-  const ctx = CTX({ permission: 'read' });
+  // 2026-09-16 口径更新（我做的决策）：`scope=global` 的条目会被**所有会话以系统层注入** ⇒ 现要求写类权限
+  // （原来只读会话也能写，夹具那条注释写的就是当时的现状）。所以这条用例改成 write 档，并另加负例锁住新护栏。
+  const ctx = CTX({ permission: 'write' });
   const r = await execTool('kb_add', { title: '交付纪律', body: '先 TEST 再 PROD。', scope: 'global' }, ctx);
   assert.equal(r.error, undefined, '夹具假库下不该失败：' + r.error);
   assert.equal(r.saved, true);
-  assert.deepEqual(r.source, { writer: 'model', accountId: 7, conversationId: 4242, permission: 'read' },
-    'source 必须能回答"谁写的/哪个会话/什么档位"（只读会话也能写 global，这正是方案 §1.1 第 4 行那条）');
+  assert.deepEqual(r.source, { writer: 'model', accountId: 7, conversationId: 4242, permission: 'write' },
+    'source 必须能回答"谁写的/哪个会话/什么档位"');
   const ins = calls.filter((c) => /INSERT INTO knowledge/.test(c.sql));
   assert.equal(ins.length, 1, '一次 kb_add 只落一次库');
   assert.equal(ins[0].params[0], 7, '入库 account_id 与 source.accountId 同源');
@@ -200,6 +202,17 @@ test('A2-a：kb_add 的返回值带 source（谁写的、写在哪个会话、�
   assert.equal(c.conflict, true);
   assert.equal(c.source.writer, 'model');
   assert.equal(c.source.conversationId, 4242);
+});
+
+test('A2-a 负例（我加的新护栏）：只读会话写 scope=global 被拒，conv/shell 不受影响', async () => {
+  calls.length = 0; rows.length = 0;
+  const ro = CTX({ permission: 'read' });
+  const denied = await execTool('kb_add', { title: '全局记忆', body: 'x', scope: 'global' }, ro);
+  assert.equal(denied.code, 'TOOL_PERMISSION_DENIED', '只读会话不得写跨会话的全局记忆：' + JSON.stringify(denied).slice(0, 120));
+  assert.ok(!calls.some((c) => /INSERT INTO knowledge/.test(c.sql)), '被拒时一行都不许写库');
+  // conv 只影响本会话 ⇒ 维持现状（只读会话仍可写）
+  const ok = await execTool('kb_add', { title: '本会话记忆', body: 'x', scope: 'conv' }, ro);
+  assert.equal(ok.error, undefined, 'scope=conv 不该被新护栏波及：' + ok.error);
 });
 
 test('A2-a：skill_save 的返回值带 source，且写入路径落在技能根目录内', async () => {
