@@ -24,7 +24,7 @@ import { db } from './db.js';
 import { prefixHash, epochKey, laneKey, isEpochChange, needsWarm } from './prefix.js';
 import { buildEnvFor, lightDefs } from './agent.js';
 import { toolDefs } from './tools/index.js';
-import { chatOnceWithTools } from './llm/gateway.js';
+import { chatOnceWithTools, calcCost } from './llm/gateway.js';
 import { config } from './config.js';
 import { REAL_WHERE } from './cohort.js';
 
@@ -102,15 +102,18 @@ export async function warmLane(lane, { provider = 'deepseek', model = 'deepseek-
       e.defs, config.keys, 0);
     const u = r.usage || {};
     const hit = Number(u.cache_hit || 0), miss = Number(u.cache_miss != null ? u.cache_miss : 0);
+    // 预热是**真实计费调用**，必须如实入账（此前写死 cost=0，等于把钱账做少了）：
+    // 命中走 hit 价（约 ¥0.002），未命中就是一次前缀重建的 miss 价 —— 这正是我们要提前付掉的那笔。
+    const cost = calcCost(provider, { hit, miss, out: u.tokens_out || 0 });
     // 入账 kind='warmup'：**不进任何 cohort**（REAL/PROBE 档都按 kind='round' 过滤），也不冒充真实轮次
     try {
       await db.query(`INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id,
                        tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id,
                        prefix_sys_hash, prefix_tools_hash)
-                     VALUES (NULL,NULL,NULL,?,?,?,?,?,?,0,?,NOW(),"warmup",NULL,?,?)`,
-        [provider, model, u.tokens_in || 0, u.tokens_out || 0, hit, miss, Date.now() - t0, e.sysHash, e.toolsHash]);
+                     VALUES (NULL,NULL,NULL,?,?,?,?,?,?,?,?,NOW(),"warmup",NULL,?,?)`,
+        [provider, model, u.tokens_in || 0, u.tokens_out || 0, hit, miss, cost, Date.now() - t0, e.sysHash, e.toolsHash]);
     } catch { /* 计量失败不影响预热 */ }
-    const note = `lane=${e.lane} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length} hit=${hit} miss=${miss} ms=${Date.now() - t0}`;
+    const note = `lane=${e.lane} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length} hit=${hit} miss=${miss} ¥${cost.toFixed(4)} ms=${Date.now() - t0}`;
     db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:warmup', note]).catch(() => {});
     console.log('[epoch] 预热完成 ' + note + (miss > 8000 ? '（本次未命中=新纪元首次重建，属预期）' : '（命中，几乎免费）'));
     return { ok: true, lane: e.lane, hit, miss, sysHash: e.sysHash, toolsHash: e.toolsHash };
