@@ -755,6 +755,118 @@
         }
       ],
       "note": "**2026-09-15 落地（下一步\"确定性投影\"的增量一）**：摸底发现事件流此前只活在内存环里（最多 300 条、重启即忘），库里没有任何事件表 ⇒ \"把运行态当成事件流的投影\"（对齐 DSH `sessionProjections`）**没有源**。现在：`events` 表（迁移 0003 + 新库 SCHEMA 两处）只追加；**唯一写入点**挂在 `/api/chat` 的 `send`（对外事件契约的唯一出口——run 边界与 agent 侧事件都经过它；第一版挂在 agent.js 的 emitEv 上漏掉了 run 边界，是跑真会话查账本当场发现的）；纯流式增量 think/delta 不入账（最终文本在 messages 可查，§7.3 双投影），该名单是唯一出处且夹具反向锁住\"状态事件不得被跳过\"；落账失败出声不阻断。读回放：`node scripts/replay-events.mjs <convId>`。**归档器未实现**（保留口径沿用审计账本 90 天，登记为未闭环，不另发明天数）。"
+    },
+    {
+      "id": "RA-48",
+      "title": "凭据单一访问路径（配置只放引用，值不进业务表）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/credentials.js",
+          "pattern": "export function getSecret"
+        },
+        {
+          "file": "server/credentials.js",
+          "pattern": "export function resolveEnv"
+        },
+        {
+          "file": "server/credentials.js",
+          "pattern": "export function redactSecretValues"
+        },
+        {
+          "file": "server/mcp.js",
+          "pattern": "resolveEnv(s.env)"
+        },
+        {
+          "file": "scripts/migrate-c18.mjs",
+          "pattern": "migrateMcpSecrets"
+        },
+        {
+          "file": "test/credentials.test.mjs",
+          "pattern": "都不出现明文"
+        }
+      ],
+      "note": "**2026-09-16 落地（C-18）**：`settings.mcp_servers[].env` 里的明文 PAT 搬进专用凭据文档（默认平台目录 `.credentials.yaml`，0600，`RW_CREDENTIALS_FILE` 可改），settings 只留 `__CRED__:NAME` 引用。照 DSH `dsh-credentials` 的四条：配置只放引用、单一读写路径、每次现取不缓存、`describe()` 永不含值；不照搬跨进程文件锁/watcher/records（无第二个使用者）。**真机验证**：服务器上迁移成功（文件权限 `-rw-------`）、settings 已改写为引用、**重启后真实 GitHub MCP 仍连上（26 工具）**；日志与返回值里无明文（stderr 泄漏路径实测被替换成 `[REDACTED:<名>]`）。**待人工**：曾明文入库的那把 PAT 建议轮换（机器无法代做）。"
+    },
+    {
+      "id": "RA-49",
+      "title": "会话导出/导入 + 格式版本（自描述、可搬家）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/session-export.js",
+          "pattern": "export async function exportConversation"
+        },
+        {
+          "file": "server/session-export.js",
+          "pattern": "SessionFormatUnsupportedMigrationError"
+        },
+        {
+          "file": "scripts/session-export.mjs",
+          "pattern": "dryRun"
+        },
+        {
+          "file": "test/session-export.test.mjs",
+          "pattern": "版本不认识"
+        }
+      ],
+      "note": "**2026-09-16 落地**：照 DSH `dsh-session-format` 的**语义四条**（版本字段 / 相邻步 / **不认识的版本显式拒绝** / 当前版本不走迁移），不照搬其物理形态（JSONL + 文件名带版本 + ZIP 会话树）。导入**默认 dry-run**，真写时一个事务整份落地且绝不覆盖源会话；列清单取自真库 information_schema，导出 SELECT 与导入 INSERT 共用一份清单。真机：导出会话 718（12KB）与 184（3.7MB）成功；写路径用 `EXPLAIN` 交真 MySQL 解析（**一行未写**，前后五张表行数完全一致）。"
+    },
+    {
+      "id": "RA-50",
+      "title": "确定性投影：运行态 = 事件账本的投影（可重放、可对账）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/projection.js",
+          "pattern": "export function project"
+        },
+        {
+          "file": "server/projection.js",
+          "pattern": "verifyProjection"
+        },
+        {
+          "file": "scripts/projection-replay.mjs",
+          "pattern": "verifyProjection"
+        },
+        {
+          "file": "test/projection.test.mjs",
+          "pattern": "幂等"
+        },
+        {
+          "file": "server/agent.js",
+          "pattern": "type: 'prefix_face'"
+        }
+      ],
+      "note": "**2026-09-16 落地（架构增量二）**：对齐 DSH `session-projection` 的 `register({key,stateVersion,init,apply})` + 纯函数折叠；三个**有真实读数**的投影（runStats / toolFace / outcomes）+ 只读对账（✓/✗/—，—＝无法判定不冒充 ✓）。配套新增事件 `prefix_face`：把每段第一轮**真实发出的** toolsHash/sysHash/nTools 入账本——此前账本只能投影\"被调用过的工具\"，无法回答\"当时那条面是什么\"。**口径如实**：toolFace 与 `prefix_tools_hash` 不同源（调用集 ⊆ 可用面），只判包含关系，哈希只作参考。真机：会话 722/718 对账 ✓5/✗0。**下一增量**才是\"运行时读投影\"（要先有长期一致的证据）。"
+    },
+    {
+      "id": "RA-51",
+      "title": "事件账本保留与归档（只追加 + 按龄搬迁，先搬后删）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/eventlog.js",
+          "pattern": "archiveOldEvents"
+        },
+        {
+          "file": "server/migrations.js",
+          "pattern": "0004_events_archive"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "runEventArchive"
+        },
+        {
+          "file": "test/eventlog-archive.test.mjs",
+          "pattern": "插入失败"
+        }
+      ],
+      "note": "**2026-09-16 落地（RA-47 登记的未闭环项）**：`events` 只追加；到期行**先搬进 `events_archive` 再删原表**，删的是\"刚搬过的那批 id\"（不是再按时间条件删一遍——那样在部分插入失败时会删掉没搬走的行）；任一步失败原样抛出，events 一行不动。**90 天沿用 `audit_log` 那条既有口径**（不自己发明天数；DSH 做的是按窗口的语义压缩，按龄清理只有 spill 文件 30 天，所以这个天数只能取本项目自己的审计口径）。接线照 runSpillCleanup（启动一次 + 每 6h + unref）；真库端到端用**自己造的 100 天前行**验证并清理，**绝不动真实事件**；CI 无 MySQL 时该用例按可达性探测**跳过并说明**（本地能跑、CI 判红＝没人看 CI）。"
     }
   ]
 }
