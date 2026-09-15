@@ -56,6 +56,31 @@ export function lessonMode(content, lessons) {
   return pickLessons(content, lessons, 1).length ? 'index' : 'none';
 }
 
+// ---------------------------------------------------------------------------
+// 取候选、按账号过滤（2026-09-16，D3 数据出口唯一化 / OP-01）
+//
+// 为什么要有这个函数：候选的 SQL 原来**写在 server/index.js 里、没有任何账号过滤**——
+// `SELECT ... FROM reviews WHERE result='bug' ...` 取的是**全平台所有账号**的错题，
+// 再按"实词重叠"最多挑 3 条注入到当前会话的上下文里。而 `reviews` 表**有 account_id**，
+// 同一个数据在 HTTP 面（`GET /api/reviews`）是按 `account_id=?` 过滤的——两处口径不一致，
+// 于是模型上下文成了一条**绕过账号边界的数据出口**（虽然只到"标题级"，但边界就是边界）。
+//
+// 口径不发明：**照 /api/reviews 那一条**（同一份数据、同一个边界）——`account_id = 本会话账号`。
+// 跨**会话**召回仍然保留（OP-12 的原意就是"上一次的坑被下一次任务读到"），跨**账号**召回不行。
+// SQL 与参数收在这里（而不是留在 index.js 里拼），是为了让夹具能直接断言"过滤条件在不在"。
+export const LESSON_CANDIDATE_SQL = "SELECT id, bug_reason, difficulty, created_at FROM reviews WHERE result='bug' AND bug_reason IS NOT NULL AND account_id=? ORDER BY id DESC LIMIT ?";
+
+/**
+ * 取候选并挑出与本轮消息沾边的错题（注入前的唯一入口）。
+ * @param {{query:Function}} dbc 可注入的库（夹具传假库；真库缺省由调用方给）
+ * @param {{accountId:number, content:string, limit?:number}} opts
+ */
+export async function recallLessons(dbc, { accountId, content, limit = 30 } = {}) {
+  if (!dbc || accountId === undefined || accountId === null) return [];
+  const rows = await dbc.query(LESSON_CANDIDATE_SQL, [accountId, limit]);
+  return pickLessons(content, rows || []);
+}
+
 /**
  * 成型注入块。`index` 档只给标题级；其余档返回 null（调用方据此跳过注入，负例可夹具）。
  * @param {Array<{id:number, bug_reason?:string, difficulty?:string, created_at?:any}>} lessons **已挑选过**的条目

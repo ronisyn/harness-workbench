@@ -36,6 +36,28 @@ export const PROMPT_INJECTION = {
 };
 
 /**
+ * D3（OP-01）数据出口的**如实声明**（2026-09-16 加，与 `promptInjection` 同一立意：清单里没有这一项，
+ * 读的人就会以为"数据面已经隔离好了"）。
+ *
+ * 平台自己的形态先说清：**这是工作台，不是多租户 SaaS** —— 一个账号里的会话可以读平台自己的库与文件，
+ * 边界是**会话权限**（read/write/full）而不是行级租户隔离。所以这一项报 `partial` 而不是 `full`：
+ *   · 注入层（把平台数据放进模型上下文的那几条通道）：**按账号过滤**——知识库走 kbVisibleWhere，
+ *     错题召回走 recallLessons（2026-09-16 修：那条 SQL 原来没有账号过滤，全平台错题标题会注进任意会话），
+ *     会话内数据（早期摘要/目标/现场/后台任务）都限定在本会话；
+ *   · 工具出口：按**会话权限**放行；其中 `db_query` 是**全库只读**、不做行级账号隔离（read 权限即可用），
+ *     这是工作台形态的有意选择，不是漏做——但它必须被写出来，不能被当成"已经隔离好了"。
+ * 取值同样用 §7.2 的三值语义；改口（partial→full）必须同时带来一条真机制 + 一条夹具。
+ * ⚠️ 与 `promptInjection` 一样**不进模型上下文**：只走 HTTP `/api/agent/capabilities` 与 run_end 事件（给人看）。
+ */
+export const DATA_EGRESS = {
+  level: 'partial',
+  injectedScope: 'account',
+  toolScope: 'session-permission',
+  note: '注入层按账号过滤（知识库/错题召回/会话内数据）；工具出口按会话权限放行，其中 db_query 是全库只读、'
+    + '不做行级账号隔离——本平台是工作台形态（边界=会话权限），不是多租户隔离。',
+};
+
+/**
  * 四层隔离在本平台的真实状态（§7.2）。逐层给 state + 一句实话。
  * @returns {{level:'full'|'partial'|'none', layers:Array<{id:number,name:string,state:string,note:string}>}}
  */
@@ -94,6 +116,7 @@ export function capabilityManifest(ctx = {}, extra = {}) {
     version: 1,
     enforcement,
     promptInjection: PROMPT_INJECTION, // 候选 D：用户可见的诚实性字段（不进模型上下文）
+    dataEgress: DATA_EGRESS, // D3/OP-01：数据出口的边界同样如实写出来（同样不进模型上下文）
     session: {
       permission: ctx.permission || 'full',
       preset: ctx.preset || 'all',

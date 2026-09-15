@@ -23,7 +23,7 @@ import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skil
 import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
 import { kbInjectMode, kbBlock } from './kbgate.js';
-import { lessonMode, lessonBlock, pickLessons } from './lessonrecall.js';   // OP-12：错题进按需召回面
+import { lessonMode, lessonBlock, pickLessons, recallLessons } from './lessonrecall.js';   // OP-12：错题进按需召回面（recallLessons 内含账号边界）
 import { streamPatch } from './streampatch.js';
 import { clearReadCache } from './readcache.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
@@ -972,9 +972,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // 上一次踩过的坑不会被下一次任务读到，"经验复用"这条链是断的。现在按需召回：
   //   任务语境 + 确有错题 + 与本次消息**有实词重叠** ⇒ 注入"标题级"最多 3 条（正文留库，db_query 可查）；
   //   其余一律不注入（闲聊不注入 = 与 RA-09 同一条纪律）。判定/成型在 server/lessonrecall.js（纯函数，有夹具）。
+  // **2026-09-16（D3/OP-01）**：取候选改走 `recallLessons` —— 那条 SQL 原来在这里、**没有账号过滤**，
+  //   等于把全平台的错题标题注进任意会话（HTTP 面的 /api/reviews 是按 account_id 过滤的，两处口径不一致）。
+  //   现在过滤条件与 SQL 都收在 lessonrecall.js 一处，夹具直接断言它。
   try {
-    const rows = await db.query("SELECT id, bug_reason, difficulty, created_at FROM reviews WHERE result='bug' AND bug_reason IS NOT NULL ORDER BY id DESC LIMIT 30");
-    const picked = pickLessons(content, rows);
+    const picked = await recallLessons(db, { accountId: req.user.id, content });
     if (picked.length) {
       const block = lessonBlock(picked, 'index');
       if (block) messages.push({ role: 'system', content: block });
