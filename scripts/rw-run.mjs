@@ -64,6 +64,11 @@ import { bootstrapStorage } from './rw-run-bootstrap.mjs';
 // 声明方式只有**一处出处**——`probeTitle`（server/cohort.js 导出，脚本侧由 ./cohort.mjs 转发）；别写死前缀。
 // 静态 import 是安全的：cohort.js 零依赖（不 import db/config）⇒ 不破坏下面那条"`--help`/用法错绝不碰连接池"。
 import { probeTitle } from './cohort.mjs';
+// 组装侧跨轮前缀账（v0.3 §4.4.1 规则5）：三条入口**共用一份实现**，`db` 由本文件的注入缝传进去。
+// 静态 import 安全：`server/prefix-assemble.js` 只依赖 node:crypto 与两个纯函数模块，
+// 不 import db/config ⇒ 不破坏上面那条"`--help`/用法错绝不碰连接池"。
+import { recordPrefixAssemble, prefixLane, PREFIX_SOURCE } from '../server/prefix-assemble.js';
+import { PREFIX_LEDGER } from '../server/prefix-participants.js';
 
 const PROG = 'rw-run';
 // 用法错与运行期失败的区分：用法错的码与 HTTP 面对外口径同表（server/failures.js），不另造一套。
@@ -281,9 +286,13 @@ async function defaultAccountId(db) {
 /**
  * 组装送进引擎的消息（**与 server/index.js 同序**：固定注入 → 历史 → 尾巴区）。
  * 只装两条"模型无从查起的"注入，其余平台侧注入留在平台（理由见文件头）。
+ * 返回 `{ messages, hist }`：`messages` 是送进引擎的全量装配（含固定注入），
+ * `hist` 是其中**真正被拼进去的那段历史**——跨轮前缀账要拿它当对照（见 `server/prefix-assemble.js`
+ * 文件头的纪律①：比对的必须是"这一轮真正发出去的那串"，不是"库里有什么"）。
  */
 async function assembleMessages({ db, conv, task, RW_WORKSPACE }) {
   const messages = [];
+  const hist = [];
   const sp = await setting(db, 'systemPrompt', '');
   if (String(sp).trim()) messages.push({ role: 'system', content: '【用户自定义指令】\n' + String(sp) });
   if (conv.project) {
@@ -296,16 +305,23 @@ async function assembleMessages({ db, conv, task, RW_WORKSPACE }) {
   }
   // 历史：最近 30 条（长会话压缩口径见平台侧 /api/chat；headless 不做摘要生成——那是旁路 LLM 成本，
   // 不该由"跑一次任务"悄悄产生）。当前这条用户消息刚落库，所以它天然在最后一条。
-  const hist = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 30', [conv.id]);
-  for (const m of hist.reverse()) {
+  const rows = await db.query('SELECT id, role, content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 30', [conv.id]);
+  for (const m of rows.reverse()) {
     let c = String(m.content || '');
     if (m.role === 'assistant' && c.length > 4000) {
       c = c.slice(0, 2400) + `\n…[历史消息过长已截断 ${c.length - 4000} 字符，原文在 messages 表可按 id=${m.id} 查询]…\n` + c.slice(-1600);
     }
-    messages.push({ role: m.role, content: c });
+    // hist 与 messages 收**同一批对象**：两者若各拼一份，将来改了其中一处就会出现
+    // "账上记的 ≠ 真发出去的"（那正是这套机检要防的事，机检自己先不能犯）。
+    const one = { role: m.role, content: c };
+    hist.push(one);
+    messages.push(one);
   }
-  if (!hist.length) messages.push({ role: 'user', content: task }); // 兜底：历史为空也不会把任务丢了
-  return messages;
+  if (!rows.length) {
+    messages.push({ role: 'user', content: task }); // 兜底：历史为空也不会把任务丢了
+    hist.push({ role: 'user', content: task });     // 同上：兜底那条也在账里（否则第一轮会记成 cnt=0）
+  }
+  return { messages, hist };
 }
 
 /**
@@ -328,9 +344,12 @@ export async function runHeadless({
     [conv.id, 'user', String(task), conv.id]);
   await db.query('UPDATE conversations SET updated_at=NOW() WHERE id=?', [conv.id]);
 
-  const messages = await assembleMessages({ db, conv, task, RW_WORKSPACE });
+  const { messages, hist } = await assembleMessages({ db, conv, task, RW_WORKSPACE });
+  // 归属账号：**只取一次**（下面 ensureRun、跨轮前缀账、ctx 三处都要用它）。
+  // 改前它在 ensureRun 与 ctx 里各取一次，共两次 `SELECT id FROM accounts ORDER BY id LIMIT 1`；取一次是等价改动。
+  const headlessAccountId = await defaultAccountId(db);
   // 长任务现场（断点恢复外壳）：与平台侧同口径（server/index.js:1147），非轻量档一律登记。
-  const run = ensureRun ? await ensureRun({ conversationId: conv.id, accountId: await defaultAccountId(db), goal: task }).catch(() => null) : null;
+  const run = ensureRun ? await ensureRun({ conversationId: conv.id, accountId: headlessAccountId, goal: task }).catch(() => null) : null;
 
   // 预算融合（§4.1「不发明参数」：阈值全部读 settings 现值，CLI 不设自己的数）
   let budgetRemain = null;
@@ -355,11 +374,34 @@ export async function runHeadless({
 
   const provider = env.RW_RUN_PROVIDER || conv.provider || 'deepseek';
   const model = env.RW_RUN_MODEL || conv.model || 'deepseek-v4-flash';
+  // ── 组装侧跨轮前缀账（v0.3 §4.4.1 规则5「失效可数」，2026-09-16 补覆盖缺口）──────────────────────
+  // 改前这条机检**只挂在 `/api/chat` 上**（`server/index.js`），headless 与渠道两条路径从来没跑过
+  // —— 于是"这一轮有没有把上一轮的前缀改坏"在真实流量里 76% 的轮次判不了。现在三条入口调**同一份实现**
+  // （`server/prefix-assemble.js`），落同一本账（`audit_log` 的 `prefix:assemble` / `prefix:invalidate`）。
+  // 位置：与 /api/chat 同口径 —— **参数全部定型之后、请求发给模型之前**（不会把没发出去的请求记成账）。
+  // 与 /api/chat **如实不同的两点**（不假装三端一模一样）：
+  //   ① `hist` 传的是**真正拼进请求的那段历史**（上面 assembleMessages 的窗口），不是 DB 全文；
+  //   ② `shellKey`/`shellSchema` 是 null —— headless 不装壳 schema（理由见文件头"刻意不做的事"）；
+  //      `enabledTools` 是它本来就读到的那个启用集（工具面与平台同源，lane 才不会无故分叉）。
+  try {
+    const lane = prefixLane({
+      provider, model, light: false, preset: 'all', mode: 'chat', permission: conv.permission,
+      shellKey: null, enabledTools, shellSchema: null,
+    });
+    const d = await recordPrefixAssemble({
+      db, conversationId: conv.id, accountId: headlessAccountId, hist, lane, source: PREFIX_SOURCE.HEADLESS,
+    });
+    if (d.state === 'rewrite') {
+      // 出声但**不阻断**：一次 headless 执行照常跑完（这与 /api/chat 的既有权衡一致：账本失败不杀对话）
+      process.stderr.write(PROG + ': 跨轮前缀改写（C4 非预期）：conv=' + conv.id + ' cnt ' + (d.prevCnt == null ? '?' : d.prevCnt) + '→' + d.cnt
+        + (d.lost ? '（少 ' + d.lost + ' 条）' : '（条数未少但头部已不同）') + '；已落 ' + PREFIX_LEDGER.INVALIDATE + '\n');
+    }
+  } catch (e) { process.stderr.write(PROG + ': 跨轮前缀账落账失败（不影响本次执行）：' + ((e && e.message) || e) + '\n'); }
   const ctx = {
     permission: conv.permission,
     conversationId: conv.id,
     root: conv.permission === 'full' ? RW_FS_ROOT : RW_WORKSPACE,
-    accountId: await defaultAccountId(db),
+    accountId: headlessAccountId,
     __runId: run ? run.id : null,
     __budgetRemain: budgetRemain,
     __enabledTools: enabledTools,

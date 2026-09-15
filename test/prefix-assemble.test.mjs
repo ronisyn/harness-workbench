@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectPrefixRewrite, parsePrefixRecord, formatPrefixRecord, historyFingerprint, isAppendOnly } from '../server/history.js';
 import { PREFIX_LEDGER } from '../server/prefix-participants.js';
+import { prefixLane } from '../server/prefix-assemble.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
@@ -112,7 +113,28 @@ test('组装侧不变式②：账本接线在位 —— 落 prefix:assemble，�
   assert.equal(PREFIX_LEDGER.ASSEMBLE, 'prefix:assemble');
   assert.equal(PREFIX_LEDGER.INVALIDATE, 'prefix:invalidate');
   // 位置：账本必须落在 light/enabledTools 定型之后（lane 与真正发出去的工具面同源）
-  const ledger = src.indexOf('const laneSrc = JSON.stringify([');
+  // 2026-09-16 改判据形状（**判据本身没放宽**）：这段逻辑收进了共享模块
+  // `server/prefix-assemble.js`（三条入口同源），所以 index.js 里不再有 `laneSrc` 那一行；
+  // 位置关系改看落账调用点。**lane 内容**由行为判据兜底（下面那两条），比"源码里出现过哪一行"更硬。
+  const ledger = src.indexOf('await recordPrefixAssemble({');
   const lightLine = src.indexOf('const light = !needsTools(content)');
   assert.ok(ledger > 0 && lightLine > 0 && ledger > lightLine, 'lane 必须在 light 定型之后才算（否则轻量面翻转会被误判成改写）');
+});
+
+test('lane 的源件含轻量面与工具启用集：翻转其中任一项 ⇒ lane 必须变（位置不变式的行为版判据）', () => {
+  const base = {
+    provider: 'deepseek', model: 'deepseek-v4-flash', light: false, preset: 'all', mode: 'chat',
+    permission: 'full', shellKey: null, enabledTools: new Set(['read_file', 'run_command']), shellSchema: null,
+  };
+  const lane = prefixLane(base);
+  assert.match(lane, /^[0-9a-f]{12}$/, 'lane 是 12 位十六进制（落账本一列，够短不撞）');
+  assert.equal(prefixLane({ ...base }), lane, '同一份源件必须得到同一个 lane（纯函数，无隐藏状态）');
+  assert.notEqual(prefixLane({ ...base, light: true }), lane, '轻量面翻转 = 换车道（两面差 9,600 tokens，本就该跳过比较）');
+  assert.notEqual(prefixLane({ ...base, model: 'deepseek-v4-pro' }), lane, '换模型 = 换车道（C4 豁免项之一）');
+  assert.notEqual(prefixLane({ ...base, permission: 'read' }), lane, '换权限 = 换前缀（身份层随 permission 变）');
+  assert.notEqual(prefixLane({ ...base, enabledTools: new Set(['read_file']) }), lane, '工具启用集变了 = 换工具面');
+  // 集合的**顺序**不该影响车道（Set/数组语义相同：同一个工具面 ≠ 两条车道）
+  assert.equal(prefixLane({ ...base, enabledTools: ['run_command', 'read_file'] }), lane, '启用集只按内容比，顺序不参与');
+  // 壳 schema 也是源件（非 default 壳才裁剪）
+  assert.notEqual(prefixLane({ ...base, shellSchema: { presetBase: 'std', forceOn: new Set(['a']), forceOff: new Set(), mcpAllow: null } }), lane, '壳 schema 裁剪 = 换工具面');
 });

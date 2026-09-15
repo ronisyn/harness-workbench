@@ -14,6 +14,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runChannelTurn, abortChannelTurn, activeChannelTurns } from '../server/channels/run-turn.js';
+import { PREFIX_LEDGER } from '../server/prefix-participants.js';
+import { PREFIX_SOURCE } from '../server/prefix-assemble.js';
 
 const CONV = { id: 77, account_id: null, permission: 'read', provider: null, model: null };
 
@@ -250,6 +252,23 @@ test('③ 跨端一致：渠道走的就是会话 ctx 与全量工具面（不�
   const msgs = call.messages;
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'user']);
   assert.equal(msgs.at(-1).content, '看一眼磁盘', '本轮用户消息在最后');
+});
+
+test('③ 跨端一致：渠道轮次也落**组装侧跨轮前缀账**（v0.3 §4.4.1 规则5；改前这条路径零覆盖）', async () => {
+  const db = fakeDb();
+  await runChannelTurn({ channel: 'feishu', conversationId: 77, text: '你好', deps: deps({ db }) });
+
+  const readIdx = db.sqls.findIndex((s) => /^SELECT detail FROM audit_log/.test(s));
+  const histIdx = db.sqls.findIndex((s) => /FROM messages WHERE conversation_id=\?/.test(s));
+  const userInsertIdx = db.sqls.findIndex((s) => /^INSERT INTO messages/.test(s));
+  assert.ok(readIdx > 0, '渠道轮次必须读上一轮的指纹当对照（改前一次都没有——这就是覆盖缺口）');
+  assert.ok(histIdx > 0 && histIdx < readIdx, '先拼好历史、再落账（账要对着"这一轮真发出去的那串"）');
+  assert.ok(userInsertIdx > 0 && userInsertIdx < readIdx, '用户消息先落库、再算前缀（与 /api/chat 同序）');
+  // 落账用的动作名/来源标签与 `/api/chat`、headless **同一份常量**（各写各的字符串 = 静默不计账）
+  const inserts = db.sqls.filter((s) => /^INSERT INTO audit_log/.test(s));
+  assert.ok(inserts.length >= 1, '至少一行 prefix:assemble');
+  assert.equal(PREFIX_LEDGER.ASSEMBLE, 'prefix:assemble');
+  assert.equal(PREFIX_SOURCE.CHANNEL, 'channel');
 });
 
 test('④ 可控制：跑起来时能中止（进程内停止入口），并如实落成 stopped/ABORTED + 现场 interrupted', async () => {

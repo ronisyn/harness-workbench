@@ -39,8 +39,14 @@ import { RW_WORKSPACE } from '../env.js';
 import { assertFields, unsupported } from './index.js';
 
 const IMPL = 'jsonfile';
-const FORMAT = 'rw-store-json';   // 文件格式的身份（v0.3 §4.9：存储格式带版本号与迁移链）
-const VERSION = 1;
+// 文件格式的身份与版本（v0.3 §4.9：存储格式带版本号与迁移链）。**导出**：夹具要断言"文件里写的就是当前版本"，
+// 而迁移链的底盘与顶端也都取自这里（链的 head 必须等于它，见 validateStoreMigrationChain）。
+export const STORE_FORMAT = 'rw-store-json';
+export const STORE_FORMAT_VERSION = 1;
+// v1 是**首个发布版本**（与 `server/session-export.js` 的 SESSION_FORMAT_FIRST_VERSION 同一口径）：文件从第一版
+// 起就写 version=1，从来没有 v0 的存储文件 ⇒ "当前只有 v1 ⇒ 链为空"是**合法状态**（首版、无迁移步），
+// 不是"缺一步"。这个常量只用来给**链校验**一个底盘：链里若有更早的步（夹具合成的 v0→v1），底盘以链为准。
+export const STORE_FORMAT_FIRST_VERSION = 1;
 /** 本实现**支持的表**；不在这张表里的实体一律显式抛错（"加实体"的落点见文件头注释）。 */
 const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions'];
 
@@ -49,39 +55,238 @@ const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns
 // 故实现不自己读 process.env）；夹具通过构造参数把文件指到临时目录。
 export const DEFAULT_FILE = path.join(RW_WORKSPACE, 'storage', 'rw-store.json');
 
+// ── 存储文件格式迁移链的**注册点**（v0.3 §4.9「会话与存储格式带版本号与迁移链」的存储侧那一半）─────────
+// 为什么要有它：这个文件一直有 `format`/`version` 两个字段，但**没有任何地方能写"v1 怎么变成 v2"**——
+// 于是"带迁移链"在存储侧只是半句话：版本号涨上去以后，老文件只剩"拒绝"一条路（人工转换）。
+// 形状**照 `server/session-export.js`（会话侧先做的那一半）**，不另发明一套：
+//   ① 每步只允许**相邻**（to === from + 1），且**在注册时**校验：跳步/倒步在这里就炸，
+//      不拖到"某天真的来了个老文件"才炸；
+//   ② 整条链必须**连续、无缺口、无重复起点、不越过当前版本**，口径照 `server/migrations.js` 的 `validateChain`
+//      （同一份纪律：坏链在读任何文件之前就抛，不带半条链跑）；
+//   ③ **当前版本的文件不走迁移**（照 DSH 的 current 直接走 codec）；
+//   ④ 版本不认识就**显式拒绝**：比当前版本新的一律拒绝（不降级硬读），缺步的旧版本也一样
+//      （不跳过、不许"能读多少读多少"）。
+//
+// **当前状态：链为空是合法状态。** 只有 v1，而 v1 是首版 ⇒ 没有任何更旧的版本存在过 ⇒ **没有迁移步可写**，
+// 这次启动校验因此通过（不是"缺一步"）。将来真要 v2：把 STORE_FORMAT_VERSION 改成 2，**并且**注册
+// v1→v2 那一步；只改版本号不写步 ⇒ 启动即报缺口（这正是要拦住的"改了版本却忘了迁移"）。
+const MIGRATIONS = new Map(); // fromVersion → 冻结的 {fromVersion, toVersion, name, fn}
+
+/** 版本号必须是"非负整数"（注册与链校验两处共用一份口径，免得两处判得不一样） */
+function assertFormatVersion(v, label) {
+  if (!Number.isSafeInteger(v) || v < 0) throw new Error(label + ' 必须是非负整数（实际 ' + JSON.stringify(v) + '）');
+  return v;
+}
+
+/**
+ * 版本不被支持时抛这个（语义照 `session-export.js` 的 SessionFormatUnsupportedMigrationError）：文件**读得懂**，
+ * 但本版本没有读它的路径——调用方必须整份拒绝，不许跳过、不许降级、不许"能读多少读多少"。
+ * 单独一个类是为了让调用方能把它与"文件本身坏了"区分开：前者是"你的版本太旧/太新"。
+ */
+export class StoreFormatUnsupportedMigrationError extends Error {
+  constructor(message) { super(message); this.name = 'StoreFormatUnsupportedMigrationError'; }
+}
+
+/**
+ * 注册一个**相邻**迁移步。注册即校验：跳步、倒步、版本号不合法、没给函数，都在这里炸。
+ * @param {number} fromVersion 这一步只能读的旧版本
+ * @param {number} toVersion   迁移后的版本，必须 === fromVersion + 1
+ * @param {(doc:object)=>(object)} fn 纯函数：v(fromVersion) 的存储文件对象 → v(toVersion) 的存储文件对象。
+ *   **不要**自己改 `version`（链负责盖，见 migrateStoreDoc）；**不要**改入参对象（调用方可能还持有它）。
+ * @returns {() => void} 注销函数（夹具造合成链后还原用；产品路径用不到）
+ */
+export function registerStoreMigration(fromVersion, toVersion, fn, { name } = {}) {
+  const from = assertFormatVersion(fromVersion, 'fromVersion');
+  const to = assertFormatVersion(toVersion, 'toVersion');
+  if (to !== from + 1) throw new Error('存储格式迁移步必须相邻：v' + from + '→v' + to + ' 不是相邻步（只允许 v' + from + '→v' + (from + 1) + '）');
+  if (typeof fn !== 'function') throw new Error('存储格式迁移步 v' + from + '→v' + to + ' 缺少迁移函数');
+  const dup = MIGRATIONS.get(from);
+  if (dup) throw new Error('存储格式迁移步 v' + from + ' 重复注册（已有 ' + dup.name + '）');
+  const step = Object.freeze({
+    fromVersion: from,
+    toVersion: to,
+    name: typeof name === 'string' && name ? name : 'v' + from + '-to-v' + to,
+    fn,
+  });
+  MIGRATIONS.set(from, step);
+  return () => { if (MIGRATIONS.get(from) === step) MIGRATIONS.delete(from); };
+}
+
+/** 已注册的迁移步（按 fromVersion 升序的快照）。夹具用它证明"首版、无迁移步"这个状态。 */
+export function storeMigrations() {
+  return [...MIGRATIONS.values()].sort((a, b) => a.fromVersion - b.fromVersion);
+}
+
+/** 链的**底盘** = 最早存在过的版本：默认 v1（首版）；链里有更早的步（夹具合成的 v0→v1）时以链为准 */
+function chainBase(steps) {
+  return steps.reduce((min, s) => Math.min(min, s.fromVersion), STORE_FORMAT_FIRST_VERSION);
+}
+
+/**
+ * 校验一条存储格式迁移链（**纯函数**，口径照 `migrations.js` 的 `validateChain`）：相邻 + 连续无缺口 +
+ * 无重复起点 + 没有越过当前版本的多余步。坏链抛错——**在迁移任何一份文件之前**先校验。
+ * @param {Array} steps 迁移步（默认=已注册的链）
+ * @param {{base?:number, head?:number}} range base=链的底盘（默认见 chainBase）；head=当前版本
+ * @returns {true}
+ */
+export function validateStoreMigrationChain(steps = storeMigrations(), { base, head = STORE_FORMAT_VERSION } = {}) {
+  if (!Array.isArray(steps)) throw new Error('存储格式迁移链必须是数组');
+  // base 在**数组校验之后**才解析（否则链参数传错时抛的是 reduce 的 TypeError，看不出是哪儿错了）
+  const lo = base === undefined ? chainBase(steps) : assertFormatVersion(base, 'base');
+  assertFormatVersion(head, 'head');
+  const byFrom = new Map();
+  for (const s of steps) {
+    const from = assertFormatVersion(s && s.fromVersion, '迁移步 fromVersion');
+    const to = assertFormatVersion(s && s.toVersion, '迁移步 toVersion');
+    if (to !== from + 1) throw new Error('存储格式迁移步必须相邻：v' + from + '→v' + to + ' 不是相邻步（只允许 v' + from + '→v' + (from + 1) + '）');
+    if (typeof (s && s.fn) !== 'function') throw new Error('存储格式迁移步 v' + from + '→v' + to + ' 缺少迁移函数');
+    if (byFrom.has(from)) throw new Error('存储格式迁移步 v' + from + ' 重复（同一起点不能有两步）');
+    byFrom.set(from, s);
+  }
+  for (let v = lo; v < head; v++) {
+    if (!byFrom.has(v)) throw new Error('存储格式迁移链有缺口：缺 v' + v + '→v' + (v + 1) + '（不跳过、不按当前版本硬读）');
+  }
+  // 越过当前版本的步 = 链指向的不是当前版本（改了版本号却忘了写步，或写了步却忘了改版本号）
+  const extra = [...byFrom.keys()].filter((v) => v >= head);
+  if (extra.length) throw new Error('存储格式迁移链有多余步（不指向当前版本 v' + head + '）：v' + extra.join(', v'));
+  return true;
+}
+
+/**
+ * "这个版本的文件要依次走哪些步"。纯函数；当前版本返回空数组（照 DSH ③）。
+ * 判据只有一条：**链里有没有从 v 到 HEAD 的每一步**。缺任何一步都显式拒绝（说清缺哪一步），
+ * 绝不"按当前版本硬读"；比当前版本新的一律拒绝（不降级读取）。
+ */
+export function planStoreMigration(fromVersion, { steps = storeMigrations(), head = STORE_FORMAT_VERSION } = {}) {
+  const v = assertFormatVersion(fromVersion, 'version');
+  if (v > head) throw new StoreFormatUnsupportedMigrationError('存储文件是更新的 v' + v + '；本实现只读写 v' + head + '（先升级本代码，不降级硬读）');
+  if (v === head) return [];
+  const byFrom = new Map(steps.map((s) => [s.fromVersion, s]));
+  const plan = [];
+  for (let cur = v; cur < head; cur++) {
+    const s = byFrom.get(cur);
+    // 当前只有 v1 时，v0 的文件走到这里 —— 消息与"缺步"这一档一致（不跳过、不部分读）
+    if (!s) throw new StoreFormatUnsupportedMigrationError('存储文件是 v' + v + '，本实现没有 v' + v + '→v' + head + ' 的迁移（迁移链缺这一步：v' + cur + '→v' + (cur + 1) + '；不跳过、不按当前版本硬读）');
+    plan.push(s);
+  }
+  return plan;
+}
+
+/**
+ * 信封检查（**纯函数**，`loadDoc` 与 `migrateStoreDoc` 共用一份）。顺序是**故意**的：先"这文件是不是我们的"，
+ * 再"版本号本身合不合法"，最后才谈"读不读得了"——否则一个 format 都不对的文件会收到"版本太旧"的错，排障就跑偏了。
+ * `file` 只用于把路径带进报错文本（纯函数调用方不传）。
+ * @returns {number} 校验通过的 version
+ */
+function assertStoreEnvelope(obj, file) {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('存储文件必须是 JSON 对象（实际是 ' + (Array.isArray(obj) ? 'array' : typeof obj) + '）' + (file ? '：' + file : ''));
+  }
+  if (obj.format !== STORE_FORMAT) throw new Error('存储文件格式不认识：' + obj.format + '（期望 ' + STORE_FORMAT + (file ? '，' + file : '') + '）');
+  const v = obj.version;
+  // 先判"是不是个合法版本号"（malformed），再分"更新"与"缺迁移"两种拒绝（unsupported）——与 rw-session 的分档一致
+  if (!Number.isSafeInteger(v) || v < 0) throw new Error('存储文件版本号不合法：' + JSON.stringify(v) + '（必须是非负整数' + (file ? '，' + file : '') + '）');
+  return v;
+}
+
+/**
+ * 把一份存储文件对象沿迁移链**逐步**升到当前版本（**纯函数、不碰盘、不改入参**）。当前版本原样返回（同一引用）。
+ * 链缺步 / 版本更新 ⇒ 抛 StoreFormatUnsupportedMigrationError；迁移步自己抛错 ⇒ 包一层说清"哪一步拒绝了
+ * 哪个版本"，否则一个纯函数里的 TypeError 看起来会像"文件坏了"。
+ */
+export function migrateStoreDoc(doc) {
+  const v = assertStoreEnvelope(doc);
+  let cur = doc;
+  for (const step of planStoreMigration(v)) {
+    let next;
+    try {
+      next = step.fn(cur);
+    } catch (e) {
+      if (e instanceof StoreFormatUnsupportedMigrationError) throw e;
+      throw new StoreFormatUnsupportedMigrationError('迁移步 ' + step.name + ' 拒绝了这份 v' + step.fromVersion + ' 存储文件：' + ((e && e.message) || e));
+    }
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) {
+      throw new Error('迁移步 ' + step.name + ' 必须返回存储文件对象（实际是 ' + (Array.isArray(next) ? 'array' : typeof next) + '）');
+    }
+    // 版本号由**链**来盖：步自己写错 version 也不会让链错位（否则"走到哪一版"就有两个出处）
+    cur = { ...next, version: step.toVersion };
+  }
+  return cur;
+}
+
+// **启动校验**（模块加载即服务器启动的一部分：`server/storage/index.js` 在启动时就 import 本模块；
+// 照 migrations.js「在应用任何一条之前先校验」）。链有缺口/重复/多余步 ⇒ 立刻抛：带着半条链跑比启动失败更糟。
+// 当前只有 v1 ⇒ 链为空，这次校验通过。
+validateStoreMigrationChain();
+
 const nowIso = () => new Date().toISOString();
 const clone = (x) => JSON.parse(JSON.stringify(x));   // 记录按契约就是可 JSON 序列化的：文件即格式
 
 function emptyDoc() {
-  return { format: FORMAT, version: VERSION, counters: {}, tables: Object.fromEntries(TABLES.map((t) => [t, {}])) };
+  return { format: STORE_FORMAT, version: STORE_FORMAT_VERSION, counters: {}, tables: Object.fromEntries(TABLES.map((t) => [t, {}])) };
 }
 
-/** 读文件；不存在＝全新库；**版本不认识就显式拒绝**（照 `server/session-export.js` 的 rw-session 口径）。 */
+/**
+ * 读文件；不存在＝全新库；**旧版本沿链逐步迁移并写回**；**版本不认识就显式拒绝**
+ * （照 `server/session-export.js` 的 rw-session 口径：更新的版本不硬读；缺步的旧版本不跳过）。
+ */
 function loadDoc(file) {
   if (!fs.existsSync(file)) return emptyDoc();
   const raw = fs.readFileSync(file, 'utf8');
   if (!raw.trim()) return emptyDoc();
   let doc;
   try { doc = JSON.parse(raw); } catch (e) { throw new Error(`存储文件不是合法 JSON（${file}）：${e.message}`); }
-  if (doc.format !== FORMAT) throw new Error(`存储文件格式不认识：${doc.format}（期望 ${FORMAT}，${file}）`);
-  if (Number(doc.version) !== VERSION) throw new Error(`存储文件版本不认识：${doc.version}（本实现只认 ${VERSION}，${file}）`);
+  const version = assertStoreEnvelope(doc, file);
+  // 比本代码新的版本：**显式拒绝**。判据与 planStoreMigration 里那条是同一条（v > head），这里另写一份只为
+  // 把**文件路径**一并报出来——排障第一眼要看到"哪份文件、什么版本、本代码只认到哪一版"。
+  if (version > STORE_FORMAT_VERSION) {
+    throw new StoreFormatUnsupportedMigrationError(
+      `存储文件版本不认识：这份文件是 v${version}，本实现只认到 v${STORE_FORMAT_VERSION}（${file}）——更新的版本不硬读、不降级（先升级本代码再打开它）`);
+  }
+  const stale = version < STORE_FORMAT_VERSION;
+  if (stale) doc = migrateStoreDoc(doc);   // 逐步迁移：链缺步 / 步自己抛错都在这里显式报出来
+  // 归一化默认值放在**迁移之后**：迁移步看到的是文件的原样（旧形状该长什么样由那一步说了算）
   if (!doc.tables) doc.tables = {};
   for (const t of TABLES) if (!doc.tables[t]) doc.tables[t] = {};
   if (!doc.counters) doc.counters = {};
+  // **迁移即写回**：只读打开也要把文件升到当前版本，而不是等"下一次有人写"。当前版本的文件一个字节都不重写。
+  if (stale) saveDocSync(file, doc);
   return doc;
 }
 
 let tmpSeq = 0;   // 临时文件名里的序号（同一进程内唯一；跨进程由 pid 区分）
 
+/**
+ * 临时文件名：**必须每次不同**（pid+序号）。共用 `<file>.tmp` 时，两次并发写里先 rename 的那个会把临时文件
+ * 搬走，后一个 rename 就 ENOENT —— 2026-09-16 真机实测（一轮对话里 persistEvent 逐帧 fire-and-forget，
+ * 几十个并发写当场踩中，见 `[eventlog] 事件落账失败 ENOENT ... rename`）。异步写与"打开旧文件时的迁移写回"
+ * 共用这一个出处，所以两边的名字不可能撞。
+ */
+const tmpPath = (file) => `${file}.${process.pid}.${++tmpSeq}.tmp`;
+
+/** 落盘的字节形状（两处写盘共用一份：文件的序列化口径只能有一个出处） */
+const serialize = (doc) => JSON.stringify(doc, null, 2);
+
 async function saveDoc(file, doc) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   // 先写临时文件再 rename：rename 是原子的 ⇒ 中途崩了也不会留下半截文件（"要么旧的、要么新的"）。
-  // 临时名**必须每次不同**（pid+序号）：共用 `<file>.tmp` 时，两次并发写里先 rename 的那个会把临时文件
-  // 搬走，后一个 rename 就 ENOENT —— 2026-09-16 真机实测（一轮对话里 persistEvent 逐帧
-  // fire-and-forget，几十个并发写当场踩中，见 `[eventlog] 事件落账失败 ENOENT ... rename`）。
-  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(doc, null, 2), 'utf8');
+  const tmp = tmpPath(file);
+  await fsp.writeFile(tmp, serialize(doc), 'utf8');
   await fsp.rename(tmp, file);
+}
+
+/**
+ * 同步落盘：**只在"打开旧文件并按链迁移"这一处用**（loadDoc 在 holder 的 getter 里同步跑，没法 await）。
+ * 它和 saveDoc 共用同一套"唯一临时名 + 先写临时文件再 rename"的机制，且**不与串行化的写链打架**：
+ * 任何一次 persist() 入队前都必然先读过 holder.doc（读即触发加载），而加载是同步跑完的
+ * ⇒ 这次写必然发生在链上**第一次**写之前，两者不可能同时在飞（真绕过它去写同一个文件，才会丢更新）。
+ * 唯一目的：迁移完当场把文件升到当前版本（只读打开也要落盘）。
+ */
+function saveDocSync(file, doc) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = tmpPath(file);
+  fs.writeFileSync(tmp, serialize(doc), 'utf8');
+  fs.renameSync(tmp, file);
 }
 
 /**

@@ -38,9 +38,10 @@ import { startScheduler } from './scheduler.js';
 import { REAL_WHERE } from './cohort.js';      // 复测口径单一来源（首页指标与复跑脚本同一份判据）
 import { checkEpochAndWarm } from './epoch.js'; // M2 换纪元检测与一次预热
 // 2026-09-16（核对报告 §3.5③）：跨轮前缀指纹 —— C4 在"两次请求之间"这个维度上的机检
-import { detectPrefixRewrite, parsePrefixRecord, formatPrefixRecord, PREFIX_RECORD_ACTION } from './history.js';
+// `detectPrefixRewrite`（判据本体，`server/history.js`）与 `PREFIX_RECORD_ACTION`（动作名）现在由
+// `server/prefix-assemble.js` 统一调；HEADLESS/渠道两条路径接的是同一份实现（改前只有本文件在落这笔账）。
+import { recordPrefixAssemble, prefixLane, PREFIX_SOURCE } from './prefix-assemble.js';
 import { PREFIX_LEDGER } from './prefix-participants.js';
-import { prefixHash } from './prefix.js';
 import { capabilityManifest, capabilitySummary } from './capabilities.js'; // RA-31 能力清单 / OP-16 降级语义
 import { startManifestWatch } from './tools/registry.js';
 import { startDriver } from './driver.js';
@@ -1238,24 +1239,22 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       //   在这里再记一次就是把同一件事数两遍（`lane` 用**工具面的源件**拼，不含派生值）。
       // 写入位置刻意选在"发送前、且参数已全部定型"：`light`/`enabledTools`/`shellSchema` 都已算出，
       //   所以 lane 与真正发出去的工具面同源；同时请求还没发给模型，不会把"没发出去的请求"记成账。
+      // 2026-09-16（补覆盖缺口）：这段逻辑收进 `server/prefix-assemble.js`，三条入口共用一份实现
+      //   （web=这里 / headless=`scripts/rw-run.mjs` / 渠道=`server/channels/run-turn.js`）。
+      //   落账时机、字段、动作名与抽出前**逐字节相同**（同一份 `formatPrefixRecord`、同一个 try/catch 口径）。
       try {
-        const laneSrc = JSON.stringify([wantProvider, wantModel, light, convPreset, convMode, permission, convShellCtx ? convShellCtx.key : null,
-          enabledTools ? [...enabledTools].sort() : null,
-          shellSchema ? [shellSchema.presetBase, [...shellSchema.forceOn].sort(), [...shellSchema.forceOff].sort(), shellSchema.mcpAllow] : null]);
-        const lane = prefixHash(laneSrc);
-        const prevRow = (await db.query('SELECT detail FROM audit_log WHERE conversation_id=? AND action=? ORDER BY id DESC LIMIT 1',
-          [conversationId, PREFIX_RECORD_ACTION]))[0];
-        const prev = parsePrefixRecord(prevRow && prevRow.detail);
-        const d = detectPrefixRewrite(prev, hist, lane);
+        const lane = prefixLane({
+          provider: wantProvider, model: wantModel, light, preset: convPreset, mode: convMode, permission,
+          shellKey: convShellCtx ? convShellCtx.key : null, enabledTools, shellSchema,
+        });
+        const d = await recordPrefixAssemble({
+          db, conversationId, accountId: req.user.id, shellId: convShellId, hist, lane, source: PREFIX_SOURCE.WEB,
+        });
         if (d.state === 'rewrite') {
-          console.warn('[prefix-rewrite] 跨轮前缀改写：conv=' + conversationId + ' cnt ' + (prev ? prev.cnt : '?') + '→' + d.cnt
+          console.warn('[prefix-rewrite] 跨轮前缀改写：conv=' + conversationId + ' cnt ' + (d.prevCnt == null ? '?' : d.prevCnt) + '→' + d.cnt
             + (d.lost ? '（少 ' + d.lost + ' 条）' : '（条数未少但头部已不同：中段被丢/换头）')
             + '；早期消息被改写或丢弃 = C4 非预期失效，已落 ' + PREFIX_LEDGER.INVALIDATE);
-          await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-            [req.user.id, PREFIX_LEDGER.INVALIDATE, formatPrefixRecord(d) + ' src=assemble', convShellId, conversationId]);
         }
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [req.user.id, PREFIX_RECORD_ACTION, formatPrefixRecord(d), convShellId, conversationId]);
       } catch (e) { console.warn('[prefix-assemble] 指纹落账失败（不影响对话）：' + ((e && e.message) || e)); }
       const agentCtx = { permission: (highGuardIntent && permission === 'full') ? 'guard' : permission, accountId: req.user.id, conversationId, root: permission === 'full' ? RW_FS_ROOT : ws, __signal: actrl.signal, __runId: run ? run.id : null, __resumeStats: run && Number(run.rounds || 0) > 0 ? { rounds: run.rounds } : null, __budgetRemain: budgetRemain, __shellBudgetYuan: shellBudgetYuan, __enabledTools: enabledTools, __accessRules: accessRules, __light: light, __readonlyIntent: readonlyIntent, mode: convMode, preset: convPreset, shellId: convShellId, shellKey: convShellCtx ? convShellCtx.key : null, shellToolsOn, shellToolsOff, __shellSchema: shellSchema };
       // ⑤ model_telemetry 快照点：记录执行前的 usage_stats 最大 id → 执行后只归集本次执行新增行（kind=round/collapse），

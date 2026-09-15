@@ -38,6 +38,11 @@ import { config } from '../config.js';
 import { findProvider, PROVIDERS } from '../llm/providers.js';
 import { fail } from '../failures.js';
 import { RW_WORKSPACE } from '../env.js';
+// 组装侧跨轮前缀账（v0.3 §4.4.1 规则5「失效可数」）：与 `/api/chat`、headless **共用一份实现**。
+// 静态 import 是安全的：`server/prefix-assemble.js` 只依赖 node:crypto + 两个纯函数模块
+// （history / prefix-participants），不 import db/agent ⇒ 不破坏上面那条"本文件不静态 import ../agent.js"
+// 的纪律（那条纪律的目的是不把工具注册表的启动期校验连坐给夹具，这里够不到那条链）。
+import { recordPrefixAssemble, prefixLane, PREFIX_SOURCE } from '../prefix-assemble.js';
 
 // 平台侧的兜底模型（**不是渠道自己的硬编码**）：只有会话与会话属主都给不出模型时才落到这里。
 // 出处是厂商注册表里 DeepSeek 的 `defaultModel`（`server/llm/providers.js:8`），注册表里取不到才退到这个名字。
@@ -176,6 +181,35 @@ export async function runChannelTurn({ channel, conversationId, text, permission
   const resolved = await resolveModel(conv, db);
   const { provider, model, note } = withKeyGuard(resolved.provider, resolved.model, keys);
   if (note) console.warn('[channel-turn] ' + channel + '：' + note);
+
+  // ── 组装侧跨轮前缀账（v0.3 §4.4.1 规则5「失效可数」，2026-09-16 补覆盖缺口）──────────────────────
+  // 改前这条机检**只挂在 `/api/chat` 上**；渠道轮次经过 `runAgent`，而 `agent.js` 的 `diffCore/prevCore`
+  // 每 run 重置 ⇒ 渠道路径上"两次请求之间前缀被改短/换头"**没有任何机检看得见**（与已登记的 C-38①
+  // "渠道绕过会话 API"同源）。现在三条入口调同一份实现、落同一本账。
+  // 位置与 /api/chat 同口径：**模型已定型（上面 resolveModel/withKeyGuard）、请求还没发给引擎**。
+  // 与 /api/chat **如实不同的地方**（不假装三端一模一样）：
+  //   · `hist` 是上面那份"按 id 全量读回来的历史"（渠道本来就不滑窗、不截断 ⇒ 它**就是**发出去的前缀）；
+  //   · lane 里 `shellKey`/`shellSchema`/`enabledTools` 都是 null —— 渠道不搬 /api/chat 的组装侧逻辑
+  //     （文件头 ③），也就没有壳 schema 与启用集裁剪。后果如实说明：**混合端会话**（同一会话既在网页
+  //     又在渠道用）两侧 lane 不同 ⇒ 判据按"换了车道"跳过比较，只落 `prefix:assemble` 不判改写
+  //     （保守方向：宁可不判，也不把换端误记成 C4 非预期失效）。
+  try {
+    const lane = prefixLane({
+      provider, model, light: false, preset: 'all', mode: 'chat', permission: perm,
+      shellKey: null, enabledTools: null, shellSchema: null,
+    });
+    const d = await recordPrefixAssemble({
+      db, conversationId, accountId: conv.account_id ?? null, shellId: null, hist, lane, source: PREFIX_SOURCE.CHANNEL,
+    });
+    if (d.state === 'rewrite') {
+      console.warn('[channel-turn] 跨轮前缀改写（C4 非预期）：' + channel + ' conv=' + conversationId
+        + ' cnt ' + (d.prevCnt == null ? '?' : d.prevCnt) + '→' + d.cnt
+        + (d.lost ? '（少 ' + d.lost + ' 条）' : '（条数未少但头部已不同）'));
+    }
+  } catch (e) {
+    // 出声但**不阻断本轮**：与 /api/chat 的既有权衡一致（账本写不进去不许影响对话/回复投递）
+    console.warn('[channel-turn] 跨轮前缀账落账失败（不影响本轮回复）：' + ((e && e.message) || e));
+  }
 
   // 长任务现场（断点恢复外壳）：渠道改前**完全没有**现场登记，所以 ensureRun 是新增的事实；
   // 它不改变对外行为（只多一行 agent_runs/轮），却是"能不能基于现场继续"的前提。

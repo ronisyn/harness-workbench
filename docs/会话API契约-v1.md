@@ -243,9 +243,12 @@
 6. 本文档与代码不一致时，**以代码为准**，并当场改文档。
 7. **新增"进请求前缀"的注入点必须同时登记缓存影响**（v0.3 §4.4.1 规则5）：在 `server/prefix-participants.js` 的声明表里加一行，
    `where`/`cacheImpact` 二选一并附**源码锚点**；夹具 `test/prefix-participants.test.mjs` 会核对锚点是否还在。
-   2026-09-16 起，`/api/chat` 每次组装前缀后还会落一行 `prefix:assemble`（跨轮指纹），
+   2026-09-16 起，每次组装前缀后还会落一行 `prefix:assemble`（跨轮指纹），
    上一轮的 cnt 条若不再逐字节是本轮前缀的开头 → 记 `prefix:invalidate`（C4 非预期，`server/history.js` 的判据）。
    **这条是"只追加"纪律在跨 run 维度上的唯一机检**——agent.js 的 `diffCore` 每 run 重置，看不见这一层。
+   **三条入口共用一份实现**（`server/prefix-assemble.js`）：`/api/chat`（`src=web`，行为与抽出前逐字节相同）、
+   headless（`scripts/rw-run.mjs`，`src=headless`）、渠道（`server/channels/run-turn.js`，`src=channel`）——
+   改前它只挂在 `/api/chat` 上，另两条路径零覆盖（登记见 `proposals/架构文档冲突登记-20260915.md` 的 C-59）。
 
 ---
 
