@@ -2,7 +2,6 @@
 // 每个工具：name / description / permission(read|write|full|global) / params / run(args, ctx)
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
 import { db, bumpPolicyRev } from '../db.js';
 import { chatOnce, calcCost } from '../llm/gateway.js';
@@ -19,8 +18,8 @@ import { armDeadline, toolTimeoutResult } from './deadline.js';
 import { fail, classifyToolThrow, inputError } from '../failures.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
-import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT, RW_OS } from '../env.js';
-import { runShellLine, spawnShellLine } from '../shell.js';
+import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT } from '../env.js';
+import { execArgv, execShell, killTree, spawnShell } from '../exec/index.js';
 import { readSpill, lineAlignedPreview, detailSummary, READ_INLINE_CHARS } from './spill.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
@@ -132,24 +131,26 @@ export function inside(p, root) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function runCmd(cmd, args, opts = {}, timeout = 30000) {
+async function runCmd(cmd, args, opts = {}, timeout = 30000) {
   // raw=true：把完整 stdout/stderr 原样交回调用方（不在这里 clip），由调用方按 v0.3 §6.1 通则落 spill + 给定位符。
   // 为什么要有这个开关：本函数另有 git_*/syntax_check/finish_task 等调用方，它们把 r.out 当**字符串**直接再处理
   // （拼进自己的结果里），所以不能全局改形状——只有 run_command 需要"完整输出"。
-  return new Promise((resolve) => {
-    const { raw, ...execOpts } = opts;
-    execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...execOpts }, (err, stdout, stderr) => {
-      const pr = (s, cap) => {
-        const t = String(s || '');
-        if (t.length <= cap) return t;
-        const head = Math.floor(cap * 0.7);
-        const tail = Math.floor(cap * 0.2);
-        return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
-      };
-      resolve({ ok: !err, code: err?.code ?? 0, out: raw === true ? String(stdout || '') : pr(stdout, 8000), err: raw === true ? String(stderr || '') : pr(stderr, 2000) });
-    });
-  });
+  // permission/workspaceRoot 由调用方经 opts 传进来（它们不是 execFile 的选项，这里取走）：这条路是 argv 直呼
+  // （不过 shell），argv 就是模型给的那份（read/write 档的命令、git_*、syntax_check）⇒ 按 ⑰ 的口径进沙箱。
+  const { raw, permission, workspaceRoot, ...execOpts } = opts;
+  const r = await execArgv([cmd, ...args], { timeout, windowsHide: true, maxBuffer: 2 * 1024 * 1024, ...execOpts, permission, workspaceRoot });
+  const pr = (s, cap) => {
+    const t = String(s || '');
+    if (t.length <= cap) return t;
+    const head = Math.floor(cap * 0.7);
+    const tail = Math.floor(cap * 0.2);
+    return t.slice(0, head) + `\n…[输出超长已截断中段 ${t.length - head - tail} 字符]…\n` + t.slice(-tail);
+  };
+  return { ok: r.ok, code: r.code, out: raw === true ? r.out : pr(r.out, 8000), err: raw === true ? r.err : pr(r.err, 2000) };
 }
+
+// 沙箱策略的两个入参（⑰ 按**会话权限档**定模式、按 root 定可写根）：每处 runCmd 都从这里取，不各自发明。
+const sandboxOf = (ctx) => ({ permission: ctx && ctx.permission, workspaceRoot: ctx && ctx.root });
 
 const readTxt = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { throw new Error('读取失败: ' + e.message); } };
 
@@ -513,18 +514,19 @@ const RAW_TOOLS = [
       const viaShell = !ctx.limitPath;
       if (!viaShell) {
         const [cmd, ...args] = String(a.cmd).split(/\s+/);
-        r = await runCmd(cmd, args, { cwd: dir, raw: true }, t); // raw：完整输出交回来，由下面统一落 spill
+        r = await runCmd(cmd, args, { cwd: dir, raw: true, ...sandboxOf(ctx) }, t); // raw：完整输出交回来，由下面统一落 spill
       } else {
-        r = await runShellLine(String(a.cmd), { cwd: dir, timeout: t });
+        r = await execShell(String(a.cmd), { cwd: dir, timeout: t, ...sandboxOf(ctx) });
       }
       // 读型别名不再拦截（2026-09-15 决定，见 hooks.js 第 6 条），改成**结果里附一行提示**：
       // 模型照样看得见建议，但不必为一个写法白花一整轮。只在命中时出现，不占常驻前缀。
       const head = String(a.cmd).trim().split(/\s+/)[0];
       const readLike = /^(cat|ls|grep|find|sed|head|tail|wc|awk)$/.test(head) && !(head === 'sed' && /\s-i\b/.test(String(a.cmd)));
       // v0.3 §6.1 通则：命令输出是典型"大结果"。两条路分开处理，但**都不许静默丢中段**：
-      //   · read/write 档（execFile 那一臂，本文件内）：完整 stdout/stderr 到手 ⇒ 明细落 spill + 定位符；
-      //   · full 档（走 shell.js）：那边的 clip(8000/2000) 在**返回给我们之前**就把中段丢了，本模块拿不到完整输出
-      //     （server/shell.js 不归本批改动）⇒ 这里至少如实标注，并给出"要全文该怎么走"的正路，不让模型误以为拿全了。
+      //   · read/write 档（argv 直呼那一臂，本文件内）：完整 stdout/stderr 到手 ⇒ 明细落 spill + 定位符；
+      //   · full 档（execShell 那一臂）：那边的 clip(8000/2000) 在**返回给我们之前**就把中段丢了，本模块拿不到完整输出
+      //     （截断口径属执行后端的"执行一条命令串"动词，见 server/exec/local.js 的注释）⇒ 这里至少如实标注，
+      //     并给出"要全文该怎么走"的正路，不让模型误以为拿全了。
       const streams = { stdout: r.out, stderr: r.err };
       const out = { ok: r.ok, code: r.code, cwd: dir, stdout: '', stderr: '' };
       const spills = [];
@@ -552,14 +554,14 @@ const RAW_TOOLS = [
     } },
   { name: 'run_long_task', description: '后台运行长任务（不阻塞），返回 jobId；用 job_output 查看输出，kill_process 终止', permission: 'full',
     params: { cmd: { type: 'string', required: true } },
-    run: async (a) => {
+    run: async (a, ctx) => {
       pruneJobs();
       const logDir = RW_JOBS_DIR; // 操作系统临时目录（macOS/Linux/Windows 同一个出处，见 env.js）
       fs.mkdirSync(logDir, { recursive: true });
       const logFile = path.join(logDir, 'job-' + Date.now() + '.log');
       const fd = fs.openSync(logFile, 'a');
       // 长任务同样交给本机 shell：Windows 上 npm/npx 只有 .cmd 形式，管道与重定向也只有走 shell 才成立
-      const child = spawnShellLine(String(a.cmd), { detached: true, stdio: ['ignore', fd, fd] });
+      const child = await spawnShell(String(a.cmd), { detached: true, stdio: ['ignore', fd, fd], ...sandboxOf(ctx) });
       child.unref();
       const jobRec = { pid: child.pid, cmd: a.cmd, log: logFile, started: Date.now(), status: 'running' };
       jobs.set(String(child.pid), jobRec);
@@ -570,24 +572,15 @@ const RAW_TOOLS = [
   { name: 'kill_process', description: '终止进程（后台任务用 jobId/pid）', permission: 'full',
     params: { pid: { type: 'number', required: true } },
     run: async (a) => {
-      // Windows 上没有真信号：process.kill 一律强杀，且不收敛子树；而后台任务是 detached 起的一整棵树，
-      // 所以用 taskkill /T 连子树一起收（/F 是 Windows 上唯一可靠的方式）。
-      if (RW_OS === 'win32') {
-        const r = await runShellLine('taskkill /PID ' + Number(a.pid) + ' /T /F', { timeout: 20000 });
-        if (r.ok) { jobDbSetStatus(String(a.pid), 'killed'); return { killed: true }; }
-        if (/not found|没有找到|找不到/i.test(r.out + r.err)) { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 ' + RW_JOBS_DIR + ' 下可查' }; }
-        throw new Error('终止失败: ' + (r.err || r.out || ('taskkill 返回 ' + r.code)));
-      }
-      try {
-        process.kill(a.pid, 'SIGTERM');
-        jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
-        return { killed: true };
-      }
-      catch (e) {
-        // ESRCH=进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可按目录找
-        if (e.code === 'ESRCH') { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 ' + RW_JOBS_DIR + ' 下可查' }; }
-        throw new Error('终止失败: ' + e.message);
-      }
+      // "收掉这个进程树"由执行后端的 killTree 动词承担（v0.3 §5：平台事实只许落在执行后端）：
+      // Windows 上没有真信号、process.kill 一律强杀且不收敛子树（后台任务是 detached 起的一整棵树，
+      // 所以那边走 taskkill /T /F），POSIX 上走 SIGTERM——差异归后端吸收，这里不再自己按平台分叉，
+      // ⑰ 沙箱也才只有一个 argv 挂点（此前这段分叉是 tools 层里第二份平台判据，与后端那份逐字重复）。
+      const r = await killTree(a.pid);
+      // gone＝进程不存在：进程表已清理(重启/超12h TTL)或任务早已退出，属常态而非错误；日志仍可按目录找
+      if (r.gone) { jobDbSetStatus(String(a.pid), 'gone'); return { killed: false, note: '进程 ' + a.pid + ' 已不存在（可能早已退出，或服务器重启/进程表已清理）。日志仍在 ' + RW_JOBS_DIR + ' 下可查' }; }
+      jobDbSetStatus(String(a.pid), 'killed'); // D2：持久化状态同步
+      return { killed: true };
     } },
   { name: 'job_list', description: '列出全部后台任务（jobId/命令/状态/日志路径）', permission: 'full',
     params: {},
@@ -697,34 +690,35 @@ const RAW_TOOLS = [
 
   // ---------- B23-B26 Git ----------
   { name: 'git_status', description: '查看 git 状态', permission: 'read', params: { dir: { type: 'string', required: true } },
-    run: async (a) => { const r = await runCmd('git', ['-C', a.dir, 'status', '--short']); return { status: r.out, ok: r.ok }; } },
+    run: async (a, ctx) => { const r = await runCmd('git', ['-C', a.dir, 'status', '--short'], sandboxOf(ctx)); return { status: r.out, ok: r.ok }; } },
   { name: 'git_commit', description: 'git 提交（自动推送 origin/main——防"只提交未推送被部署覆盖"孤儿，2026-09-09 机制修复）', permission: 'write', params: { dir: { type: 'string', required: true }, message: { type: 'string', required: true } },
-    run: async (a) => {
-      await runCmd('git', ['-C', a.dir, 'add', '-A']);
-      const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message]);
+    run: async (a, ctx) => {
+      await runCmd('git', ['-C', a.dir, 'add', '-A'], sandboxOf(ctx));
+      const r = await runCmd('git', ['-C', a.dir, 'commit', '-m', a.message], sandboxOf(ctx));
       if (!r.ok) return { ok: false, out: r.out + r.err };
       // push 收尾：提交成功后自动推送到远端（孤儿防护）。push 失败不撤销本地 commit，仅提示。
-      const br = await runCmd('git', ['-C', a.dir, 'branch', '--show-current']);
+      const br = await runCmd('git', ['-C', a.dir, 'branch', '--show-current'], sandboxOf(ctx));
       const branch = String(br.out || 'main').trim();
       let push = null;
-      try { push = await runCmd('git', ['-C', a.dir, 'push', 'origin', branch], {}, 60000); } catch { push = { ok: false, err: 'push 调用异常' }; }
+      try { push = await runCmd('git', ['-C', a.dir, 'push', 'origin', branch], sandboxOf(ctx), 60000); } catch { push = { ok: false, err: 'push 调用异常' }; }
       const pushed = push && push.ok;
       return { ok: true, out: r.out + (pushed ? `\n[已推送 origin/${branch}]` : `\n[⚠️ 提交成功但未推送 origin/${branch}（${String(push?.err || push?.out || '未知原因').slice(0, 300)}）——部署前请先解决未推送提交]`) };
     } },
   { name: 'git_branch', description: 'git 分支操作（list|create|checkout）', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string', enum: ['list', 'create', 'checkout'] }, branch: { type: 'string' } },
-    run: async (a) => {
-      if (a.action === 'create') { const r = await runCmd('git', ['-C', a.dir, 'branch', a.branch]); return { ok: r.ok }; }
-      if (a.action === 'checkout') { const r = await runCmd('git', ['-C', a.dir, 'checkout', a.branch]); return { ok: r.ok }; }
-      const r = await runCmd('git', ['-C', a.dir, 'branch', '-a']); return { branches: r.out };
+    run: async (a, ctx) => {
+      if (a.action === 'create') { const r = await runCmd('git', ['-C', a.dir, 'branch', a.branch], sandboxOf(ctx)); return { ok: r.ok }; }
+      if (a.action === 'checkout') { const r = await runCmd('git', ['-C', a.dir, 'checkout', a.branch], sandboxOf(ctx)); return { ok: r.ok }; }
+      const r = await runCmd('git', ['-C', a.dir, 'branch', '-a'], sandboxOf(ctx)); return { branches: r.out };
     } },
   { name: 'git_pull_push', description: 'git 拉取/推送', permission: 'write', params: { dir: { type: 'string', required: true }, action: { type: 'string' } },
-    run: async (a) => { const r = await runCmd('git', ['-C', a.dir, a.action === 'push' ? 'push' : 'pull']); return { ok: r.ok, out: r.out }; } },
+    run: async (a, ctx) => { const r = await runCmd('git', ['-C', a.dir, a.action === 'push' ? 'push' : 'pull'], sandboxOf(ctx)); return { ok: r.ok, out: r.out }; } },
 
   // ---------- B27/B28 代码检查 ----------
   { name: 'syntax_check', description: 'JS 语法检查（node --check）', permission: 'read', params: { path: { type: 'string', required: true } },
-    run: async (a) => { const r = await runCmd('node', ['--check', a.path]); return { ok: r.ok, err: r.err }; } },
+    // node --check 的路径来自模型 ⇒ 与 hooks.js 的语法检查钩子同一条口径：进沙箱
+    run: async (a, ctx) => { const r = await runCmd('node', ['--check', a.path], sandboxOf(ctx)); return { ok: r.ok, err: r.err }; } },
   { name: 'run_test', description: '运行测试（write 级仅工作区内）', permission: 'write', params: { dir: { type: 'string', required: true } },
-    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await runShellLine('npm test', { cwd: a.dir }); return { ok: r.ok, out: r.out, err: r.err }; } },
+    run: async (a, ctx) => { if (ctx.limitPath && !inside(a.dir, ctx.root)) throw new Error('目录超出工作区'); const r = await execShell('npm test', { cwd: a.dir, ...sandboxOf(ctx) }); return { ok: r.ok, out: r.out, err: r.err }; } },
 
   // ---------- F9 动态任务清单（多步任务规划与进度展示） ----------
   { name: 'plan_tasks', description: '为当前多步任务创建任务清单（复杂任务先规划步骤，让用户看到进度；每完成一步用 plan_done 标记，全部完成后再总结）', permission: 'read',
@@ -1068,12 +1062,12 @@ const RAW_TOOLS = [
         if (!isPlatform && ctx && !ctx.__skipAutoCommit) {
           const fsx = await import('node:fs');
           if (fsx.existsSync(path.join(ws, '.git'))) {
-            const st = await runCmd('git', ['-C', ws, 'status', '--porcelain']);
+            const st = await runCmd('git', ['-C', ws, 'status', '--porcelain'], sandboxOf(ctx));
             const dirty = String(st.out || '').trim();
             if (dirty) {
               const msg = 'auto: ' + (summary.replace(/\s+/g, ' ').slice(0, 60) || 'task completed');
-              await runCmd('git', ['-C', ws, 'add', '-A']);
-              const cr = await runCmd('git', ['-C', ws, 'commit', '-m', msg]);
+              await runCmd('git', ['-C', ws, 'add', '-A'], sandboxOf(ctx));
+              const cr = await runCmd('git', ['-C', ws, 'commit', '-m', msg], sandboxOf(ctx));
               autoCommit = { ok: cr.ok, dirtyFiles: dirty.split('\n').length, message: msg };
             } else { autoCommit = { ok: true, dirtyFiles: 0, note: '工作区干净无改动' }; }
           } else { autoCommit = { ok: true, skipped: '非 git 仓库，跳过 auto-commit' }; }

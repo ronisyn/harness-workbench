@@ -67,6 +67,9 @@ export const CONTRACT = {
     agentRuns: ['create', 'getLatest', 'update'],
     events: ['append', 'read'],
     // 非必需：本轮示范迁移的第七个实体（`jsonfile.js` 对它显式抛"不支持"）
+    // `list` 另接受**可选**的 `accountId` 过滤（`{state?, limit?, accountId?}`）：路由按调用者账号收口时用它，
+    // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
+    // 不能取回来再在内存里筛 —— 那样别人的行会先把 LIMIT 窗口占满。
     deliveries: ['insert', 'findByKey', 'claimRetry', 'finish', 'list'],
   },
 };

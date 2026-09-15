@@ -25,7 +25,9 @@ import * as local from './local.js';
 
 // 一个后端必须提供的动词（装配期校验；照 §7.1 ③④「清单装配期校验、默认拒绝」的做法）。
 // 加一个后端＝写一个实现模块并在实现表里加一行；少动词在**装配期**就抛，不等到第一次调用才发现。
-const VERBS = ['shellFor', 'argvFor', 'execPlan', 'spawnPlan', 'execLine', 'spawnLine', 'killTree', 'probe'];
+// 2026-09-16 新增后四个 argv 级动词（收成形 argv + 沙箱挂点；前八个一字未动，见 ./local.js 的注释）。
+const VERBS = ['shellFor', 'argvFor', 'execPlan', 'spawnPlan', 'execLine', 'spawnLine', 'killTree', 'probe',
+  'execArgv', 'spawnArgv', 'execShell', 'spawnShell'];
 
 // 实现表 —— **唯一选择点**。不加"自动探测/回落"：选择是显式的，选错就在启动时炸掉（CI 也能钉住）。
 const BACKENDS = { local };
@@ -78,3 +80,23 @@ export const killTree = (pid, options) => EXEC_BACKEND.killTree(pid, options);
 
 /** 探测后端可用性 → { available, shellFile, ... }（只做可解析性检查，不真起进程）。 */
 export const probe = (options) => EXEC_BACKEND.probe(options);
+
+// ---- argv 级动词（2026-09-16 新增；⑰ 沙箱的接线点，见 ./local.js 顶部注释）----
+// 为什么这族动词存在：调用点里有一半收的是**已成形的 argv**（git_*、node --check、MCP 子进程、自我重启、
+// runtrack 的 git 例行、模板库 git 同步），用"命令串"动词表达不了；而 ⑰ 的 confine() 是 argv 级接缝，
+// argv 必须经过本层才能进 runner。options 里的沙箱字段（都不是 execFile/spawn 的选项，本层会取走）：
+//   · permission / workspaceRoot —— 会话权限档与可写根（决定沙箱模式；缺省按 full 处理）
+//   · sandbox: 'off'             —— 声明"这是部署方自配的基础设施进程，不进沙箱"（例外要写清理由）
+//   · shell: 'passthrough'       —— 声明"这条 argv 需要 shell 透传"，平台判据仍在后端（v0.3 §5）
+
+/** argv → 前台执行（不过 shell）→ { ok, code, out, err }，输出原样（截断口径归调用方）。 */
+export const execArgv = (argv, options) => EXEC_BACKEND.execArgv(argv, options);
+
+/** argv → 后台起进程（不过 shell）→ ChildProcess（stdio/env 由调用方给）。 */
+export const spawnArgv = (argv, options) => EXEC_BACKEND.spawnArgv(argv, options);
+
+/** 命令串 → 前台执行（受沙箱）→ { ok, code, out, err }，形状与截断口径与 execLine 逐字相同。 */
+export const execShell = (line, options) => EXEC_BACKEND.execShell(line, options);
+
+/** 命令串 → 后台 detached 起进程（受沙箱）→ ChildProcess，选项与 spawnLine 逐字相同。 */
+export const spawnShell = (line, options) => EXEC_BACKEND.spawnShell(line, options);

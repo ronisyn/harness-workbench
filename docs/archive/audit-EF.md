@@ -49,7 +49,7 @@
 | plan_tasks/plan_done 载体 | 🔶 | `tools/index.js:110-116`（plans 内存 Map）+344-361；事件流展示 `agent.js:556-559` | 纯展示载体：无 DB 持久化、重启即失、无跨轮状态注入（模型靠工具结果自持步骤）→ 与"进度可见"效果弱绑定 |
 | finish_task 自审+提测 | ✅ | `tools/index.js:642-676` | summary/selfCheck 必填语义；驱动器验收钩子驱动（driver.js:156-168） |
 | ralph 循环 | ✅ | `tools/index.js:684-732` | 每轮无历史全新视角、共享 .ralph 记忆文件、DONE/BLOCKED 正则收口、单轮 10 步克制提示 710 |
-| driver 状态机 | ✅ | `driver.js:112-196`：queued→running→candidate_done / need_input / 打回 queued / blocked；runAcceptance 95-104；崩溃恢复 202；MAX_AUTO_ROUNDS=60 186-189；复测确认 API `index.js:948-962`；问询答复 963-983；contract_events 全部 kind 21-23 | 契约验收 DSL（cmd/file-exists/grep/node/kpi）55-93；复测 candidate_done→done 才真完成（蓝图"机器验收真过"闭环） |
+| driver 状态机 | ✅ | `driver.js:112-196`：queued→running→candidate_done / need_input / 打回 queued / blocked；runAcceptance 95-104；崩溃恢复 202；MAX_AUTO_ROUNDS=60 186-189；复测确认 API `index.js:948-962`；问询答复 963-983；contract_events 全部 kind 走 `driver.js` 的 addEvent → `eventlog.js` 的 persistContractEvent（原 21-23） | 契约验收 DSL（cmd/file-exists/grep/node/kpi）55-93；复测 candidate_done→done 才真完成（蓝图"机器验收真过"闭环） |
 | driver/scheduler 无记忆注入 | 📝 | driver ctx `driver.js:141-146`、scheduler ctx `scheduler.js:70-71` 均无 knowledge/goals/conv_skills 查询；注入仅 web 路径 `index.js:371-399` | 无人值守任务不自动带"用户偏好/global 记忆"（可主动 kb_search，但无人提示）→ 交互路径与自动路径记忆不对称；⚠️蓝图标 E 行"跨对话记得偏好"在自动路径打折 |
 | 完成度判定 COMPLETION_HINT | ✅ | 定义 `agent.js:204-208`；每轮尾部去重注入 582-587；完成判定=无工具调用即最终答 390-497 | 平台级 B6/B6b 打回 425-473（防"声称完成无执行"）；F6a 空正文诚实报告 477-484；空答自动摘要兜底 486-496 |
 | loopGuard/F4/budget 护栏 | ✅ | `agent.js:507-527`（loop soft→paused）、564-580（F4 2N 挂起）、348-360（budget-total/min/cap）、383-386（budget-yuan 先停再问）；set_limits 工具 `tools/index.js:773-792` | 护栏全部 settings 可调 0=不限（防失控保险丝语义，agent.js:3-4） |
@@ -57,7 +57,7 @@
 | goals 注入口径 | 📝 | `index.js:371-375` vs `tools/index.js:375-385` vs `tools/meta.js:27-29,75-83` | 注入只带 objective；update_goal 指示状态"completed"非法；update_goal/get_goal 不在默认启用集（见 F6） |
 | O-17 失败不留痕 | 🐛 | catch 路径 `index.js:633-636`：仅 send error+markRun，**不落任何 assistant 消息**（对照成功/中断路径 606-631 均留痕） | 与蓝图 O-17 台账一致（conv184/246 铁证）；批6 待修"异常必落占位消息+已做进度" |
 | O-18 空正文兜底 | ✅ | 三层兜底：F6a 诚实报告 `agent.js:477-484`；工具后空答自动摘要 486-496；入库 '（无输出）' `index.js:595` | 当前已防；批6"最终防线"为增强项非当前缺陷 |
-| 表结构 | ✅ | goals `db.js:201-210` / knowledge 230-239 / conv_skills 222-228 / task_contracts 256-274 / contract_events 275-282 / agent_runs 240-255 / conv_summaries 179-183 / long_jobs 212-220 | 8 表全部在场；task_contracts 含 attempts/last_ask/conv_id/model；knowledge 无 title 唯一约束（应用层去重） |
+| 表结构 | ✅ | goals `db.js:201-210` / knowledge 230-239 / conv_skills 222-228 / task_contracts 256-274 / contract_events 418-427 / agent_runs 240-255 / conv_summaries 179-183 / long_jobs 212-220 | 8 表全部在场；task_contracts 含 attempts/last_ask/conv_id/model；knowledge 无 title 唯一约束（应用层去重） |
 | /api/tasks + /api/contracts | ✅ | `index.js:885-919`（scheduled_tasks CRUD）、927-983（contracts 列表/事件/立项/复测确认/答复） | contracts 支持 accept→done / reject→queued / judge continue；前端面板 🔍待核（web/ 未逐行核） |
 
 ## CLI对照

@@ -70,7 +70,7 @@ export function buildGoldenSection(report, reason = null) {
   if (!report || !Array.isArray(report.shells)) {
     return { skipped: true, reason: reason || '本次没有金标读数（未跑 / 结果文件不存在）', shells: [], identity: null, identityOf: 'none', total: null, passed: null };
   }
-  const items = ([] ).filter((g) => g && g.exists && g.sha1_12);
+  const items = (report.goldenSets || []).filter((g) => g && g.exists && g.sha1_12);
   // 兼容没有 goldenSets 字段的金标报告（例如夹具里手写的替身）：从逐壳的 identity 合成同一形状。
   // **不是**第二套口径：两块数据都来自 golden-report.mjs 的 `goldenIdentityOf`，这里只是换个摆法。
   if (!items.length) {

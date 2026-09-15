@@ -271,9 +271,15 @@ function makeApi(holder, save, { persist }) {
         Object.assign(rec, patch, { updatedAt: nowIso() });
         await commit();
       },
-      /** 死信列表：按 id 倒序（最新在前），可选按 state 过滤；limit 不合法＝不设上限（与 mysql 的 limitClause 同规则）。 */
-      async list({ state = null, limit = 20 } = {}) {
-        let rows = rowsOf('deliveries').filter((r) => (state ? r.state === state : true));
+      /**
+       * 死信列表：按 id 倒序（最新在前），可选按 state / accountId 过滤；
+       * limit 不合法＝不设上限（与 mysql 的 limitClause 同规则）。
+       * `accountId` 与 mysql 侧一样是**过滤条件**（不是取回来再筛）：先按账号过滤、再截窗口，
+       * 否则别人的行会先把窗口占满，调用方看不到自己最近的那几条。
+       */
+      async list({ state = null, limit = 20, accountId } = {}) {
+        let rows = rowsOf('deliveries').filter((r) => (state ? r.state === state : true)
+          && (accountId === undefined || accountId === null ? true : (r.accountId ?? null) === (accountId ?? null)));
         rows = rows.sort((a, b) => b.id - a.id);
         const n = Number(limit);
         if (Number.isInteger(n) && n > 0) rows = rows.slice(0, n);

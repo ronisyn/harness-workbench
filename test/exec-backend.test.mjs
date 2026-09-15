@@ -94,8 +94,14 @@ test('选择点：默认 local；未知后端**如实抛错**，不静默回落'
 
 test('后端不满足接口时在**装配期**就抛（缺动词/缺 id，不等到第一次调用）', () => {
   assert.throws(() => assertBackend('x', { id: 'x', argvFor() {} }), /缺动词 .*execLine/, '少一个动词也不许装起来');
-  assert.throws(() => assertBackend('x', { shellFor() {}, argvFor() {}, execPlan() {}, spawnPlan() {}, execLine() {}, spawnLine() {}, killTree() {}, probe() {} }), /缺 id/);
-  assert.equal(assertBackend('x', { id: 'x', shellFor() {}, argvFor() {}, execPlan() {}, spawnPlan() {}, execLine() {}, spawnLine() {}, killTree() {}, probe() {} }).id, 'x', '满足接口的实现要能装起来');
+  // 2026-09-16（⑯ 拍板＝甲）：接口新增四个 argv 级动词（execArgv/spawnArgv/execShell/spawnShell，⑰ 沙箱的
+  // 接线点）。它们同样是接口的一部分——少一个也不许装起来（断言没放宽，只是跟着接口一起长）。
+  const ARGV_VERBS = { execArgv() {}, spawnArgv() {}, execShell() {}, spawnShell() {} };
+  const impl8 = { id: 'x', shellFor() {}, argvFor() {}, execPlan() {}, spawnPlan() {}, execLine() {}, spawnLine() {}, killTree() {}, probe() {} };
+  assert.throws(() => assertBackend('x', impl8), /缺动词 .*execArgv/, '新增的 argv 级动词少一个也不许装起来');
+  const { id: _omit, ...noId } = { ...impl8, ...ARGV_VERBS };
+  assert.throws(() => assertBackend('x', noId), /缺 id/);
+  assert.equal(assertBackend('x', { id: 'x', ...impl8, ...ARGV_VERBS }).id, 'x', '满足接口的实现要能装起来');
 });
 
 test('RW_EXEC_BACKEND 指到不存在的后端时**进程起不来**（启动即失败，不是运行到一半才发现）', async () => {

@@ -22,11 +22,9 @@
 //   6. shell_readonly_guard（before run_command）—— 读型命令（cat/ls/grep/…）引导用专门工具
 // P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { TOOL_META, PLATFORM_EXEMPT } from './registry.js';
 import { db } from '../db.js';
-const execFileAsync = promisify(execFile);
+import { execArgv } from '../exec/index.js';
 const registry = [];
 const MAX_HOOKS = 128;
 const DEFAULT_TIMEOUT_MS = 2000;
@@ -306,8 +304,9 @@ registerHook('before', 'run_command', 'shell_cd_normalizer', ({ args }) => {
   const m = /^cd\s+([A-Za-z0-9_./~-]+)\s*&&\s*(\S[\s\S]*)$/.exec(cmdline);
   if (!m) return {};
   const rest = m[2].trim();
-  // 只处理**一层**：若剩下的还以 cd 开头（`cd a && cd b && …`），不改写——run_command 是 execFile 直调
-  // （不过 shell），`cd` 是 shell 内建、不是可执行文件，改写后剩下的那个 cd 会在运行期 ENOENT。
+  // 只处理**一层**：若剩下的还以 cd 开头（`cd a && cd b && …`），不改写——read/write 档的 run_command 是
+  // argv 直调（不过 shell，白名单前缀匹配才拦得住第二条命令），`cd` 是 shell 内建、不是可执行文件，
+  // 改写后剩下的那个 cd 会在运行期 ENOENT（full 档走 shell 时才由 shell 解析）。
   if (/^cd(\s|$)/.test(rest)) return {};
   return { args: { ...args, cwd: m[1], cmd: rest } };
 }, { builtin: true, failure: 'open', rewritesArgs: true });
@@ -346,13 +345,28 @@ const CODE_EXT = /\.(js|mjs|cjs)$/;
 //   那一瞬间所有会话的 SSE 流、心跳、别的用户全部停摆。而且同步代码会堵住事件循环，
 //   连 emitHooks 新加的 timeoutMs 都**没机会触发**（定时器要等同步调用返回才轮到）。
 //   改成异步之后：不冻进程，且钩子超时真的能生效。内层 6000 < 钩子 8000，让"命令自己超时"优先。
-const syntaxNote = async ({ args, result }) => {
+const syntaxNote = async ({ args, result, ctx }) => {
   try {
     const p = String((args && args.path) || '');
     if (!CODE_EXT.test(p)) return {};
-    await execFileAsync('node', ['--check', p], { encoding: 'utf8', timeout: 6000, stdio: ['ignore', 'pipe', 'ignore'] });
+    // 起进程一律经执行后端（⑯）：这条 argv 里的路径来自模型（它刚写的文件）⇒ 按 ⑰ 的口径进沙箱，
+    // 权限档取本会话的（ctx 由 execTool 在 after 钩子里原样带进来）。
+    const r = await execArgv(['node', '--check', p], {
+      encoding: 'utf8', timeout: 6000, stdio: ['ignore', 'pipe', 'ignore'],
+      permission: ctx && ctx.permission, workspaceRoot: ctx && ctx.root,
+    });
+    // 失败要按"抛错"报给下面那段既有文案（与 execFile 被 promisify 后的行为同形：e.stderr 就是子进程的 stderr）
+    if (!r.ok) {
+      const e = new Error(r.err || ('spawn node ' + (r.code || 'failed')));
+      e.stderr = r.err;
+      throw e;
+    }
     if (result && typeof result === 'object' && !Array.isArray(result)) result.hookNote = '语法检查通过（node --check）';
   } catch (e) {
+    // 沙箱拒绝执行（RW_SANDBOX_REQUIRED=1 且拿不到 runner）**不是语法错误**：不许把它写成"语法检查失败"
+    // 那句会误导模型的文案（那等于拿一句假结论换掉一次真拒绝）。照旧抛出去，由 emitHooks 按其 failure:'open'
+    // 记一条 hook 失败日志——写得成、只是没做语法检查，如实。
+    if (e && e.code === 'SANDBOX_UNAVAILABLE') throw e;
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       const msg = String((e && e.stderr) || (e && e.message) || e || '').split('\n').filter(Boolean).slice(0, 2).join(' | ').slice(0, 260);
       result.hookNote = '⚠️ 语法检查失败：' + msg + '（请修复后再提交）';

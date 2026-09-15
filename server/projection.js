@@ -26,6 +26,17 @@ const toEvent = (raw) => {
   return { type: String(raw.type || ''), runId: raw.runId != null ? raw.runId : p.runId, payload: p };
 };
 
+// 契约域事实的判据（2026-09-15 修）：`contract_events` 与 `events` **同源**之后（C-39②），契约事实也进这
+// 同一个账本，而且账本 `type` 与契约 `kind` **同值** —— 于是 `type` 分不出"这是契约事实"还是"这是会话帧"
+// （契约 kind 里本就有 `error`/`run_end` 这类与会话帧同名的值）。结构上唯一稳的判据是账本 payload 里带的
+// `contractId`：`server/eventlog.js` 的 `persistContractEvent` 落的就是它在账本里的身份，与
+// `contract_events.contract_id` 同值（即已定稿的那条**追溯判据**）。**不许改成猜 `type` 前缀**：那会让
+// "追溯判据是等式（events.type === contract_events.kind）"这条口径失效。
+const isContractFact = (raw) => {
+  const p = (raw.payload && typeof raw.payload === 'object') ? raw.payload : {};
+  return p.contractId != null;
+};
+
 const runKeyOf = (runId) => (runId == null || runId === '' ? DEFAULT_RUN : 'run:' + runId);
 /** 取当前活动 run：显式 runId 优先（done/run_end 带），否则用 run_start 开的那个。 */
 const activeRun = (state, ev) => (ev.runId != null ? runKeyOf(ev.runId) : state.current);
@@ -144,9 +155,10 @@ export const REGISTRY = new Map(PROJECTIONS.map((d) => [d.key, d]));
 
 /**
  * 折叠一段账本。纯函数：不改 events、不碰 DB、任何事件类型都不抛。
+ * 契约域事实（payload 带 `contractId` 的账本行）**整条跳过**：它们不是会话帧，见 isContractFact。
  * @param {Array<{id?:number, seq?:number, type:string, payload?:object}>} events 账本行（升序）
  * @param {string[]} [keys] 要算的投影 key；缺省=全部
- * @returns {Record<string, any>} key → 状态（另附 `__applied`：实际折叠进去的事件条数）
+ * @returns {Record<string, any>} key → 状态（另附 `__applied`：实际折叠进去的**会话帧**条数）
  */
 export function project(events, keys = PROJECTIONS.map((d) => d.key)) {
   const defs = keys.map((k) => {
@@ -164,6 +176,10 @@ export function project(events, keys = PROJECTIONS.map((d) => d.key)) {
   let applied = 0;
   for (const raw of Array.isArray(events) ? events : []) {
     if (!raw || typeof raw !== 'object') continue;
+    // 契约域事实**不是会话帧**：整条跳过（不折叠、也不计入 __applied —— 它没进过任何投影）。
+    // 为什么必须跳过：折进 outcomes 会凭空写出一条"当前 run 出错"的假结局（`run:-` 一类），
+    // 投影于是开始说谎——而投影的全部价值就是"对账时说的每一条都是账本里真发生过的事"。
+    if (isContractFact(raw)) continue;
     const id = Number(raw.id) || 0;
     const seq = Number(raw.seq) || 0;
     if (id > 0) { if (seenIds.has(id)) continue; seenIds.add(id); }

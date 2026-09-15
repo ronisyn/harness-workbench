@@ -35,7 +35,7 @@
 
 | 核对点 | 证据 | 判定 |
 |---|---|---|
-| 表数量 | db.js:39-283 SCHEMA 数组 = **23 张表**（accounts/sessions/invites/conversations/messages/audit_log/capabilities/providers/models/market_snapshot/usage_stats/tool_calls/price_table/settings/conv_summaries/scheduled_tasks/goals/long_jobs/conv_skills/knowledge/agent_runs/task_contracts/contract_events），非 28；另有 8 条 ALTER 迁移(290-300)+3 个 settings 种子(306-310) | 📝 实为 23 表；28 为误记（或含服务器侧手工建的视图/表） |
+| 表数量 | db.js:108-573 SCHEMA 数组 = **23 张表**（accounts/sessions/invites/conversations/messages/audit_log/capabilities/providers/models/market_snapshot/usage_stats/tool_calls/price_table/settings/conv_summaries/scheduled_tasks/goals/long_jobs/conv_skills/knowledge/agent_runs/task_contracts/contract_events），非 28；另有 8 条 ALTER 迁移(290-300)+3 个 settings 种子(306-310) | 📝 实为 23 表；28 为误记（或含服务器侧手工建的视图/表） |
 | boot 自检 | initSchema 幂等建表+迁移+种子（db.js:285-315）→ main()：ensureAdmin、providers/模型目录同步、重启自检 interruptStaleOnBoot 遗留 running→interrupted（index.js:1031-1032）、long_jobs 24h stale 清理+日志活跃探测(1033-1049)、scheduler/driver/MCP client+60s 看门狗(1050-1082)、微信/飞书渠道(1083-1090) | ✅ 启动自检闭环在位（无落库自检清单，仅 console 日志） |
 | 种子值注释不一致 | db.js:304-305 注释"任务总账默认 30"，实际 SEEDS task_budget_total='100'（db.js:309），agent.js 回退值 budgetTotal:100（agent.js:159） | 🐛 注释过期（30 vs 100） |
 

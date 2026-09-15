@@ -83,6 +83,17 @@ test('两条路径都要建归档表（存量库走迁移、新库走 SCHEMA，�
   assert.match(read('server/index.js'), /archiveOldEvents/, '必须接到既有清理入口（不清 = 表照样无界增长）');
 });
 
+// 机检：本文件的形状（真库探测**不许**在模块顶层 await）。为什么非有它不可：那种坏形态在读数里只表现为
+// "数字变小"，没有任何一条断言会红 ⇒ 不机检的话，下一个"顺手简化"回去的人不会被拦住。
+// **它必须登记在真库探测之前**（这条不是风格）：顶层 await 会把它后面注册的一切都吞掉，包括机检自己 ——
+// 实测把探测改回顶层 await 时，放在它后面的机检连跑都跑不到（读数仍是 4 条 / skipped 0，看不出红）。
+test('机检：真库探测不许在模块顶层 await（否则那条测试来不及登记，读数少一条却报 skipped 0）', () => {
+  const src = read('test/eventlog-archive.test.mjs');
+  const topLevelAwait = src.split(/\r?\n/).filter((l) => l === l.trimStart() && /^(?:await\b|(?:const|let|var)\s+\w+\s*=\s*await\b)/.test(l));
+  assert.deepEqual(topLevelAwait, [], '顶层 await 会让它后面的 test() 在 --test-force-exit 下根本没被登记：' + topLevelAwait.join(' / '));
+  assert.match(src, /await dbReachable\(\)/, '真库可达性探测必须在测试体内（先登记，再决定跑或如实 skip）');
+});
+
 // ── 真库：自己造的 100 天前行，验证"归档 → 删除"真的走通 ────────────────────────────────────
 // 只用 conversation_id = 负哨兵造数据、只按这个 id 清理；**绝不动真实事件数据**。
 // 阈值用库的 NOW() 比较（不拿 JS 本地时间推断，时区/时钟偏差都不会把结论带歪）。
@@ -92,10 +103,20 @@ test('两条路径都要建归档表（存量库走迁移、新库走 SCHEMA，�
 const SENTINEL = -990004701;
 const fmt = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
 const myRows = async (tbl) => (await pool.query(`SELECT COUNT(*) c FROM ${tbl} WHERE conversation_id=?`, [SENTINEL]))[0][0].c;
-const dbReachable = await (async () => { try { await pool.query('SELECT 1'); return true; } catch { return false; } })();
-const skipNoDb = dbReachable ? false : '真库不可达（CI 无 MySQL；本地隧道开着时应跑这条）';
 
-test('真库：100 天前的行被搬进 events_archive 并从 events 删除（阈值内的行不动）', { skip: skipNoDb }, async () => {
+// 可达性探测**必须留在测试体内**（2026-09-15 修；原实现是模块顶层 `await pool.query('SELECT 1')`）：
+//   为什么顶层不行：本仓基线命令是 `node --test --test-force-exit`。已登记的测试一跑完，运行器就结束进程，
+//   **顶层 await 的续体根本没机会恢复** ⇒ 它后面那条 `test(...)` 从未被登记：读数只剩 4 条、`# skipped 0`。
+//   那不是"跳过"，是"少了一条却看不出来"——比红更坏（绿得没有依据）。放进体内则：测试**先登记**，
+//   跑不跑由体内探测决定，读数里永远看得见"这条没跑，因为无库"。
+// 不另加超时阈值：连不上时 mysql2 自己的 connectTimeout（默认 10s）就把探测收敛成 reject，够用。
+const dbReachable = async () => {
+  try { await pool.query('SELECT 1'); return true; } catch { return false; }
+};
+
+test('真库：100 天前的行被搬进 events_archive 并从 events 删除（阈值内的行不动）', async (t) => {
+  if (!(await dbReachable())) return t.skip('真库不可达（CI 无 MySQL；本地隧道开着时应跑这条）');
+
   const cleanup = async () => {
     await pool.query('DELETE FROM events WHERE conversation_id=?', [SENTINEL]);
     await pool.query('DELETE FROM events_archive WHERE conversation_id=?', [SENTINEL]);

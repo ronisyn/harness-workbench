@@ -5,10 +5,9 @@
 // 凭据（C-18）：env 里的密钥**不在这里读明文**——settings 里存的是引用（`__CRED__:NAME`），
 //   真值只有 `server/credentials.js` 一条路能取到；老配置里还裸着的明文由它按"键名同名凭据"兼容解析。
 // 安全：MCP server 由管理员配置（settings）；其工具以 mcp_<serverId>_<tool> 名前缀注册，受统一权限/纪律层约束。
-import { spawn } from 'node:child_process';
 import { db } from './db.js';
 import { readMcpConfig, resolveEnv, redactSecretValues } from './credentials.js';
-import { RW_OS } from './env.js';
+import { spawnArgv } from './exec/index.js';
 import { PROTOCOL_VERSION } from './mcp-version.js'; // 两个方向（客户端/服务端）说同一个协议版本，单一出处
 
 const clients = new Map(); // serverId -> { proc, reqId, pending: Map<id,{resolve,reject}>, buf, tools: [] }
@@ -55,12 +54,16 @@ async function listAllTools(cl) {
 // 连接（spawn 子进程 + 初始化握手 + tools/list）
 export async function connectMcp(id, command, args = [], env = {}) {
   if (clients.has(id)) return { ok: true, note: '已连接' };
-  const proc = spawn(command, args, {
+  const proc = await spawnArgv([command, ...args], {
     env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'],
     // Windows：npm/npx 只有 .cmd 形式，spawn 直呼必然 ENOENT（显式写 .cmd 在 Node 22 上还会 EINVAL）。
-    // 过 shell 让 PATHEXT 解析生效；这里用 Node 的 shell:true（Windows 上就是 cmd /d /s /c）而不是
-    // PowerShell：MCP 是 JSON-RPC 字节流，cmd 只做透传，PowerShell 会按自己的格式化规则改写子进程输出。
-    ...(RW_OS === 'win32' ? { shell: true } : {}),
+    // 这里只**声明意图**（`shell:'passthrough'`＝"这条 argv 需要 shell 透传"），"哪个平台需要"由执行后端
+    // 回答（v0.3 §5：平台事实只落在执行后端）——此前那句 `RW_OS === 'win32'` 是引擎层里第二份平台判据。
+    // 为什么仍是 cmd 而不是 PowerShell：MCP 是 JSON-RPC 字节流，cmd 只做透传，PowerShell 会按自己的
+    // 格式化规则改写子进程输出。
+    shell: 'passthrough',
+    // MCP 命令来自 settings（管理员配置），模型碰不到 ⇒ 按 ⑰ 的口径声明沙箱例外（见 server/exec/local.js）
+    sandbox: 'off',
   });
   const cl = { proc, reqId: 0, pending: new Map(), buf: '', tools: [] };
   clients.set(id, cl);

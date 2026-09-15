@@ -30,8 +30,10 @@
 //     · "加新功能"落在最后（第 3 档），排在**已判否**之后 —— 因为已判否至少还是"落在三条判据的射程里"的提案，
 //       而"加新功能"是判据明确要说"让让"的那一类。
 import { ROOT } from '../config.js';
-import { SNAPSHOT_SCHEMA } from './collect.js';
+import { SNAPSHOT_SCHEMA, looksLikeConnectionError } from './collect.js';
 import { CRITERIA } from './priority.js';   // §0.4 三条判据的键**只有一个出处**（priority.js），这里引用不复制
+// 转出采集侧的"库根本读不到"口径（release / 门禁 CLI 用同一句判断，不许各写一份正则）
+export { looksLikeConnectionError };
 
 // ── ① 优先级判据 → 名次 ─────────────────────────────────────────────────────────────────
 /** 三条判据的键（**引用 `priority.js`，不复制**）：名次判定要逐条看"判成什么" */

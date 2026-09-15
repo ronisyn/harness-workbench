@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recallLessons, LESSON_CANDIDATE_SQL, pickLessons } from '../server/lessonrecall.js';
 import { capabilityManifest, DATA_EGRESS, ENFORCEMENT_VALUES } from '../server/capabilities.js';
+import { listDeliveries, MAX_LIST } from '../server/deliveries.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -69,4 +70,34 @@ test('注入层的代码里不再有"不带账号过滤的错题查询"（源码
   const idx = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
   assert.ok(!/FROM reviews WHERE result='bug'/.test(idx), 'SQL 不该再留在 index.js 里手拼');
   assert.match(idx, /recallLessons\(db, \{ accountId: req\.user\.id/, '注入点必须用带账号过滤的那个入口');
+});
+
+// ── 同一个边界的第二条路：死信列表 `GET /api/deliveries`（C-49，2026-09-16 补）────────────────────
+// 缺口原文：该路由只有 `requireAuth`，而 `listDeliveries` 的查询**没有任何账号维度** ⇒ 任何登录账号
+// 都能读到别人的 idemKey / conversationId / lastError / messageId / runId。收口口径照本文件那条老规矩：
+// **按调用者账号过滤**（全仓没有管理员角色/中间件，也没有跨账号运营视图，所以不发明一个）。
+test('死信列表按账号**下推**到介质（不是取回来再在内存里筛）', async () => {
+  const seen = [];
+  const store = { deliveries: { list: async (q) => { seen.push(q); return []; } } };
+  await listDeliveries({ state: 'failed', limit: 5, accountId: 42, store });
+  assert.deepEqual(seen, [{ state: 'failed', limit: 5, accountId: 42 }],
+    '账号必须跟着查询一起到介质：只有落进 WHERE account_id=?，LIMIT 窗口才是"我的最近几条"；'
+    + '在内存里事后筛等于先把别人的行算进窗口，我自己的死信反而会被挤掉');
+  assert.equal(MAX_LIST, 100, '窗口上限仍是接口自己那个值（收口不许顺手改它）');
+});
+
+test('不传账号＝不筛：默认行为不变，收口由调用方显式决定', async () => {
+  const seen = [];
+  const store = { deliveries: { list: async (q) => { seen.push(q); return []; } } };
+  await listDeliveries({ limit: 5, store });
+  assert.deepEqual(seen, [{ state: null, limit: 5, accountId: undefined }], '不传就是 undefined，介质据此不加账号条件');
+});
+
+test('路由那一行必须把调用者账号传下去（这条是源码锁；行为面由上面两条 + 真库夹具覆盖）', () => {
+  const idx = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  const at = idx.indexOf("app.get('/api/deliveries'");
+  assert.ok(at > 0, '路由必须还在（改名要连带改这条）');
+  const body = idx.slice(at, idx.indexOf('});', at));
+  assert.match(body, /listDeliveries\(\{[^}]*accountId:\s*req\.user\.id/s,
+    '该路由必须显式传调用者账号：漏掉这一行就是"任何登录账号都能读别人的投递记录"');
 });

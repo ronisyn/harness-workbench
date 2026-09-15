@@ -858,9 +858,17 @@
         {
           "file": "test/session-export.test.mjs",
           "pattern": "版本不认识"
+        },
+        {
+          "file": "server/session-export.js",
+          "pattern": "export function registerSessionMigration("
+        },
+        {
+          "file": "test/session-format-migration.test.mjs",
+          "pattern": "registerSessionMigration"
         }
       ],
-      "note": "**2026-09-16 落地**：照 DSH `dsh-session-format` 的**语义四条**（版本字段 / 相邻步 / **不认识的版本显式拒绝** / 当前版本不走迁移），不照搬其物理形态（JSONL + 文件名带版本 + ZIP 会话树）。导入**默认 dry-run**，真写时一个事务整份落地且绝不覆盖源会话；列清单取自真库 information_schema，导出 SELECT 与导入 INSERT 共用一份清单。真机：导出会话 718（12KB）与 184（3.7MB）成功；写路径用 `EXPLAIN` 交真 MySQL 解析（**一行未写**，前后五张表行数完全一致）。"
+      "note": "**2026-09-16 落地**：照 DSH `dsh-session-format` 的**语义四条**（版本字段 / 相邻步 / **不认识的版本显式拒绝** / 当前版本不走迁移），不照搬其物理形态（JSONL + 文件名带版本 + ZIP 会话树）。导入**默认 dry-run**，真写时一个事务整份落地且绝不覆盖源会话；列清单取自真库 information_schema，导出 SELECT 与导入 INSERT 共用一份清单。真机：导出会话 718（12KB）与 184（3.7MB）成功；写路径用 `EXPLAIN` 交真 MySQL 解析（**一行未写**，前后五张表行数完全一致）。**2026-09-16 补（v0.3 §7.1 ⑪「迁移链」那半句）**：此前只有「版本不认识就拒绝」，没有任何地方能写「v0 怎么变成 v1」；现补上注册点 `registerSessionMigration`（注册时强制相邻步 `to===from+1`）+ 启动校验链连续无缺口（缺步即抛，口径同 `migrations.js` 的 `validateChain`）+ 导入时**先按链逐步迁移再导入**（链缺步显式报错，绝不按当前版本硬读）。当前只有 v1 ⇒ **链为空是合法状态**（首版、无迁移步）。夹具 `test/session-format-migration.test.mjs`（11 条，含合成 v0→v1 证明迁移通路与跳步/缺口/多余步负例）。"
     },
     {
       "id": "RA-50",

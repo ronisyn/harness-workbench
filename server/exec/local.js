@@ -100,6 +100,92 @@ export function spawnLine(line, opts = {}) {
   return spawn(command, args, options);
 }
 
+// ---- argv 级动词（2026-09-16 新增；既有八个动词的签名与语义一字未动）--------------------------
+// 为什么要有这一族：工具层的调用点有一半收的是**已成形的 argv**（git_*、node --check、MCP 子进程、自我重启、
+// runtrack 的 git 例行、模板库 git 同步…），它们从不过 shell，用"命令串"动词（execLine/spawnLine）表达不了；
+// 而 ⑰ 的沙箱接缝正是 argv 级（`confine(argv)`）——argv 必须先到这一层、再进 runner、最后 execFile。
+// 四个动词按「输入形状 × 前台/后台」分：
+//   execShell / spawnShell —— 收命令串（模型写的 shell 语法），argv 由 argvFor 成形，沙箱插在成形之后；
+//                            返回形状与截断/超时口径与 execLine/spawnLine **逐字相同**（调用方不必改读法）。
+//   execArgv  / spawnArgv  —— 收成形 argv（不过 shell），调用方自带 execFile/spawn 选项，输出**不截断**
+//                            （各调用点自己那套截断口径保持原样，本层不新造第二套）。
+// 沙箱口径（v0.3 §4.6 + ⑰ 的策略层；"谁进沙箱"按 argv 是否可能由模型影响分，不新造维度）：
+//   · 默认＝进 `confine()`；`sandbox: 'off'` 是**例外**，只给"argv 来自部署配置、模型碰不到"的基础设施进程
+//     （自我重启 / MCP 子进程 / runtrack 的 git 例行 / 模板库 git 同步）——对部署方自配的进程加隔离，
+//     只会把平台弄坏，不增加"模型能影响的那部分执行"的防护。
+//   · `shell: 'passthrough'` 是**声明的意图**而不是平台判据：Windows 上 npm/npx 只有 .cmd 形式，必须经 shell
+//     透传；由本层按平台决定用不用 `shell:true`（v0.3 §5：平台事实只落在执行后端）。
+//   · 降级时不打扰调用方：**返回值不加任何字段**（那会改模型可见形状），reason 只走 ⑰ 的降级账。
+let sandboxPromise = null;
+function loadSandbox() {
+  // 按需装载：sandbox 模块在加载期会起一次探针、往 stderr 打一行；不该由"只是 import 了 exec"的进程承担
+  // （exec 被夹具、脚本、启动链到处 import，而这些进程多数从不执行任何命令）。
+  if (!sandboxPromise) sandboxPromise = import('../sandbox/index.js');
+  return sandboxPromise;
+}
+
+// 一次 argv 的沙箱包装：内层 argv → （可能的）runner 包装后的 argv；拿不到 runner 时原样返回（迁移期口径见 ⑰ 头注释）。
+async function confinedArgv(argv, { permission, workspaceRoot, sandbox: intent, platform } = {}) {
+  if (intent === 'off') return argv; // 例外：部署方自己配的基础设施进程
+  const svc = await loadSandbox();
+  const c = svc.confine(argv, { permission, workspaceRoot, platform });
+  // 拿不到 runner、且**不是**"权限档按设计就不沙箱"⇒ 这是一次真降级：落 ⑰ 的降级账（去重由它的 once 管）。
+  // 刻意不 await：留痕不该挡执行；`reason` 也不回传给调用方（不往工具结果里加字段）。
+  if (c.enforcement === 'none' && c.mode !== 'full-access') {
+    Promise.resolve(svc.noteDegrade({ permission, root: workspaceRoot }, { reason: c.reason })).catch(() => { /* 留痕失败不改判执行 */ });
+  }
+  return c.argv;
+}
+
+/** 成形 argv → 前台执行（不过 shell）。返回 { ok, code, out, err }，输出原样（截断归调用方）。 */
+export async function execArgv(argv, { permission, workspaceRoot, sandbox: intent, platform, ...execOpts } = {}) {
+  const [command, ...args] = await confinedArgv(argv.map(String), { permission, workspaceRoot, sandbox: intent, platform });
+  return new Promise((resolve) => {
+    // 刻意**不挂** 'error' 监听：带回调时 execFile 把启动失败（含 ENOENT）也交给回调，多挂一个只会与回调
+    // 抢同一个 Promise 的第一次 resolve —— 改造前那几个调用点就是不带监听的，形状保持一致。
+    execFile(command, args, execOpts, (err, stdout, stderr) => {
+      resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || ''), err: String(stderr || '') });
+    });
+  });
+}
+
+/** 成形 argv → 后台起进程（不过 shell）→ ChildProcess（stdio/env/shell 由调用方给；`shell:'passthrough'` 见上）。 */
+export async function spawnArgv(argv, { permission, workspaceRoot, sandbox: intent, platform, shell, ...spawnOpts } = {}) {
+  const [command, ...args] = await confinedArgv(argv.map(String), { permission, workspaceRoot, sandbox: intent, platform });
+  const options = { ...spawnOpts };
+  if (shell === 'passthrough') { if ((platform || RW_OS) === 'win32') options.shell = true; }
+  else if (shell !== undefined) options.shell = !!shell;
+  return spawn(command, args, options);
+}
+
+/** 命令串 → 前台执行（受沙箱）。形状/截断/超时口径与 execLine **逐字相同**，只是 argv 过了 `confine()`。 */
+export async function execShell(line, { permission, workspaceRoot, sandbox: intent, platform, ...opts } = {}) {
+  const plan = execPlan({ line, ...opts, platform });
+  const [command, ...args] = await confinedArgv([plan.command, ...plan.args], { permission, workspaceRoot, sandbox: intent, platform });
+  const shellName = shellFor(platform).name;
+  return new Promise((resolve) => {
+    const ch = execFile(
+      command,
+      args,
+      plan.options,
+      (err, stdout, stderr) => {
+        let e = clip(stderr, 2000);
+        // 超时语义与 execLine 一致：终止的是我们起的那个 shell 进程；Windows 上它拉起的子进程可能仍在。
+        if (err && err.killed) e = (e ? e + '\n' : '') + '[超时] 命令已被终止（shell 已杀；Windows 上被它拉起的子进程可能仍在，必要时用 taskkill /IM <名> /F 清理）';
+        resolve({ ok: !err, code: err?.code ?? 0, out: clip(stdout, 8000), err: e });
+      },
+    );
+    ch.on('error', (e) => resolve({ ok: false, code: e.code ?? 1, out: '', err: 'shell 启动失败（' + shellName + '）: ' + e.message }));
+  });
+}
+
+/** 命令串 → 后台 detached 起进程（受沙箱）。选项/形状与 spawnLine **逐字相同**。 */
+export async function spawnShell(line, { permission, workspaceRoot, sandbox: intent, platform, ...opts } = {}) {
+  const plan = spawnPlan({ line, ...opts, platform });
+  const [command, ...args] = await confinedArgv([plan.command, ...plan.args], { permission, workspaceRoot, sandbox: intent, platform });
+  return spawn(command, args, plan.options);
+}
+
 // 杀进程树（现状的第二个平台分叉点：它原先写在 tools/index.js 的 kill_process 里）。
 // 为什么是一个动词而不是"给 pid 发个信号"：Windows 上没有真信号——process.kill 一律强杀且**不收敛子树**，
 // 而后台任务是 detached 起的一整棵树，所以 Windows 侧必须走 `taskkill /T /F`。这个差异由后端吸收，

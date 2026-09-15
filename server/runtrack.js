@@ -2,10 +2,10 @@
 // 每个会话一条 agent_runs：running → completed | interrupted | paused
 // 服务启动时把遗留 running 标为 interrupted（重启自检）；下次用户消息注入"上次任务现场"提醒，
 // 模型基于持久化历史 + 现场信息从断点继续；循环检测不再杀任务而是 soft 提示→仍无效则 paused 挂起
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { db } from './db.js';
 import { RW_WORKSPACE } from './env.js';
+import { execArgv } from './exec/index.js';
 
 // P16 唤醒包（2026-09 批1）：恢复任务时注入工作区 git 状态摘要——模型知道"改到哪、脏区在哪、HEAD 在哪"，
 // 避免恢复后盲目重读/重做或误判现场。工作区非 git 仓库/不可读时静默返回空（不阻塞恢复）。
@@ -14,15 +14,18 @@ import { RW_WORKSPACE } from './env.js';
 //   而它是**在 /api/chat 的请求路径上**被 await 调用的 ⇒ 同步子进程会把**整个 Node 进程**冻住
 //   （不是只冻这一个请求：所有会话的 SSE 流、心跳、其它用户全部停摆），最坏 9 秒。
 //   这是"单个请求能冻全站"的一类真问题，统一改成异步（请求路径上禁止同步子进程，见夹具 invariant）。
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-const execFileAsync = promisify(execFile);
-
+// 2026-09-16（⑯）：改走执行后端的 argv 动词。这条 git 例行是**平台自己发起**的维护（恢复现场时取一次状态），
+//   argv 里没有模型给的东西 ⇒ 按 ⑰ 的口径声明 `sandbox:'off'` 例外（对部署方自配的进程加隔离只会把平台弄坏）。
 async function gitStateSummary() {
   const ws = RW_WORKSPACE;
   try {
     if (!fs.existsSync(ws)) return '';
-    const run = async (args) => String((await execFileAsync('git', ['-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })).stdout || '').trim();
+    const run = async (args) => {
+      const r = await execArgv(['git', '-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], sandbox: 'off' });
+      // 与改造前同形：非零退出按"抛错"处理（外层 catch 一律静默返回空摘要，不阻塞恢复）
+      if (!r.ok) throw new Error(r.err || ('git 退出 ' + r.code));
+      return String(r.out || '').trim();
+    };
     const head = await run(['rev-parse', '--short', 'HEAD']);
     const status = await run(['status', '--short']);
     const lines = status.split('\n').filter(Boolean).slice(0, 15); // 脏区最多列 15 行，防摘要过长

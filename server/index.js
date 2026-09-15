@@ -52,6 +52,7 @@ import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
 import { STORAGE_UNSUPPORTED } from './storage/index.js'; // v0.3 §7.1 ⑦：存储实现"能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）
 import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
+import { execArgv, spawnArgv } from './exec/index.js'; // ⑯：起进程一律经执行后端（argv 级动词；平台判据与沙箱都在那一层）
 import { wrapAsyncHandlers } from './asyncwrap.js'; // Express 4 的 async 处理器兜底（出错 500，不再挂住请求）
 
 const app = express();
@@ -77,12 +78,13 @@ async function maybeSelfRestart() {
   console.log('[rw] 自我重启请求:', reason, '—— 2 秒后执行（等当前回复落库）');
   setTimeout(async () => {
     try {
-      const { execFile } = await import('node:child_process');
       const plan = restartPlan();
       if (!plan.argv) { console.error('[rw] 已收到重启请求，但本机没有可用方式：' + plan.hint); return; }
       const [file, ...args] = plan.argv;
-      const ch = execFile(file, args, { detached: true, stdio: 'ignore' });
-      // 必须挂 'error'：execFile 找不到可执行文件时抛的是**异步 error 事件**，try/catch 抓不到，
+      // argv 来自部署配置（restart.js 从 RW_RESTART_CMD 或平台默认命令推导），模型碰不到 ⇒ 声明沙箱例外，
+      // 但仍经执行后端起进程（⑯：起进程只有一个地方；平台判据与 stdio/detached 语义都归那一层）。
+      const ch = await spawnArgv([file, ...args], { detached: true, stdio: 'ignore', sandbox: 'off' });
+      // 必须挂 'error'：找不到可执行文件时抛的是**异步 error 事件**，try/catch 抓不到，
       // 没有监听器就会以未捕获异常带走整个进程（与 MCP spawn ENOENT 同款坑，见 C-16）。
       ch.on('error', (e) => { console.error('[rw] 自动重启失败（' + plan.how + '）:', e.message, '—— 请手动重启服务'); });
       ch.unref();
@@ -460,10 +462,14 @@ app.post('/api/conversations/import', requireAuth, async (req, res) => {
 
 // D4/RA-42 死信落点：失败的投递记录（`state=failed`）＝"没做完的外部调用"。只读、不自动重试——
 // 重放＝用同一个 Idempotency-Key 重发 POST /api/chat（不另造重放 API，避免两套入口两套语义）。
+// 按**调用者账号**收口（C-49，2026-09-16）：这个列表是"**我**没做完的外部调用"，不是跨账号汇总。
+// 不加过滤时任何登录账号都能读到别人的 idemKey / conversationId / lastError / messageId / runId
+// —— 与 D3/OP-01「读接口按账号过滤」同一条边界（本文件其余读接口都是 `WHERE account_id=?` + req.user.id，
+// 见 :321/:758）。全仓没有管理员角色或跨账号视图，所以这里不发明一个。
 app.get('/api/deliveries', requireAuth, async (req, res) => {
   try {
     const state = req.query.state ? String(req.query.state) : null;
-    const rows = await listDeliveries({ state, limit: req.query.limit });
+    const rows = await listDeliveries({ state, limit: req.query.limit, accountId: req.user.id });
     res.json({ ok: true, deliveries: rows });
   } catch (e) { res.status(500).json({ ok: false, code: 'INTERNAL', message: e.message }); }
 });
@@ -2412,20 +2418,30 @@ async function syncTemplateGit(relPath, msg) {
   //   而 git push 是**网络操作**——慢的时候会把整个 Node 进程冻住几十秒，所有会话一起卡死。
   //   同一个类的问题在请求路径上还有两处（syntax-check 钩子、resumeHint 的 git 状态），一并改成异步；
   //   夹具 test/no-sync-subprocess.test.mjs 会把"同步子进程"钉死在 server/ 里不许再加。
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const run = promisify(execFile);
   const opts = { cwd: ROOT, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] };
-  await run('git', ['add', relPath], opts);
+  // 这条 git 例行是平台自己的模板库同步（argv 来自平台内部路径与提交信息，模型碰不到）⇒ 声明沙箱例外；
+  // 但仍经执行后端起进程（⑯）。失败按"抛错"报出，形状与改造前 promisify(execFile) 一致（e.stdout/e.stderr 都在）。
+  const run = async (args) => {
+    const r = await execArgv(['git', ...args], { ...opts, sandbox: 'off' });
+    if (!r.ok) {
+      const e = new Error('Command failed: git ' + args.join(' ') + (r.err ? '\n' + r.err : ''));
+      e.stdout = r.out;
+      e.stderr = r.err;
+      e.code = r.code;
+      throw e;
+    }
+    return r;
+  };
+  await run(['add', relPath]);
   let committed = true;
   try {
-    await run('git', ['commit', '-m', msg], opts);
+    await run(['commit', '-m', msg]);
   } catch (e) {
     const out = String(e && e.stdout || '');
     if (/nothing to commit|no changes added/.test(out)) committed = false;
     else throw new Error('git commit 失败: ' + out.slice(0, 200));
   }
-  if (committed) await run('git', ['push', 'origin', 'main'], opts);
+  if (committed) await run(['push', 'origin', 'main']);
   return committed;
 }
 

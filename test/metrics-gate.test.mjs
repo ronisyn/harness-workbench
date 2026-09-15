@@ -365,18 +365,43 @@ test('㉔-⑥b CLI 契约：缺报告时 metrics-gate 退出码 1 且说"禁止�
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // ⑦ 接线：release 里必须在阻断路径上（静态断言，锚点式机检的既有做法）
 // ═══════════════════════════════════════════════════════════════════════════════════════
-test('㉔-⑦ 接线：release.mjs 里指标门禁走 step()，且金标档与指标门禁**各管一段**', () => {
+test('㉔-⑦ 接线：release.mjs 必须把这一步接在阻断路径上，且"变差"不许进布尔', () => {
   const rel = read('scripts/release.mjs');
-  assert.match(rel, /server\/selfeval\/regression-gate\.js/, 'release 必须用 ㉔ 的门禁实现');
-  assert.match(rel, /scripts\/metrics-report\.mjs|'\.\/metrics-report\.mjs'/, 'release 必须产出指标报告');
-  const name = /const METRICS_STEP = '([^']+)'/.exec(rel);
-  assert.ok(name, 'release.mjs 必须把这一步的名字写成常量（夹具据此断言它在阻断路径上）');
-  assert.match(rel, /step\(METRICS_STEP, !reg\.gateBlocks\(g\)/, '判定结果必须交给 step(...)（复用既有布尔守卫）');
-  assert.match(rel, /gateBlocks/, '必须用三态出口，不许自己写布尔表达式绕过');
+  assert.match(rel, /'\.\/metrics-gate-step\.mjs'/, 'release 必须调第 2.7 步本体（脚本顶层 await：不能 import 它本身做验证）');
+  assert.match(rel, /register:\s*step/, '判定结果必须交给 release 的 step()（复用既有布尔守卫）');
+  const stepMod = read('scripts/metrics-gate-step.mjs');
+  const name = /export const METRICS_STEP = '([^']+)'/.exec(stepMod);
+  assert.ok(name, '步骤名必须是常量（夹具据此断言它确实在阻断路径上）');
+  assert.match(stepMod, /server\/selfeval\/regression-gate\.js/, '必须用 ㉔ 的门禁实现（不许自己另写一套判定）');
+  assert.match(stepMod, /gateBlocks\(gate\)/, '必须用三态出口，不许自己写布尔表达式绕过');
   assert.match(rel, /if \(fail\.length\)[\s\S]{0,120}process\.exit\(1\)/, 'fail 非空即退出码 1（既有机制）');
-  // 不许把变差直接塞进 step 的布尔里（那等于偷偷设了一条线）
-  assert.ok(!/step\(METRICS_STEP,\s*(?:!?\s*)?(?:degraded|diff)\b/.test(rel), 'step 的布尔只能来自门禁三态，不许来自"变差条数"');
-  assert.match(rel, /只报数不设线/, '这一步必须写明"变差只报数不设线"');
+  // 不许把变差直接塞进 register 的布尔里（那等于偷偷设了一条线）
+  assert.ok(!/register\([^)]*(?:degraded|diff)\b/.test(stepMod), 'register 的布尔只能来自门禁三态，不许来自"变差条数"');
+  assert.match(stepMod, /只报数不设线/, '这一步必须写明"变差只报数不设线"');
+  assert.match(rel, /只报数不设线/, 'release 的这一步注释也要写明（读 release 的人看不到 step 模块）');
+});
+
+test('㉔-⑦b 步本体可独立跑（结论照样登记；"跳过"绝不登记成"判定通过"）', async () => {
+  const { metricsGateStep, METRICS_STEP: NAME } = await import('../scripts/metrics-gate-step.mjs');
+  const seen = [];
+  // `register` 是 release 的 step()：这里用替身接住（**不跑 release.mjs** —— 它有 vite build 等一堆前置）。
+  // 不断言 verdict（它取决于本机有没有历史基线）：断言的是**契约**——恰好登记一步、布尔、且与三态出口一致。
+  const r = await metricsGateStep({
+    days: 7, quiet: true, goldenReport: null,
+    register: (name, ok, extra) => { seen.push({ name, ok, extra }); },
+  });
+  assert.equal(seen.length, 1, '必须恰好登记一步');
+  assert.equal(seen[0].name, NAME);
+  assert.equal(typeof seen[0].ok, 'boolean', 'release 的 step() 只收布尔（非布尔会抛 TypeError）');
+  if (r.dbUnavailable) {
+    // 读不到库：如实跳过（不阻断）——但理由里必须写清"跳过不等于通过"
+    assert.equal(seen[0].ok, true);
+    assert.match(String(seen[0].extra), /跳过不等于通过/);
+    assert.equal(r.gate.verdict === GATE_VERDICT.PASS, false, '没得判 ⇒ 结论不可能是 pass');
+  } else {
+    // 有报告可判：登记的布尔必须**就是**三态出口的结果（不许自己另写一个表达式）
+    assert.equal(seen[0].ok, !gateBlocks(r.gate), 'register 的布尔必须来自 gateBlocks（三态出口）');
+  }
 });
 
 test('㉔-⑦b 白名单与三态：路径可取值、判定出口只有三个字面量', () => {

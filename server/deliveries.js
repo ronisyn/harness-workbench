@@ -97,9 +97,15 @@ export async function finishDelivery(id, { state, messageId = null, runId = null
 }
 
 // 死信落点：`state=failed` 的那些就是"没做完的外部调用"，由人看列表决定要不要用同一个键重发
-export async function listDeliveries({ state = null, limit = 20, store = storage } = {}) {
+//
+// `accountId` 是**可选**的账号过滤（2026-09-16 补，冲突登记 C-49）：死信列表的预期读者是**发起这次投递的那个账号**
+// ——"我这轮没做完的外部调用，要不要用同一个幂等键重发"。传了就**下推到介质**（SQL 的 `WHERE account_id=?`；
+// JSON 实现先按账号筛再截窗口），没传就保持既有行为（无账号维度）—— 默认不变，收口由调用方显式决定。
+// 为什么必须下推而不是取回来再筛：`LIMIT` 是**先截窗口再交给调用方**的，别人的新行会把我自己的行挤出窗口，
+// 于是"我的列表里看不到我的死信"——那是比越权更隐蔽的错。
+export async function listDeliveries({ state = null, limit = 20, store = storage, accountId } = {}) {
   const lim = Math.min(MAX_LIST, Math.max(1, Number(limit) || 20));
-  const rows = await store.deliveries.list({ state, limit: lim });
+  const rows = await store.deliveries.list({ state, limit: lim, accountId });
   return rows.map((r) => ({
     id: String(r.id), conversationId: r.conversationId, idemKey: r.idemKey, state: r.state,
     attempts: Number(r.attempts || 0), messageId: r.messageId, runId: r.runId,

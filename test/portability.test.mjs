@@ -137,7 +137,7 @@ test('安全网在 Windows 形态下不是空网（声明 fail-closed 就必须�
 
 test('run_test 走本机 shell（Windows 上 npm 只有 .cmd 形式，execFile 直呼必 ENOENT）', () => {
   const s = fs.readFileSync(path.join(ROOT, 'server', 'tools', 'index.js'), 'utf8');
-  assert.match(s, /runShellLine\('npm test'/, 'npm 必须经 shell 解析');
+  assert.match(s, /execShell\('npm test'/, 'npm 必须经 shell 解析'); // 2026-09-16（⑯）：命令串改由执行后端的 execShell 执行（argv 仍按平台成形，另加一道沙箱包装）；判据不变
   assert.ok(!/runCmd\('npm'/.test(s), '不许回退成 execFile 直呼 npm');
 });
 

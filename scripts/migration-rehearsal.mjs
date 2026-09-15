@@ -32,6 +32,8 @@
 // 用法：
 //   node scripts/migration-rehearsal.mjs                # 默认每表 300 行
 //   node scripts/migration-rehearsal.mjs --rows=30000   # 按真实体量跑，看 DDL 耗时（《数据库迁移规范》§五）
+// **别把输出接 `head` / `Select-Object -First N`**：管道提前关闭会杀掉本进程、跳过 finally 里的删库，留下一座一次性库
+// （脚本下次启动只会把它列出来提醒，不会自动清扫——自动清扫会把"并发演练互删"的坑挖回来）。
 import mysql from 'mysql2/promise';
 import { config } from '../server/config.js';
 import { runMigrations, schemaVersion, VERSIONS } from '../server/migrations.js';
@@ -39,7 +41,9 @@ import { runMigrations, schemaVersion, VERSIONS } from '../server/migrations.js'
 const SRC = String(config.db.name || '');
 // 一次性库：前缀固定（人一眼认得出、便于事后排查），后缀每跑一次都不同（并发演练互不干扰）
 const TMP = 'rw_mig_rehearsal_' + process.pid + '_' + Math.random().toString(36).slice(2, 8);
-const ROWS = Math.max(0, Number((process.argv.find((a) => a.startsWith('--rows=')) || '').split('=')[1]) || 300);
+const rowsArg = (process.argv.find((a) => a.startsWith('--rows=')) || '').split('=')[1];
+// 不写或写空 ⇒ 默认 300；`--rows=0` 是**合法输入**（只塞指纹行，不塞体量行：`Number('0') || 300` 会把 0 吃掉，别写成那样）
+const ROWS = rowsArg === undefined || rowsArg === '' ? 300 : Math.max(0, Number(rowsArg) || 0);
 const HEAD = VERSIONS[VERSIONS.length - 1].id;
 
 const say = (s) => console.log(s);
@@ -94,6 +98,10 @@ try {
   say('== 0. 安全闸与连接 ==');
   say(`   源库（**只读表结构**，不碰任何一行）：${SRC} @ ${config.db.host}:${config.db.port}`);
   say(`   一次性库：${TMP} · 每表 ${ROWS} 行体量 · admin 连接=无默认库（只管建/删/复核）· work 连接=一次性库`);
+  // 遗留的演练库**只报告、不清扫**（可能是另一个实例正在跑，自动 DROP 就等于把并发互删的坑又挖回来）。
+  // 常见的成因：上次演练被强杀/管道提前关闭（`node … | head`、`| Select-Object -First N`），finally 没跑到。
+  const leftovers = (await mq("SELECT SCHEMA_NAME n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE 'rw_mig_rehearsal%' AND SCHEMA_NAME <> ?", [TMP])).map((r) => r.n);
+  if (leftovers.length) say('   ⚠️ 有遗留的一次性演练库（上个演练没跑完 finally）：' + leftovers.join(', ') + ' —— 确认没有演练在跑后手工 DROP DATABASE 即可');
 
   say('== 1. 建一次性库（admin 连接）==');
   await mq(`DROP DATABASE IF EXISTS \`${TMP}\``);
@@ -157,9 +165,9 @@ try {
   ];
   let seq = 0; // 生成值用全局序号：字符串列天然不重复（避开 UNIQUE 键）
   const isInt = (t) => ['int', 'bigint', 'smallint', 'tinyint', 'mediumint', 'decimal', 'float', 'double'].includes(t);
-  /** 按**当前（旧）形状**的列结构生成一行参数：given 里的列用真值，其余列按类型填（NOT NULL 列不能不填） */
-  async function rowParams(table, given) {
-    const cols = await colsOf(table);
+  /** 按**当前（旧）形状**的列结构生成一行参数：given 里的列用真值，其余列按类型填（NOT NULL 列不能不填）。
+   *  列结构由调用方**取一次传进来**（每行查一次 information_schema 在 SSH 隧道上等于把自己拖死）。 */
+  function rowParams(cols, given) {
     const names = [];
     const params = [];
     for (const c of cols) {
@@ -183,24 +191,25 @@ try {
   const seeded = [];
   for (const [table, given] of FINGERPRINTS) {
     if (!(await tableExists(TMP, table))) throw new Error('指纹行落在不存在的表上：' + table);
-    const { names, params } = await rowParams(table, given);
+    const cols = await colsOf(table); // 每表只取一次列结构
+    const { names, params } = rowParams(cols, given);
     await q('INSERT INTO `' + table + '` (' + names.map((n) => '`' + n + '`').join(',') + ') VALUES (' + names.map(() => '?').join(',') + ')', params);
+    seeded.push(table);
     if (!ROWS) continue;
     // 体量行：批量插（每条语句约 500 个占位符），只为"行数不变"与 DDL 耗时有个像样的体量
-    const bulk = await rowParams(table, {});
+    const bulk = rowParams(cols, {});
     const chunk = Math.max(1, Math.floor(500 / bulk.names.length));
     const one = '(' + bulk.names.map(() => '?').join(',') + ')';
     for (let i = 0; i < ROWS; i += chunk) {
       const n = Math.min(chunk, ROWS - i);
       const flat = [];
-      for (let k = 0; k < n; k++) { const r = await rowParams(table, {}); flat.push(...r.params); }
+      for (let k = 0; k < n; k++) flat.push(...rowParams(cols, {}).params);
       // 自检：列数与参数数必须严格对上（对不上会让占位符留在 SQL 里，报出来的是莫名其妙的"语法错"）
       if (flat.length !== n * bulk.names.length) throw new Error('批量插入自检失败：' + table + ' 列 ' + bulk.names.length + ' × 行 ' + n + ' ≠ 参数 ' + flat.length);
       await q('INSERT INTO `' + table + '` (' + bulk.names.map((c) => '`' + c + '`').join(',') + ') VALUES ' + Array.from({ length: n }, () => one).join(','), flat);
     }
-    seeded.push(table);
   }
-  say(`   指纹行 ${FINGERPRINTS.length} 张表各 1 行；体量行 ${ROWS} 行/表（共 ${seeded.length} 张表）`);
+  say(`   指纹行 ${FINGERPRINTS.length} 张表各 1 行；体量行 ${ROWS} 行/表（涉及 ${seeded.length} 张表）`);
 
   const sampleOf = async (t, cols) => {
     const list = cols || (await colsOf(t)).map((c) => c.COLUMN_NAME);

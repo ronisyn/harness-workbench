@@ -257,12 +257,16 @@ function makeApi(r) {
           const { sql, params } = patchOf(F, patch);
           await r.exec(`UPDATE deliveries SET ${sql} WHERE id=?`, [...params, id]);
         },
-        async list({ state = null, limit = 20 } = {}) {
+        async list({ state = null, limit = 20, accountId } = {}) {
           // 默认 20 不是这里新造的值：调用方 `deliveries.js` 的默认就是它（与《接口规范》§六 的列表上限一致）。
-          const lim = limitClause(limit);
-          const rows = state
-            ? await r.many(`SELECT * FROM deliveries WHERE state=? ORDER BY id DESC${lim}`, [state])
-            : await r.many(`SELECT * FROM deliveries ORDER BY id DESC${lim}`);
+          // `state`/`accountId` 都是**可选**过滤：给了就下推到 SQL 的 WHERE（而不是取回来再在内存里筛 ——
+          // 那样 LIMIT 会先把别人的行占满窗口，调用方反而看不到自己最近的行）。
+          const where = [];
+          const params = [];
+          if (state) { where.push('state=?'); params.push(state); }
+          if (accountId !== undefined && accountId !== null) { where.push('account_id=?'); params.push(accountId); }
+          const sql = `SELECT * FROM deliveries${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC${limitClause(limit)}`;
+          const rows = await r.many(sql, params);
           return rows.map(pick);
         },
       };

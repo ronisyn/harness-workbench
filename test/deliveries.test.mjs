@@ -6,14 +6,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { db, initSchema } from '../server/db.js';
-import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from '../server/deliveries.js';
+import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX, MAX_LIST } from '../server/deliveries.js';
 
-const ACC = 999999; // 哨兵账号：只为这批用例存在，用完删掉
+// 哨兵账号：**每次运行唯一**（负数＝不是真实账号，与 eventlog-archive 的 -990004701 同款）。
+// 为什么不能写死一个常量（原来是 999999）：本夹具"按账号清自己造的行"，而列表/计数读数也落在这个账号上 ——
+// 写死就变成**两个并发进程共用一份可变数据**：谁先 clean()，谁就把对方刚插进去的行删掉；
+// 谁后写，谁就把对方挤出列表窗口。**两个 npm test 同时在跑**（8 个代理并行时天天如此）当场互相打架。
+// 2026-09-16 实测：并发两跑 4 轮全红，报错就是 `Cannot read properties of undefined (reading 'state')`。
+// pid 保证同机不同进程不撞，随机后缀保证"多台机器连同一个库"时也不撞；salt 让同一进程里的两个哨兵账号
+// 落在互不相交的区间（下面"跨账号边界"那条要造"别人的行"）。
+const sentinel = (salt) => -(salt * 1_000_000 + (process.pid % 10_000) * 100 + Math.floor(Math.random() * 100));
+const ACC = sentinel(1);     // 本夹具的主账号
+const OTHER = sentinel(2);   // 第二个账号：只用来证明"别人的行读不到"
 const K = (s) => 'test-' + s + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-const clean = async () => { try { await db.query('DELETE FROM deliveries WHERE account_id=?', [ACC]); } catch { /* ignore */ } };
+const clean = async () => {
+  try { await db.query('DELETE FROM deliveries WHERE account_id IN (?,?)', [ACC, OTHER]); } catch { /* ignore */ }
+};
 
 // 这条用例要打真表，而表由"服务启动时的 initSchema + 迁移链"建出来：夹具自己先确保一遍
-// （initSchema 是幂等的，与服务启动走同一条路径），否则在还没起过新版服务的机器上会以 ER_NO_SUCH_TABLE 报红，
+// （initSchema 是幂等的与服务启动走同一条路径），否则在还没起过新版服务的机器上会以 ER_NO_SUCH_TABLE 报红，
 // 那是在测"环境没准备好"，不是测这段逻辑。
 test.before(async () => { await initSchema(); });
 
@@ -23,11 +34,14 @@ test('无幂等键也照记（每次调用一行），收尾后状态与结果�
     const a = await beginDelivery({ accountId: ACC, conversationId: 1 });
     assert.ok(a.id > 0 && a.fresh === true);
     await finishDelivery(a.id, { state: 'succeeded', messageId: 11, runId: 22, response: { messageId: 11, runId: 22, content: 'hi', usage: { total_tokens: 3 } } });
-    const rows = await listDeliveries({ limit: 5 });
-    const mine = rows.find((r) => r.id === String(a.id));
-    assert.equal(mine.state, 'succeeded');
-    assert.equal(mine.messageId, 11);
-    assert.equal(mine.runId, 22);
+    // 按 id 读回**这条投递自己**的状态，而不是在 listDeliveries 的窗口里找自己：
+    // 那个列表是**全表**倒序窗口（接口按 state 过滤，不按账号），并行跑时别人的新行会把我们这条挤出去 ——
+    // 挤出去是"读数变了"，不是"收尾没写进去"，用它当判据就会报假红。列表 API 的映射由下面两条用例覆盖。
+    const [row] = await db.query('SELECT state, message_id, run_id FROM deliveries WHERE id=?', [a.id]);
+    assert.ok(row, '这条投递必须还在库里（不许被谁的清理顺手删掉）');
+    assert.equal(row.state, 'succeeded');
+    assert.equal(row.message_id, 11);
+    assert.equal(row.run_id, 22);
   } finally { await clean(); }
 });
 
@@ -55,7 +69,10 @@ test('失败后可重发（这就是死信的人工重放路径），attempts �
   try {
     const a = await beginDelivery({ accountId: ACC, conversationId: 9, idemKey: key, hash });
     await finishDelivery(a.id, { state: 'failed', error: '连接断开', errorCode: 'CLIENT_DISCONNECTED' });
-    const failed = await listDeliveries({ state: 'failed', limit: 50 });
+    // 窗口取**接口自己的上限**（MAX_LIST＝《接口规范》§六 的列表上限）而不是随手写 50：
+    // 死信列表同样是全表窗口，并发跑时别人的 failed 行会占掉窗口；窗口太窄会把我们这条挤出去 ——
+    // 那是读数问题、不是"没落进死信"。这里仍然是在验**列表 API 的映射**（id/lastErrorCode 两个字段）。
+    const failed = await listDeliveries({ state: 'failed', limit: MAX_LIST });
     assert.ok(failed.some((r) => r.id === String(a.id) && r.lastErrorCode === 'CLIENT_DISCONNECTED'), '失败要能在死信列表里看到');
     const again = await beginDelivery({ accountId: ACC, conversationId: 9, idemKey: key, hash });
     assert.equal(again.fresh, true, '失败的投递允许用同一个键重发');
@@ -84,6 +101,31 @@ test('并发同键：唯一索引保证只有一个真的进去，另一个被�
     assert.equal(conflict, 1, '另一个必须是"进行中"冲突（这是唯一索引兜住的，不靠应用层自觉）');
     const rows = await db.query('SELECT COUNT(*) c FROM deliveries WHERE account_id=?', [ACC]);
     assert.equal(Number(rows[0].c), 1, '只应留下一行');
+  } finally { await clean(); }
+});
+
+test('跨账号边界：我的死信列表里不许出现别人的行，而我自己的行必须在（C-49）', async () => {
+  await clean();
+  try {
+    const mine = await beginDelivery({ accountId: ACC, conversationId: 1, idemKey: K('mine'), hash: requestHash({ who: 'A' }) });
+    await finishDelivery(mine.id, { state: 'failed', error: '我这轮没做完', errorCode: 'CLIENT_DISCONNECTED' });
+    const theirs = await beginDelivery({ accountId: OTHER, conversationId: 2, idemKey: K('theirs'), hash: requestHash({ who: 'B' }) });
+    await finishDelivery(theirs.id, { state: 'failed', error: '别人的活', errorCode: 'CLIENT_DISCONNECTED' });
+
+    // 这条防的**真实缺口**：GET /api/deliveries 曾经只 requireAuth、而查询没有账号维度
+    // ⇒ 任何登录账号都能读到别人的 idemKey/conversationId/lastError/messageId/runId。
+    const scoped = (await listDeliveries({ state: 'failed', limit: MAX_LIST, accountId: ACC })).map((r) => r.id);
+    assert.ok(scoped.includes(String(mine.id)), '我自己的死信必须在（不许用"返回空"糊过去）');
+    assert.equal(scoped.includes(String(theirs.id)), false, '别人的死信不许出现在我的列表里');
+
+    // 反过来也必须成立（判据是对称的，不是给某个账号开的特例）
+    const other = (await listDeliveries({ state: 'failed', limit: MAX_LIST, accountId: OTHER })).map((r) => r.id);
+    assert.ok(other.includes(String(theirs.id)));
+    assert.equal(other.includes(String(mine.id)), false);
+
+    // 不传 accountId ＝ 既有默认行为不变（无账号维度）：两条都还在这个视图里
+    const all = (await listDeliveries({ state: 'failed', limit: MAX_LIST })).map((r) => r.id);
+    assert.ok(all.includes(String(mine.id)) && all.includes(String(theirs.id)), '默认行为不许被这次收口改掉');
   } finally { await clean(); }
 });
 

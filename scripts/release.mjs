@@ -94,48 +94,9 @@ try {
 // "变差多少算回归"这条线 v0.3 没给 ⇒ 本步不设线，需要线时单列给人拍板。
 // 顺序说明：**先落盘本次报告、再取基线**，所以 release 这次得到的基线是"上一次的指针"（见 metrics-report.mjs
 //   的 `readLatestPointer`）；要显式比某两份，用 `node scripts/metrics-gate.mjs --current <a> --baseline <b>`。
-const METRICS_STEP = '指标回归门禁（㉔：金标+C4 在位；变差只报数不设线）'; // 单一出处：夹具据此断言"门禁在阻断路径上"
-const PROPOSALS_PATH = path.join(ROOT, 'tmp', 'metrics', 'proposals.json');   // 本批入闸提案（可选；有才判"每条附前后对比"）
+const { metricsGateStep, METRICS_STEP } = await import('./metrics-gate-step.mjs');   // 步本体独立成文件：能单独验证
 try {
-  const reg = await import('../server/selfeval/regression-gate.js');
-  const mrep = await import('./metrics-report.mjs');
-  // **每次发布都产出一份新的指标报告**（㉔ 的交付物）：复用 2.6 刚跑过的金标结果，不再重跑第二遍；
-  // 指标读数走 collect.js 的同一处口径。写盘与判定分开：写不进 tmp/ 不该把发布判成"指标不通过"。
-  let current = null;
-  try {
-    const { report } = await mrep.collectReport({ days: 7, goldenReport });
-    try {
-      const w = mrep.writeMetricsSnapshot(report);
-      console.log('   本次指标报告：' + w.rel + '（指针 tmp/metrics/latest.json）');
-    } catch (e) { console.log('   （报告写盘失败，不影响门禁判定：' + String((e && e.message) || e).slice(0, 60) + '）'); }
-    current = report;
-  } catch (e) { current = null; }
-  if (!current) {
-    step(METRICS_STEP, true, 'skipped —— 本次没有指标报告（先跑 node scripts/metrics-report.mjs）：**未判**，不判定也不放行');
-  } else {
-    const base = await reg.resolveBaselinePath();
-    // 指针在写盘时已被本次覆盖 ⇒ 报告里的 baselineRef 才是"改动前"那一份（写盘前读的）
-    const basePath = current.baselineRef ? path.resolve(ROOT, String(current.baselineRef).split(/[\\/]/).join(path.sep)) : null;
-    const baseline = (basePath && fs.existsSync(basePath)) ? await reg.loadMetricsReport(basePath) : null;
-    let proposals = [];
-    let propNote = '';
-    try {
-      const j = JSON.parse(fs.readFileSync(PROPOSALS_PATH, 'utf8'));
-      proposals = Array.isArray(j) ? j : (Array.isArray(j.proposals) ? j.proposals : []);
-      propNote = ' · 本批提案 ' + proposals.length + ' 条（' + path.relative(ROOT, PROPOSALS_PATH) + '）';
-    } catch { propNote = ' · 本批没有提案清单（' + path.relative(ROOT, PROPOSALS_PATH) + ' 不存在）'; }
-    const g = reg.evaluateGate({ current, baseline: (baseline && !baseline.__err) ? baseline : null, proposals });
-    const gi = reg.goldenInPlace(current), ci = reg.c4InPlace(current);
-    console.log('   指标：金标' + (gi.inPlace ? '在位' : '**不在位**') + ' · C4 监控' + (ci.inPlace ? '在位' : '**不在位**')
-      + ' · 基线 ' + (baseline && !baseline.__err ? path.relative(ROOT, basePath) : '无（本次是第一份）') + propNote);
-    if (Array.isArray(current.collectErrors) && current.collectErrors.length) console.log('   采集未取到 ' + current.collectErrors.length + ' 项（如实列在报告里，不静默）');
-    // 只报数不设线：变差照实打出来，但**不进** ok/fail
-    const diff = reg.diffMetrics((baseline && !baseline.__err) ? baseline : null, current);
-    const degraded = diff.rows.filter((r) => r.state === 'degraded');
-    if (degraded.length) console.log('   ⚠️ 变差（**只报数不设线**，不阻断；要不要处置需人判）：' + degraded.map((r) => r.path + ' ' + r.from + '→' + r.to).join('；'));
-    // 硬条件缺位 ⇒ fail；窗口不可比或缺基线 ⇒ undecided；**未判也不放行**（"不知道"不许读成"没问题"）
-    step(METRICS_STEP, !reg.gateBlocks(g), reg.gateLine(g));
-  }
+  await metricsGateStep({ days: 7, goldenReport, register: step });
 } catch (e) {
   step(METRICS_STEP, true, 'skipped —— 指标门禁跑不起来：' + String((e && e.message) || e).slice(0, 80));
 }

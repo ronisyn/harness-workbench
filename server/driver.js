@@ -6,7 +6,6 @@
 //   (b) ask_user/审批（无人值守自动排队 need_input，等你作答）
 //   (c) 直接收尾（未 finish_task）→ 驱动器要求继续（最多 N 次无进展后转 need_input 请你裁决）
 // 用户复测确认后 status=done；该任务才算真正完成。
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from './db.js';
@@ -14,9 +13,11 @@ import { persistContractEvent } from './eventlog.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
 import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
-import { SHELL_FILE, shellArgs } from './shell.js';
+import { execPlan, execArgv } from './exec/index.js';
 
 const WS = RW_WORKSPACE;
+// 驱动器起的契约会话权限档（与下面 ctx.permission 同一出处：无人值守契约会话＝full）
+const DRIVER_PERMISSION = 'full';
 const MAX_AUTO_ROUNDS = 60;        // 单契约每次激活最多自动轮次（进展型护栏，防失控账单）
 const MAX_IDLE_CONCLUDE = 2;       // 连续"没调用 finish_task 就收尾"几次后请你裁决
 let running = new Set();           // 正在执行的 contract id（驱动器自身并发 ≤2）
@@ -51,15 +52,18 @@ async function findOrCreateConv(c) {
   return r.insertId;
 }
 
-function runShellCmd(line) {
-  return new Promise((resolve) => {
-    // 验收命令行按**本机 shell**执行（server/shell.js）：Linux 是 bash -c，Windows 是 PowerShell -Command；
-    // 以前写死 Linux 上 bash 的绝对路径，客户机上不存在该文件 → 契约永远验收不通过（且报 ENOENT 而不是"环境不对"）。
-    const ch = execFile(SHELL_FILE, shellArgs(String(line).slice(0, 2000)), { cwd: WS, timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 2000), err: String(stderr || '').slice(0, 1000) });
-    });
-    ch.on('error', (e) => resolve({ ok: false, code: e.code ?? 1, out: '', err: 'shell 启动失败: ' + e.message }));
-  });
+async function runShellCmd(line) {
+  // 验收命令行按**本机 shell**执行，argv 与 execFile 选项都取自执行后端（server/exec 的 argv 级接缝）：
+  // 平台事实（Linux 是 bash -c，Windows 是 PowerShell -Command）只落在后端实现里，⑰ 沙箱也只包这一层
+  // ——驱动器这条验收路径才不会成为绕过沙箱的第二个入口。
+  // 为什么不用后端现成的 execShell 动词：它的截断口径（stdout 8000 / stderr 2000，且超时额外补一句"命令已被
+  // 终止"）是 run_command 那条路的**模型可见形状**；验收结果的形状是 out≤2000 / err≤1000 且超时不多话，
+  // 两者口径不同，故这里取 argv 接缝 + 自己的形状，行为与改造前逐字相同。
+  // （此前那个 `ch.on('error')` 分支是**到不了的**：带回调时 execFile 先把启动失败交给回调，
+  //   实测 `definitely-not-a-real-exe` 的顺序是 callback(ENOENT) → error 事件，而 Promise 只认第一次 resolve。）
+  const plan = execPlan({ line: String(line).slice(0, 2000), cwd: WS, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+  const r = await execArgv([plan.command, ...plan.args], { ...plan.options, permission: DRIVER_PERMISSION, workspaceRoot: WS });
+  return { ok: r.ok, code: r.code, out: String(r.out || '').slice(0, 2000), err: String(r.err || '').slice(0, 1000) };
 }
 
 // WS9 验收行 DSL：无前缀或 cmd:=bash（向后兼容）；file-exists:<path>；grep:<re>|<path>；node:<repo相对脚本>；kpi:<dotpath> <op> <num>
@@ -68,10 +72,14 @@ async function checkLine(line) {
   if (!m) return runShellCmd(String(line)); // 兼容旧格式
   const kind = m[1];
   const rest = String(m[2] || '').trim();
-  const runNode = (script, args = []) => new Promise((resolve) => {
-    execFile('node', [path.join(config.root, script), ...args], { cwd: config.root, timeout: 90000, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) => resolve({ ok: !err, code: err?.code ?? 0, out: String(stdout || '').slice(0, 2000), err: String(stderr || '').slice(0, 1000) }));
-  });
+  const runNode = async (script, args = []) => {
+    // 验收 DSL 的 node: 分支收的是**契约里写的脚本路径**（模型/用户写进验收行的东西）⇒ argv 可能被模型影响
+    // ⇒ 经执行后端的 argv 动词（⑰ 沙箱在这里包）。驱动器会话的权限档是 full（见下面 ctx 的 permission），
+    // 按 ⑰ 的口径 full 是"按设计不沙箱"——但仍逐次如实上报 enforcement，不假装隔离。
+    const r = await execArgv(['node', path.join(config.root, script), ...args],
+      { cwd: config.root, timeout: 90000, maxBuffer: 4 * 1024 * 1024, permission: DRIVER_PERMISSION, workspaceRoot: WS });
+    return { ok: r.ok, code: r.code, out: String(r.out || '').slice(0, 2000), err: String(r.err || '').slice(0, 1000) };
+  };
   if (kind === 'cmd') return runShellCmd(rest);
   if (kind === 'file-exists') {
     const ok = fs.existsSync(rest);
@@ -154,7 +162,7 @@ async function driveContract(c) {
     let accessRules = null;
     try { const ar = await db.query("SELECT svalue FROM settings WHERE skey='access_rules'"); if (ar[0]) { const v = JSON.parse(ar[0].svalue); if (Array.isArray(v)) accessRules = v; } } catch { accessRules = null; }
     const ctx = {
-      permission: 'full', accountId: c.account_id ?? null, conversationId: convId, root: RW_FS_ROOT,
+      permission: DRIVER_PERMISSION, accountId: c.account_id ?? null, conversationId: convId, root: RW_FS_ROOT,
       __autonomous: true, __accessRules: accessRules,
       __needInput: (payload) => needInput(c, payload, convId),
     };

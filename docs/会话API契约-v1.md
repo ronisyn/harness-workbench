@@ -106,6 +106,7 @@
 `?state=<pending|running|succeeded|failed>` 过滤、`?limit=`（默认 20，上限 100，`server/deliveries.js:28`）。失败投递的判据是 `state=failed`；回应 `{ok:true, deliveries:[...]}`，每行字段（`server/deliveries.js:103-109`）：
 `{id:<string>, conversationId, idemKey, state, attempts:<number>, messageId, runId, lastError, lastErrorCode, createdAt, updatedAt}`。
 错误：只读端点无参数校验，异常 → **500** `INTERNAL`（`:462`）。
+**账号边界（C-49）：只看得到自己账号的投递**——列表在介质层按调用者账号下推过滤（`WHERE account_id=?`，`server/deliveries.js` 的 `listDeliveries` 接收可选 `accountId`），不是在内存里事后筛：`LIMIT` 是先截窗口再返回，事后筛会让别人的行占满窗口 ⇒ "我自己的死信看不见"，那是比越权更隐蔽的错。**本平台目前没有角色/权限中间件**，所以没有"运营台跨账号视图"这条路；将来要做，正确做法是**另加一个有角色的只读视图**，而不是把这条端点放开（`listDeliveries` 不传 `accountId` 时仍是"不筛"的既有行为，正是留给它的口子）。
 **不设"几次算死"的自动阈值**：`failed` 就是死信落点，由人看列表决定。**重放 = 同一个幂等键重发 `POST /api/chat`**，不另造重放 API（`:455-456`、`server/deliveries.js:97`）。`?state=` 取值不校验——给个没见过的值就是空列表，不是错误。
 ---
 

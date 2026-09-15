@@ -42,10 +42,12 @@ test('server/ 里不得出现同步子进程调用（会冻住整个进程，不
 
 test('正例（反向核对）：三处历史问题确实已改成异步 —— 不只看"没命中"，还要看"改对了"', () => {
   const hooks = fs.readFileSync(path.join(ROOT, 'server/tools/hooks.js'), 'utf8');
-  assert.match(hooks, /await execFileAsync\('node', \['--check'/, '语法检查钩子必须 await 异步执行');
+  // 2026-09-16（⑯）：语法检查改走执行后端的 argv 动词（`execArgv`）——判据仍是"await 异步执行"，不是具体用哪个 API。
+  assert.match(hooks, /await execArgv\(\['node', '--check'/, '语法检查钩子必须 await 异步执行');
   assert.match(hooks, /timeoutMs: 8000/, '钩子超时要 ≥ 内层命令超时，否则永远走不到命令自己超时');
   const idx = fs.readFileSync(path.join(ROOT, 'server/index.js'), 'utf8');
-  assert.match(idx, /await run\('git', \['push', 'origin', 'main'\]/, '模板同步的 git push 必须 await');
+  // 同上：模板同步的 git 现在经 `run([...])`（内部＝执行后端的 execArgv），判据仍是"必须 await"。
+  assert.match(idx, /await run\(\['push', 'origin', 'main'\]/, '模板同步的 git push 必须 await');
   const rt = fs.readFileSync(path.join(ROOT, 'server/runtrack.js'), 'utf8');
   assert.match(rt, /await gitStateSummary\(\)/, 'resumeHint 里必须 await（否则拿到的是 Promise）');
 });
