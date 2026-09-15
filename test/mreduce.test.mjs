@@ -3,8 +3,13 @@
 // list_dir 均值 787 字节；改法是"少给但说清楚"（附省略量 + 取回指引），不是悄悄截断。
 import { test } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { __shapeTestables } from '../server/tools/index.js';
 import { planGrep, noteGrepServed, markWritten, grepRepeatNotice, clearReadCache, _grepsOf } from '../server/readcache.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const { grepShape, listShape } = __shapeTestables;
 
@@ -98,4 +103,14 @@ test('grep 去重：跨会话不串用', () => {
   clearReadCache(9005); clearReadCache(9006);
   noteGrepServed({ cid: 9005, root: '/d', pattern: 'foo', bytes: 4000 });
   assert.equal(planGrep({ cid: 9006, root: '/d', pattern: 'foo' }).duplicate, false);
+});
+
+// ── 折叠之后"已在上文"这个前提就失效了（2026-09-15 修的真 bug）──────────────────────────
+test('折叠必须清空本会话的去重记录 —— 否则折叠把内容摘要掉之后，去重还回"已在上文"（静默丢信息）', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'agent.js'), 'utf8');
+  const idx = src.indexOf('msgs.splice(1, end - 1');
+  assert.ok(idx > 0, '定位折叠的整段替换点失败（源码结构变了，请更新本夹具）');
+  const after = src.slice(idx, idx + 1200);
+  assert.match(after, /clearReadCache\(ctx\.conversationId\)/,
+    '折叠后必须清空读/搜去重记录：折叠把早期内容从上下文里摘要掉了，"这段已在上文"不再成立');
 });

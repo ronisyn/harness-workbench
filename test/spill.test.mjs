@@ -9,7 +9,7 @@ import path from 'node:path';
 // spill.js 的工作目录来自 env.js（读 process.env.RW_WORKSPACE），必须在 import 之前设好
 const TMP = path.join(os.tmpdir(), 'rw-spill-test-' + Date.now());
 process.env.RW_WORKSPACE = TMP;
-const { spillToolResult, readSpill, cleanupSpill, SPILL_DIR, SPILL_BYTES, byteCeiling, SPILL_BYTES_PER_CHAR } = await import('../server/tools/spill.js');
+const { spillToolResult, readSpill, cleanupSpill, SPILL_DIR, SPILL_BYTES, byteCeiling, SPILL_BYTES_PER_CHAR, lineAlignedPreview, READ_INLINE_CHARS } = await import('../server/tools/spill.js');
 
 const CLEAN = () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* 忽略 */ } };
 
@@ -175,6 +175,42 @@ test('readSpill 拒绝溢出目录之外的路径', () => {
   CLEAN();
   assert.throws(() => readSpill('/etc/passwd', 0, 100), /只能读取溢出目录内的文件/);
   assert.throws(() => readSpill(path.join(SPILL_DIR, '..', '..', 'etc', 'passwd'), 0, 100), /只能读取溢出目录内的文件/);
+});
+
+// ── 按行对齐预览（2026-09-15）：read_file 大文件不再"切在行中间 + 中段静默丢失" ──────────────
+test('按行预览：切在行边界（不拦腰截断），且省略区间写成**行号**（grep 给行号 → 按行取，闭环）', () => {
+  const lines = Array.from({ length: 300 }, (_, i) => 'line ' + i + ': ' + 'x'.repeat(30));
+  const s = lines.join('\n');
+  const p = lineAlignedPreview(s, READ_INLINE_CHARS);
+  assert.equal(p.full, false);
+  assert.ok(p.text.length < s.length, '预览必须比原文短');
+  assert.equal(p.text.split('\n')[0], lines[0], '头部必须是完整行');
+  assert.equal(p.text.split('\n').slice(-1)[0], lines[lines.length - 1], '尾部必须是完整行');
+  const mm = /已省略第 (\d+)–(\d+) 行（共 (\d+) 行/.exec(p.text);
+  assert.ok(mm, '必须报出省略的行号区间');
+  assert.equal(Number(mm[3]), p.totalLines, '总行数要对得上');
+  assert.match(p.text, /read_file_range \{path, fromLine:\d+, toLine:\d+\}/, '必须给出"怎么取回"的按行指引');
+  assert.match(p.text, /force:true/, '也要给整读的路径');
+});
+
+test('按行预览：小文件完全不动它（别把简单事做复杂）', () => {
+  const p = lineAlignedPreview('a\nb\nc', READ_INLINE_CHARS);
+  assert.equal(p.full, true);
+  assert.equal(p.text, 'a\nb\nc');
+});
+
+test('按行预览：单行超长按行切不动时，退回字符切但**如实标注**（不假装是按行切的）', () => {
+  const p = lineAlignedPreview('x'.repeat(9000), READ_INLINE_CHARS);
+  assert.ok(p.text.length < 9000);
+  assert.match(p.text, /单行超长/);
+});
+
+test('按行预览后再走 spill：不应被二次截断（两者是接力，不是叠加）', () => {
+  const lines = Array.from({ length: 300 }, (_, i) => 'line ' + i);
+  const p = lineAlignedPreview(lines.join('\n'), READ_INLINE_CHARS);
+  const payload = JSON.stringify({ content: p.text });
+  const after = spillToolResult(payload, READ_INLINE_CHARS, { tool: 'read_file', args: { path: '/x' }, conversationId: 1, callId: 'c' });
+  assert.equal(after, payload, '已在 cap 内 ⇒ spill 必须原样放行');
 });
 
 process.on('exit', CLEAN);

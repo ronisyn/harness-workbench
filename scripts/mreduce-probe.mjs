@@ -68,12 +68,24 @@ const byLine = await run('read_file_range', { path: target, fromLine: 60, toLine
 console.log('       ↑ 取回 ' + byLine.r.fromLine + '–' + byLine.r.toLine + ' 行 / 全文 ' + byLine.r.totalLines + ' 行');
 console.log('       ↑ 整读同一文件 ' + fmt(whole) + ' 字节 ⇒ 按行读省 ' + (100 - Math.round((byLine.b / whole) * 100)) + '%');
 
+console.log('\n== ⑥ read_file 大文件：按行预览（不切在行中间、中段不静默丢失、给出可操作的行号区间）==');
+{
+  const big = DIR + '/server/tools/index.js';
+  const r = await T.read_file.run({ path: big }, fresh());
+  const b = B(r);
+  var bigRead = { b, r };
+  console.log('  文件 ' + r.totalLines + ' 行 → 返回 ' + fmt(b) + ' 字节　truncated=' + !!r.truncated + '　省略行 ' + JSON.stringify(r.omittedLines || null));
+  console.log('  ↑ 旧行为：整文件返回，再由通用字符切砍成头 60%+尾 30%，切在行中间且不报行号');
+  console.log('  ↑ 现在模型能直接用 read_file_range {path, fromLine, toLine} 取被省略的那段，不必整读');
+}
+
 console.log('\n== 汇总（本次探针，绝对字节，不是估算）==');
 console.log('  grep 高频命中：' + fmt(many.b) + ' 字节（命中 ' + many.r.totalHits + ' 处 / ' + many.r.fileCount + ' 文件，只列 ' + many.r.shownMatches + ' 条）');
 console.log('  grep 大结果重复：' + fmt(b2b.b) + ' 字节（原 ' + fmt(b1b.b) + '，压缩比 ' + (b1b.b / Math.max(1, b2b.b)).toFixed(1) + '×）');
 console.log('  grep 小结果重复：' + fmt(a2b.b) + ' 字节（原 ' + fmt(a1b.b) + '，未做无益去重）');
 console.log('  list_dir 大目录：' + fmt(big.b) + ' 字节（旧实现最多 200 条名字）');
 console.log('  按行读一段：' + fmt(byLine.b) + ' 字节（整读 ' + fmt(whole) + ' 字节，省 ' + (100 - Math.round((byLine.b / whole) * 100)) + '%）');
+console.log('  大文件整读：' + fmt(bigRead.b) + ' 字节（' + bigRead.r.totalLines + ' 行，省略第 ' + (bigRead.r.omittedLines || [])[0] + '–' + (bigRead.r.omittedLines || [])[1] + ' 行，可按行取回）');
 console.log('\n  说明：这些是**工具输出的字节数**，直接决定每轮新增（m）。收益集中在"命中很多"和"重复调用"这两类；');
 console.log('        常见的小 grep/小 read 本来就只有一两百字节，整形对它们没有影响（也不该有）。');
 process.exit(0);

@@ -11,6 +11,7 @@ import { newProgressState, judgeRound, stallMessage, fuseDecision } from './prog
 import { repeatReminder, shouldPauseOnRepeat } from './loopguard.js';
 import { effectiveCollapseChars } from './modelwindow.js';
 import { spillToolResult } from './tools/spill.js';
+import { clearReadCache } from './readcache.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
@@ -412,6 +413,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         ? '【早期执行轮次已折叠（第 ' + (round + 1) + ' 轮，保留最近 ' + keep + ' 条）】摘要：' + digest + '\n（早期明细可用 db_query 查 tool_calls）'
         : '【早期执行轮次已归档（第 ' + (round + 1) + ' 轮，保留最近 ' + keep + ' 条）；明细在 DB tool_calls，可用 db_query 查询】',
     });
+    // ⚠️ 折叠把早期内容**从上下文里摘要掉了**，"这段在本会话上文已给出"这个前提当场失效（2026-09-15）：
+    // 读去重/搜索去重如果继续按旧记录回"已在上文、省 token"，模型会以为它看过，实际那份内容已经不在上下文里了——
+    // 这是静默的信息丢失。所以折叠后必须清空本会话的去重记录（下次读/搜照常给全）。
+    try { clearReadCache(ctx.conversationId); } catch { /* 清缓存失败只是可能多给一次，不影响正确性 */ }
     lastCollapseRound = round;
     return true;
   };

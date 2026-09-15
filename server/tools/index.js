@@ -18,7 +18,7 @@ import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
-import { readSpill } from './spill.js';
+import { readSpill, lineAlignedPreview, READ_INLINE_CHARS } from './spill.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
@@ -181,6 +181,11 @@ function listShape(entries, dir) {
 }
 export const __shapeTestables = { grepShape, listShape };
 
+// 带行号的视图（read_file numbered=true 用）。抽成函数是为了"按行预览"和"加行号"能分别测。
+function numberedView(text) {
+  return String(text).split('\n').map((l, i) => `${i + 1}| ${l}`).join('\n');
+}
+
 // 实现侧清单：**只声明"怎么做"**（name/description/params/permission/run）；
 // "暴露与否/档位/提示/集合"等策略一律在 tools/manifest.js 声明，由 tools/registry.js 一次性装配校验。
 const RAW_TOOLS = [
@@ -199,12 +204,21 @@ const RAW_TOOLS = [
         if (plan.duplicate) return { content: repeatNotice('read_file', abs, { size: st.size, span: [0, full.length] }), deduped: true, bytes: st.size };
         noteServed({ cid: ctx && ctx.conversationId, absPath: abs, mt: st.mtimeMs, size: st.size, spans: [[0, full.length]] });
         const prefix = plan.coveredChars > 0 ? partialNotice('read_file', abs, { span: [0, full.length], coveredChars: plan.coveredChars }) : '';
-        if (!a.numbered) return { content: prefix + full };
-        return { content: prefix + full.split('\n').map((l, i) => `${i + 1}| ${l}`).join('\n') };
+        // 大文件：**按行对齐**给预览（2026-09-15），并把省略区间写成行号。
+        // 旧的通用字符切会切在行中间、中段静默丢失，模型只能再整读一遍文件（实测 read_file 均值 3,294 字节）。
+        const pv = lineAlignedPreview(full, READ_INLINE_CHARS);
+        const body = pv.full ? full : (prefix + pv.text);
+        const out = { content: a.numbered ? numberedView(body) : body, bytes: st.size, totalLines: pv.totalLines };
+        if (!pv.full) { out.omittedLines = [pv.omittedFromLine, pv.omittedToLine]; out.truncated = true; }
+        if (prefix) out.partial = true;
+        return out;
       }
       const raw = readTxt(a.path).slice(0, 50000);
-      if (!a.numbered) return { content: raw };
-      return { content: raw.split('\n').map((l, i) => `${i + 1}| ${l}`).join('\n') };
+      const pv2 = lineAlignedPreview(raw, READ_INLINE_CHARS);
+      const body2 = pv2.full ? raw : pv2.text;
+      const out2 = { content: a.numbered ? numberedView(body2) : body2, totalLines: pv2.totalLines };
+      if (!pv2.full) { out2.omittedLines = [pv2.omittedFromLine, pv2.omittedToLine]; out2.truncated = true; }
+      return out2;
     } },
   { name: 'write_file', description: '写入文件（创建/覆盖）', permission: 'write',
     params: { path: { type: 'string', required: true }, content: { type: 'string', required: true } },

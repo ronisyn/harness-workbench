@@ -39,6 +39,42 @@ function splitPreview(s, budget) {
   return { head, tail, omittedChars: s.length - head.length - tail.length, omittedBytes: Buffer.byteLength(s, 'utf8') - Buffer.byteLength(head + tail, 'utf8') };
 }
 
+// ── 按行对齐的预览（2026-09-15，给 read_file 用）───────────────────────────────────────────
+// 通用字符切有两个毛病：① 切在行中间，代码文件被拦腰截断；② 中段**静默丢失**，只给一个"源文件路径"，
+// 模型得自己换算字符偏移（实际做法就是再整读一遍）。这里改成按行切，并把省略区间写成**行号**——
+// grep_search 返回的也是行号，read_file_range 现在支持 fromLine/toLine，闭环就合上了。
+export const READ_INLINE_CHARS = 4000; // 与 execTool 给普通工具的 msgCap 保持一致（单一出处）
+
+/**
+ * 文件内容 → 按行对齐的预览（仅当超限时才用）。
+ * @returns {{text:string, omittedFromLine:number, omittedToLine:number, totalLines:number, full:boolean}}
+ */
+export function lineAlignedPreview(text, cap = READ_INLINE_CHARS) {
+  const s = String(text ?? '');
+  const lines = s.split('\n');
+  const totalLines = lines.length;
+  if (s.length <= cap) return { text: s, omittedFromLine: 0, omittedToLine: 0, totalLines, full: true };
+  const headBudget = Math.floor(cap * 0.6), tailBudget = Math.floor(cap * 0.3);
+  let headChars = 0, hEnd = 0;
+  while (hEnd < lines.length && headChars + lines[hEnd].length + 1 <= headBudget) { headChars += lines[hEnd].length + 1; hEnd++; }
+  let tailChars = 0, tStart = lines.length;
+  while (tStart > hEnd && tailChars + lines[tStart - 1].length + 1 <= tailBudget) { tStart--; tailChars += lines[tStart - 1].length + 1; }
+  if (hEnd === 0 && tStart === lines.length) { // 极端：单行巨长，按行切不动 → 退回字符切（但如实标注）
+    const p = splitPreview(s, cap);
+    return { text: p.head + '\n…[已省略 ' + p.omittedBytes + ' 字节；本文件是单行超长内容，无法按行切]…\n' + p.tail, omittedFromLine: 1, omittedToLine: 1, totalLines, full: false };
+  }
+  const omittedFromLine = hEnd + 1;
+  const omittedToLine = tStart; // 1 起，含
+  const marker = omittedToLine >= omittedFromLine
+    ? '\n…[已省略第 ' + omittedFromLine + '–' + omittedToLine + ' 行（共 ' + totalLines + ' 行 / ' + Buffer.byteLength(s, 'utf8')
+      + ' 字节）；要看这段用 read_file_range {path, fromLine:' + omittedFromLine + ', toLine:' + Math.min(totalLines, omittedFromLine + 199) + '}，或 force:true 取全文]…\n'
+    : '\n…[中间无省略行]…\n';
+  return {
+    text: lines.slice(0, hEnd).join('\n') + marker + lines.slice(tStart).join('\n'),
+    omittedFromLine, omittedToLine, totalLines, full: false,
+  };
+}
+
 function compose(parts, locator) {
   return parts.head + '\n…[已省略 ' + parts.omittedBytes + ' 字节（' + parts.omittedChars + ' 字符）；' + locator + ']…\n' + parts.tail;
 }
