@@ -62,19 +62,25 @@ export function externalNotice(name) { return isExternalSource(name) ? UNTRUSTED
 // agent.js 用 `result.error ? 'fail' : 'done'`、`result.content || result.stdout || result.result` 取正文，
 // 之后还有 `result.hookAfter = …` / `result.hookRewrite = …` 往结果上挂字段；串成字符串会丢失败码
 // （外部工具失败不再带码落账）、给原始值赋属性在严格模式下直接抛 TypeError（整轮工具失败）。
-// 字段选择的排序（content ‖ text ‖ stdout ‖ result）与 agent.js 读正文的顺序**同口径、前者在前**：
-// 两个出口不能各挑一个字段——那会出现"agent 给模型看的是 text，声明却挂在 content 上"（等于没标）。
-const NOTICE_FIELDS = ['content', 'text', 'stdout', 'result'];
+// 字段选择：优先 `content`（MCP/子代理那类工具的既有正文键），没有就用整份结果的 JSON 串兜底——
+// 顺序与 agent.js 读正文的 `result.content || result.stdout || result.result` **同口径**：正文必须落在
+// agent 优先读的那个键上，否则会出现"agent 给模型看的是 text，声明却挂在 content 上"（等于没标）。
+// 只挑一个键改写：多写几个等于同一句话在上下文里重复计费（尾部文案随历史在后续轮次重复出现）。
 function withExternalNotice(name, result) {
   const notice = externalNotice(name);
   if (!notice || !result || typeof result !== 'object' || Array.isArray(result)) return result;
   if (result.error) return result; // 失败说明是平台自己写的（不是外部内容），不加声明
-  const key = NOTICE_FIELDS.find((k) => typeof result[k] === 'string');
-  if (!key) return result; // 没有可读正文（纯错误码/空结果）时不动它：宁可不标，也不改结构的语义
-  const next = { ...result };
-  // 正文变成"声明 + 原文"：后加的操作（溢出预览、四舍五入的字节统计）照常作用在合并后的正文上
-  next[key] = notice + '\n' + result[key];
-  return next;
+  // Error 实例**原样返回**：message/code 不可枚举，展开成普通对象会静默丢掉失败原因（模型只剩一个 {}）
+  if (result instanceof Error) return result;
+  // 正文规则（我原先想"取第一个可读字段"，被夹具否掉了——它更保守也更对）：
+  // **A1 只加声明，不改变模型原本读到的正文**。`agent.js` 读正文的顺序是 content ‖ stdout ‖ result：
+  //   · 有 `content` 的工具（web_search/feishu/mcp 大多如此）⇒ 正文就是它，**原文不转义**；
+  //   · 没有 `content` 的工具（fetch_url / ocr 返回 {title, text}）⇒ 它原本就是走 `JSON.stringify(result)` 兜底
+  //     显示给模型的，这里保持一致（JSON 转义会改字符，但那是它**本来就有的**样子；只多一行声明）。
+  // 若改成"取 text 原文"，等于顺手把 fetch_url 的模型可见正文换掉——那是超出 A1 范围的行为变更。
+  let body;
+  try { body = typeof result.content === 'string' ? result.content : JSON.stringify(result); } catch { return result; }
+  return { ...result, content: notice + '\n' + body };
 }
 
 // RA-05b 工具结果原始体积（字节）：与 spill 的 32768 字节判定**同口径同函数**（§5.4 计数单位=字节）。
