@@ -1,12 +1,15 @@
 // server/settingsSchema.js - 可调设置 schema（WS4：一处声明 → API 校验/UI 渲染/默认值同源）
 // 护栏哲学：所有护栏键 type=number 且允许 0=不限/关（可调可关可解释=保险丝而非高跷）；禁止登记死限式不可调键
-export const LIMIT_DEFAULTS = { budgetMin: 120, roundCap: 2000, loopGuard: 6, maxParallelT: 10, fakeContinueWarn: 2, progressStallN: 10, fuseInteractive: 0 };
+export const LIMIT_DEFAULTS = { budgetMin: 120, roundCap: 2000, loopGuard: 6, maxParallelT: 10, fakeContinueWarn: 2, progressStallN: 10, fuseInteractive: 0, llmMaxRetries: 1 };
 
 export const SETTINGS_SCHEMA = [
   { key: 'time_budget_min', label: '时间预算（分钟，仅无人值守）', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.budgetMin, min: 0, hint: '**只在无人值守时生效**（定时任务/契约驱动器/子代理）。人在场的会话不再被墙钟掐断（2026-09-15 拍板），改由"无进展轮数"判据停；0=不限' },
   { key: 'round_cap', label: '轮次上限（仅无人值守）', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.roundCap, min: 0, hint: '**只在无人值守时生效**。人在场的会话改用 progress_stall_n（"连续多少轮没有新进展"）；0=不限' },
   { key: 'progress_stall_n', label: '无进展轮数上限', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.progressStallN, min: 0, hint: '连续多少轮"没有任何新进展"（没改东西、没新调用、没有转成功、结果也没变）就挂起并如实说明在重复什么；对交互式与无人值守都生效；0=关闭' },
   { key: 'fuse_interactive', label: '交互式也启用轮次/时间熔断', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.fuseInteractive, min: 0, max: 1, hint: '0=关（默认，人在场时只靠无进展判据）；1=把上面两条数字熔断也套到人在场的会话上（恢复 2026-09-15 之前的行为）' },
+  // 2026-09-15（对齐 DSH dsh-llm-retry）：每轮"流式请求失败后允许重试几次"。只对**可恢复**失败重试
+  // （限流 429/网关 5xx/网络类）；参数、鉴权、模型不存在等 4xx 不重试（重试纯属浪费）。0=关（只保留非流式兜底）
+  { key: 'llm_max_retries', label: 'LLM 每轮可重试次数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.llmMaxRetries, min: 0, hint: '每轮最多重试几次（默认 1）。只在可恢复失败时重试：限流 429、网关 5xx、网络/空闲超时；等待时长用服务端 Retry-After（没有则立刻重试）。用户点"停止"会立即中断等待。0=关' },
   { key: 'loop_guard', label: '循环检测连续次数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.loopGuard, min: 0, hint: '连续相同调用判循环；0=关闭' },
   { key: 'max_parallel_tools', label: '同一步并行工具数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.maxParallelT, min: 0, hint: '0=串行' },
   { key: 'fake_continue_warn', label: '假完成检测打回次数', group: 'runtime', type: 'number', def: LIMIT_DEFAULTS.fakeContinueWarn, min: 0, hint: '回复声称已执行但本轮无任何工具调用时打回要求真实执行；N 次后仍犯则自动加"未经验证"标注；0=关闭' },

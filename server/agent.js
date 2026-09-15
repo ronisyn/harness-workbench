@@ -2,7 +2,7 @@
 // 不设预设轮次：模型每轮评估"目标完成没"——完成直接回答即停；未完成继续调工具
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
-import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
+import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost, llmRetryDecision, cancellableDelay } from './llm/gateway.js';
 import { createHash } from 'node:crypto';
 import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE, RW_IDLE_MIN } from './env.js';
 import { toolDefs, execTool, plans, jobs, redactSecrets } from './tools/index.js';
@@ -155,7 +155,7 @@ export async function agentLimits() {
   if (limitsCache && Date.now() - limitsCacheAt < 5000) return limitsCache;
   const def = { ...LIMIT_DEFAULTS };
   try {
-    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive']);
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', ['time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', '__policy_rev', 'task_budget_yuan', 'task_budget_total', 'fake_continue_warn', 'collapse_min_gap', 'collapse_keep_msgs', 'collapse_trigger_chars', 'collapse_input_chars', 'consecutive_fail_guard', 'progress_stall_n', 'fuse_interactive', 'llm_max_retries']);
     const pick = (k, d) => {
       const r = rows.find((x) => x.skey === k);
       if (!r) return d;
@@ -182,12 +182,14 @@ export async function agentLimits() {
       // 2026-09-15：进展判据（替代人在场时的轮次/时间熔断）。schema hint=0 关闭，须与"无行缺省 10"区分（同 failGuardN）
       progressStallN: pick('progress_stall_n', def.progressStallN),
       fuseInteractive: pick('fuse_interactive', def.fuseInteractive),
+      // 2026-09-15：LLM 每轮可重试次数（对齐 DSH dsh-llm-retry 的 maxRetries；只在可恢复失败时用）
+      llmMaxRetries: pick('llm_max_retries', def.llmMaxRetries),
       rev: pick('__policy_rev', 0),
     };
   } catch (e) {
     // 不静默：读取护栏失败会让"设置里的阈值"整体回退默认值（曾导致折叠阈值设了不生效）——如实报出原因
     console.warn('[limits] 读取护栏失败，已回退默认值：' + (e && e.message ? e.message : e));
-    limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3, progressStallN: def.progressStallN, fuseInteractive: def.fuseInteractive };
+    limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3, progressStallN: def.progressStallN, fuseInteractive: def.fuseInteractive, llmMaxRetries: def.llmMaxRetries };
   }
   limitsCacheAt = Date.now();
   if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars }));
@@ -553,22 +555,50 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     }
     const llmT0 = Date.now();
     // P20 每轮流式（2026-09）：stream:true + tools，思考增量经 onThink 实时透出（P21），正文增量经 onContent 实时透出（真流）；
-    // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）；流失败 → 同模型一次性兜底一次（保底），再失败如实抛出（②由 index catch 落痕）
+    // 外部 signal 贯穿（A5：用户停止/断连即掐内层流）。
+    // 失败处置（2026-09-15，对齐 DSH `dsh-llm-retry` 的两条核心口径）：
+    //   ① **先分类再动作**：可重试（限流/网关/网络类）→ 重试；不可重试（参数/鉴权/模型不存在）→ 直接兜底；
+    //      用户已停止 → 立刻返回 stopped（绝不把用户按下的停止键再按回去）。
+    //   ② 每次重试**先把意图落进事件流，再做可取消的等待**（DSH：durable before cancellable wait）；
+    //      等待时长优先用服务端 Retry-After，它没给就立刻重试——不自己编退避参数（差距已登记）。
+    // 沿用原行为：分类后仍走"非流式兜底一次"（流式特有的失败——帧损坏/增量解析失败——只有它能救回），
+    // 兜底也失败则抛**原始**流式失败，并把兜底失败打到日志（原来被 .catch(()=>null) 吞掉，排查时看不见）。
     let res = null;
     let roundLive = false;
     let roundStreamed = ''; // RA-37 G1：本轮真正经 delta 发出去的正文——收尾时用它算"还差哪一段没发"
-    try {
-      res = await chatStreamWithTools(provider, model, msgs, defs, keys, {
-        temperature,
-        signal: ctx.__signal,
-        onThink: (txt) => emitEv(ctx.conversationId, emit, { type: 'think', text: txt }),
-        onContent: (delta) => { roundLive = true; roundStreamed += delta; emitEv(ctx.conversationId, emit, { type: 'delta', delta }); },
-      });
-    } catch (e) {
-      if (e && e.aborted) return { content: '', stopped: true, toolLog, usage: {}, streamed: false, spentYuan: spentNow(), usageTotals: runTotals() };
-      const fb = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature).catch(() => null);
-      if (!fb) throw e;
-      res = fb; // 兜底（一次性）：正文未流式，由 index 收尾分块发出
+    const stoppedNow = () => ({ content: '', stopped: true, toolLog, usage: {}, streamed: false, spentYuan: spentNow(), usageTotals: runTotals() });
+    const maxRetries = Math.max(0, Number(lim.llmMaxRetries) || 0); // settings `llm_max_retries`（默认 1；0=关）
+    let attempt = 0;
+    for (;;) {
+      try {
+        res = await chatStreamWithTools(provider, model, msgs, defs, keys, {
+          temperature,
+          signal: ctx.__signal,
+          onThink: (txt) => emitEv(ctx.conversationId, emit, { type: 'think', text: txt }),
+          onContent: (delta) => { roundLive = true; roundStreamed += delta; emitEv(ctx.conversationId, emit, { type: 'delta', delta }); },
+        });
+        break;
+      } catch (e) {
+        if (e && e.aborted) return stoppedNow();
+        const d = llmRetryDecision(e);
+        if (d.retryable && attempt < maxRetries) {
+          attempt++;
+          const waitMs = d.retryAfterMs && d.retryAfterMs > 0 ? d.retryAfterMs : 0;
+          emitEv(ctx.conversationId, emit, { type: 'llm_retry', retry: { attempt, max: maxRetries, reason: d.reason, waitMs, error: String(e.message || e).slice(0, 200) } });
+          if (waitMs > 0 && !(await cancellableDelay(waitMs, ctx.__signal))) return stoppedNow();
+          continue;
+        }
+        let fbErr = null;
+        const fb = await chatOnceWithTools(provider, model, msgs, defs, keys, temperature, { signal: ctx.__signal })
+          .catch((e2) => { fbErr = e2; return null; });
+        if (!fb) {
+          if (fbErr && fbErr.aborted) return stoppedNow();
+          console.warn('[llm-retry] 非流式兜底也失败（' + ((fbErr && fbErr.message) || fbErr) + '），改抛原始流式失败：' + String(e.message || e).slice(0, 200));
+          throw e;
+        }
+        res = fb; // 兜底（一次性）：正文未流式，由 index 收尾分块发出
+        break;
+      }
     }
     const llmMs = Date.now() - llmT0;
     // 全量计量（账本=真实消耗，三档计费 hit/miss/out）：每一轮 LLM 调用都入 usage_stats（kind=round，WS0 起挂 agent_run_id）

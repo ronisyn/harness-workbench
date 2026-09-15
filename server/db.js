@@ -12,16 +12,85 @@ export const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   charset: 'utf8mb4',
+  // 死连接检测（架构项：工具级"不得永久挂住"的连接层那一半）。
+  // 问题不是"查询太慢"，而是**对端已经没了而我们还以为它在跑**：MySQL 走 SSH 隧道/网络抖动时，
+  // 本地 socket 仍可写，write() 成功返回，驱动就一直等一个永远不会来的响应——连"空闲"都算不上。
+  // mysql2 的 connectTimeout 默认 10s、enableKeepAlive 默认已开，但 keepAliveInitialDelay 不设
+  // 就是交给 OS 默认（Linux tcp_keepalive_time=7200s），等于发现不了。
+  // 120000 不是新造的阈值：它就是本项目对"外部连接多久没动静即判异常"的既有口径
+  // （LLM 流的 idleMs = 120000，网关层同一句话），这里只是把同一口径用在连接层。
+  keepAliveInitialDelay: 120000,
 });
 
+function abortError() {
+  const e = new Error('数据库操作已被中止（用户停止/会话结束）');
+  e.aborted = true;
+  return e;
+}
+
+/**
+ * 带"可中断"的取连接：signal 中止时**销毁**该连接而不是放回池子。
+ * 反复强调的口径（见 tools/deadline.js）：中止不等于抛弃——连接是我们持有的真实资源，
+ * 中止后仍要把它的归属处理干净（销毁），否则池子会被尸体连接占满。
+ * 局限（如实记下）：中止**不能**取消"排队等连接"本身（mysql2 的 getConnection 不可取消）；
+ * 排队中的那次会在拿到连接后立刻销毁并抛中止错。所以挂死时"停止"能结束这一轮，
+ * 但不是瞬时——它靠销毁连接释放槽位来推进。
+ */
+async function gotConn(signal) {
+  const conn = await pool.getConnection();
+  if (signal && signal.aborted) { try { conn.destroy(); } catch { /* ignore */ } throw abortError(); }
+  return conn;
+}
+
 export const db = {
-  async query(sql, params) {
-    const [rows] = await pool.query(sql, params);
-    return rows;
+  /**
+   * @param {string} sql
+   * @param {any[]} [params]
+   * @param {{signal?: AbortSignal}} [opts] 传 signal 时走可中断路径（销毁连接结束在飞查询）；不传＝原快路径
+   */
+  async query(sql, params, opts) {
+    const signal = opts && opts.signal;
+    if (!signal) {
+      const [rows] = await pool.query(sql, params);
+      return rows;
+    }
+    if (signal.aborted) throw abortError();
+    const conn = await gotConn(signal);
+    let destroyed = false;
+    const onAbort = () => { destroyed = true; try { conn.destroy(); } catch { /* ignore */ } };
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const [rows] = await conn.query(sql, params);
+      // 中止后拿到的那份结果**不可信**（实测：销毁连接时 mysql2 会以 `[{s:0}]` 之类**成功**返回，
+      // 而不是抛错——SLEEP(30) 被连接断开打断，却报成查询成功）。所以以 signal 为准：我们中止了，
+      // 这份结果就一律作废并如实抛中止错——宁可报"中止"，也不能把半截数据当查询结果交出去。
+      if (destroyed || signal.aborted) throw abortError();
+      return rows;
+    } finally {
+      try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ }
+      if (!destroyed) { try { conn.release(); } catch { /* ignore */ } }
+    }
   },
-  async run(sql, params) {
-    const [r] = await pool.execute(sql, params);
-    return r;
+  async run(sql, params, opts) {
+    const signal = opts && opts.signal;
+    if (!signal) {
+      const [r] = await pool.execute(sql, params);
+      return r;
+    }
+    if (signal.aborted) throw abortError();
+    const conn = await gotConn(signal);
+    let destroyed = false;
+    const onAbort = () => { destroyed = true; try { conn.destroy(); } catch { /* ignore */ } };
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const [r] = await conn.execute(sql, params);
+      // 写语句被中止时结果未知（可能已提交、可能没有）——绝不把"不知道"报成"成功"，如实抛中止错
+      if (destroyed || signal.aborted) throw abortError();
+      return r;
+    } finally {
+      try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ }
+      if (!destroyed) { try { conn.release(); } catch { /* ignore */ } }
+    }
   },
 };
 

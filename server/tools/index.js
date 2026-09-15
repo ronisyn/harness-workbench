@@ -15,6 +15,7 @@ import { subtoolRefusal } from '../subtools.js';
 import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepServed, grepRepeatNotice, markWritten } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
+import { armDeadline, toolTimeoutResult } from './deadline.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
@@ -358,9 +359,9 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B20 OCR（视觉模型文字识别：稳定可用；tesseract CDN 语言包在国内不可靠已弃用） ----------
-  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read',
+  { name: 'ocr_image', description: '图片文字识别/OCR：调用视觉模型提取图中文字与内容（支持本地图片路径或 http(s) URL）', permission: 'read', timeoutMs: 90000,
     params: { path: { type: 'string', required: true, desc: '图片文件路径或 URL' } },
-    run: async (a) => {
+    run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
       if (!key) throw new Error('未配置 DeepSeek key');
       let dataUrl;
@@ -379,7 +380,8 @@ const RAW_TOOLS = [
           messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请识别这张图片中的所有文字并原样输出（OCR）。如果图中有版式，按从上到下、从左到右排列；没有文字就说没有文字。' }] }],
           max_tokens: 1200,
         }),
-        signal: AbortSignal.timeout(90000),
+        // 界限声明在工具定义上（timeoutMs: 90000），实现消费它——一个界限只留一个出处，且用户"停止"能打断它
+        signal: ctx.__signal,
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error('OCR 视觉调用失败: ' + (j.error?.message || res.status));
@@ -387,7 +389,7 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B11-B13 命令 ----------
-  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full',
+  { name: 'run_command', description: '执行 shell 命令（**最后手段**，仅在无专门工具时用：读文件请用 read_file、列目录用 list_dir、搜索用 grep_search、查找用 find_file、查文件信息用 list_dir；本工具只用于专门工具覆盖不了的操作，如安装依赖 npm install、启动服务、系统管理等。注意 shell 引号与管道易出错，尽量用专门工具避免）', permission: 'full', timeoutMs: 300000,
     params: { cmd: { type: 'string', required: true, desc: '命令（如 npm install）' }, timeout: { type: 'number', desc: '超时秒数 5-300，默认 30' } },
     run: async (a, ctx) => {
       if (ctx.limitPath) {
@@ -395,7 +397,9 @@ const RAW_TOOLS = [
         if (!allow.some((p) => a.cmd.startsWith(p))) throw new Error('write 级仅允许工作区常用命令，此命令需 full 权限');
       }
       const [cmd, ...args] = a.cmd.split(/\s+/);
-      const t = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
+      // timeout 参数是模型选的（5-300s）；声明的 timeoutMs=300s 是它的上限，两者取小即"一个界限一个出处"
+      const want = Math.min(300, Math.max(5, Number(a.timeout) || 30)) * 1000;
+      const t = ctx.__deadline ? Math.min(want, Math.max(1, ctx.__deadline - Date.now())) : want;
       const r = await runCmd(cmd, args, { cwd: ctx.root }, t);
       return { ok: r.ok, stdout: r.out, stderr: r.err, code: r.code };
     } },
@@ -458,22 +462,22 @@ const RAW_TOOLS = [
     } },
 
   // ---------- B14 联网搜索（SearXNG） ----------
-  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read',
+  { name: 'web_search', description: '联网搜索（SearXNG 自托管）', permission: 'read', timeoutMs: 15000,
     params: { query: { type: 'string', required: true }, limit: { type: 'number' } },
-    run: async (a) => {
+    run: async (a, ctx) => {
       const base = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
       const url = `${base}/search?q=${encodeURIComponent(a.query)}&format=json`;
-      const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const r = await fetch(url, { signal: ctx.__signal });
       if (!r.ok) throw new Error('搜索服务不可用 ' + r.status);
       const j = await r.json();
       return { results: (j.results || []).slice(0, a.limit || 8).map((x) => ({ title: x.title, url: x.url, snippet: (x.content || '').slice(0, 200) })) };
     } },
 
   // ---------- B15 读网页 ----------
-  { name: 'fetch_url', description: '读取网页正文（简易提取）', permission: 'read',
+  { name: 'fetch_url', description: '读取网页正文（简易提取）', permission: 'read', timeoutMs: 20000,
     params: { url: { type: 'string', required: true } },
-    run: async (a) => {
-      const r = await fetch(a.url, { signal: AbortSignal.timeout(20000), headers: { 'User-Agent': 'Mozilla/5.0' } });
+    run: async (a, ctx) => {
+      const r = await fetch(a.url, { signal: ctx.__signal, headers: { 'User-Agent': 'Mozilla/5.0' } });
       const html = await r.text();
       const text = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '')
         .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -487,18 +491,21 @@ const RAW_TOOLS = [
   { name: 'extract_pptx', description: '提取 PPT 文本', permission: 'read', params: { path: { type: 'string', required: true } }, run: async (a) => ({ text: (await extractPptx(a.path)).slice(0, 20000) }) },
 
   // ---------- B21/B22 数据库（全局权限） ----------
+  // 界限口径（有意**不**声明 timeoutMs）：慢查询不是错误，砍它只会掩盖问题（该看的是慢查询日志）；
+  // 这里要解决的是"对端已经没了而我们还以为它在跑"——两条结构手段：连接级 keepAlive 死连接检测
+  // （见 db.js）+ 把用户"停止"接进查询（ctx.__signal → 连接销毁）。两者都不需要编一个业务阈值。
   { name: 'db_query', description: '数据库只读查询（仅单条 SELECT；不支持 SHOW/多语句/写操作）。查库表清单用 information_schema（如 SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()）；查表列用 information_schema.columns。列名以实际表结构为准，不确定先查 information_schema。', permission: 'global',
     params: { sql: { type: 'string', required: true } },
-    run: async (a) => {
+    run: async (a, ctx) => {
       if (!/^\s*select\b/i.test(a.sql)) {
         throw new Error('仅支持单条 SELECT（当前语句被拒）。不支持 SHOW/EXPLAIN/多语句/写操作。查表清单：SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()；查某表列：SELECT column_name FROM information_schema.columns WHERE table_name=\'<表名>\'。请改用 SELECT 或先查 information_schema。');
       }
-      const rows = await db.query(a.sql);
+      const rows = await db.query(a.sql, undefined, { signal: ctx.__signal });
       return { rowCount: rows.length, rows: rows.slice(0, 50) };
     } },
   { name: 'db_write', description: '数据库写入（高危，留痕）', permission: 'global',
     params: { sql: { type: 'string', required: true } },
-    run: async (a) => { const r = await db.run(a.sql); return { affected: r.affectedRows, insertId: r.insertId }; } },
+    run: async (a, ctx) => { const r = await db.run(a.sql, undefined, { signal: ctx.__signal }); return { affected: r.affectedRows, insertId: r.insertId }; } },
 
   // ---------- B23-B26 Git ----------
   { name: 'git_status', description: '查看 git 状态', permission: 'read', params: { dir: { type: 'string', required: true } },
@@ -584,9 +591,9 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 图片理解（视觉模型分析图片） ----------
-  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read',
+  { name: 'view_image', description: '用视觉模型理解图片内容（支持本地图片路径或 http(s) URL），返回图片描述', permission: 'read', timeoutMs: 60000,
     params: { path: { type: 'string', required: true, desc: '本地图片路径或 URL' } },
-    run: async (a) => {
+    run: async (a, ctx) => {
       const key = process.env.DEEPSEEK_API_KEY;
       if (!key) throw new Error('未配置 DeepSeek key');
       let dataUrl;
@@ -606,7 +613,7 @@ const RAW_TOOLS = [
           messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl } }, { type: 'text', text: '请详细描述这张图片的内容（中文）' }] }],
           max_tokens: 800,
         }),
-        signal: AbortSignal.timeout(60000),
+        signal: ctx.__signal, // 同上：界限 = 工具定义上的 timeoutMs: 60000
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error('视觉调用失败: ' + (j.error?.message || res.status));
@@ -1090,12 +1097,13 @@ const RAW_TOOLS = [
     } },
 
   // ---------- 飞书文档（F7/F9/F10/F11，v2.0 渠道一期） ----------
-  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
-    run: async (a) => feishuConfigured() ? await readFeishuDoc(a.url) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容', permission: 'read', params: { url: { type: 'string', required: true }, range: { type: 'string' } },
-    run: async (a) => feishuConfigured() ? await readFeishuSheet(a.url, a.range) : { error: '未配置飞书凭证' } },
-  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
-    run: async (a) => feishuConfigured() ? await readFeishuBitable(a.appToken, a.tableId) : { error: '未配置飞书凭证' } },
+  // 界限口径：一次调用最多 1 次取 token + 2 次 API GET，沿用原有数值 15000 + 2×20000 = 55000（不新造数）
+  { name: 'feishu_doc_read', description: '读取飞书云文档/知识库文档内容（docx/wiki 链接）', permission: 'read', timeoutMs: 55000, params: { url: { type: 'string', required: true, desc: '飞书文档链接或 ID' } },
+    run: async (a, ctx) => feishuConfigured() ? await readFeishuDoc(a.url, ctx.__signal) : { error: '未配置飞书凭证' } },
+  { name: 'feishu_sheet_read', description: '读取飞书电子表格内容', permission: 'read', timeoutMs: 55000, params: { url: { type: 'string', required: true }, range: { type: 'string' } },
+    run: async (a, ctx) => feishuConfigured() ? await readFeishuSheet(a.url, a.range, ctx.__signal) : { error: '未配置飞书凭证' } },
+  { name: 'feishu_bitable_read', description: '读取飞书多维表格记录', permission: 'read', timeoutMs: 55000, params: { appToken: { type: 'string', required: true }, tableId: { type: 'string', required: true } },
+    run: async (a, ctx) => feishuConfigured() ? await readFeishuBitable(a.appToken, a.tableId, ctx.__signal) : { error: '未配置飞书凭证' } },
 
   // ---------- 会话归档（WS5e：conv_summarize → conv_summaries；v2=语义摘要（LLM），失败/关闭时回退结构化 v1） ----------
   { name: 'conv_summarize', description: '归档本/指定会话：写入 conv_summaries（v2 语义摘要：主题/关键决策/未完成事项/用户偏好；或结构化统计），供跨周/长会话恢复时注入首轮提示。长会话收尾或用户要求"总结这个对话"时用。semantic=true 或消息超 80 条时自动走 LLM 摘要（烧少量 token）', permission: 'read',
@@ -1285,6 +1293,7 @@ export async function execTool(name, args, ctx) {
       name,
       description: '[MCP:' + srvId + '] ' + mcpTool,
       permission: 'write', // MCP 外部副作用按 write 级评估（read 会话不可用；guard 会话可另配规则/审批）
+      timeoutMs: 15000, // 与 mcp.js 的 JSON-RPC 响应等待同口径（外部 server 不可控，必须声明界限）
       params: { __mcp: { type: 'object', desc: '透传参数（MCP server 定义）' } },
       run: async (a) => {
         const { callMcpTool } = await import('../mcp.js');
@@ -1391,7 +1400,22 @@ export async function execTool(name, args, ctx) {
       if (payload.args !== args) args = payload.args;
       // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
       try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
-      result = await tool.run(args, eff);
+      // 工具级截止（架构对齐 DSH `dsh-tool-call-timeout-policy`）：工具在**自己的定义上**声明 `timeoutMs`，
+      // 这里派生一个到点即中止的 signal 换进 ctx，工具据此收口；到点后不再多等，但**不抢跑、不丢弃它的 promise**。
+      // 工具若越过自己声明的界限才返回 → 结果如实改写成超时（不是假装它没跑过），走正常留痕成为 fail 行。
+      // 界限只在"工具自己知道有界"时声明；长任务（子代理/编排/后台任务）与等人工（ask_user/审批）**不声明**——
+      // 给它们编一个数就是莫须有的限制（审批等待已在上面单独从执行用时里扣掉，同理）。
+      const bound = armDeadline(eff.__signal, tool.timeoutMs);
+      if (bound) { eff.__signal = bound.signal; eff.__deadline = bound.deadlineAt; }
+      try {
+        result = await tool.run(args, eff);
+      } finally {
+        if (bound) bound.dispose();
+      }
+      if (bound && bound.expired()) {
+        console.warn('[tool-timeout] ' + name + ' 越过声明的 ' + tool.timeoutMs + 'ms 才返回（conv=' + (ctx.conversationId || '-') + '）——结果已如实改写为超时');
+        result = toolTimeoutResult(name, tool.timeoutMs);
+      }
       // 写操作成功后让本会话的**搜索结果记录**整体作废（2026-09-15）：grep 的结果依赖"文件此刻的内容"，
       // 与其去算哪些文件被改了，不如整体作废——宁可多给一次搜索结果，也不能给一份过期的。
       // 只对"改文件"的工具做，且只在本会话内（跨会话不串用）。

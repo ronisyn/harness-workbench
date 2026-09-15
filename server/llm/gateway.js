@@ -124,8 +124,75 @@ export async function* chatStream(providerId, messages, opts = {}, keys, ctx = {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 失败分类与可取消等待（架构对齐 DSH `dsh-llm-retry`）
+// DSH 的策略字段：`{mode, maxRetries, retryableCodes, initialDelayMs, maxDelayMs, jitterRatio}`，
+// 核心两句：① 只在 `retryableCodes.includes(failure.code)` 时重试（不搞"一律重试"）；
+// ② 每次重试"先把意图落进会话，再做**可取消**的等待"（cancellableDelay + AbortSignal.any）。
+// 我们照做①②；退避参数（initialDelayMs/jitterRatio）**暂不引入**——DSH 仓库里没有它的实际取值
+// （策略在部署配置里），编一个 initialDelayMs 就是莫须有的值。等待时长优先用服务端给的 Retry-After，
+// 它没给就立刻重试。这条差距登记在《架构文档冲突登记》。
+// ---------------------------------------------------------------------------
+
+/** 厂商侧"可恢复"的 HTTP 状态：限流/超时/网关类。其余 4xx（参数、鉴权、模型不存在）重试纯属浪费。 */
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 522, 524]);
+/** 网络/超时类失败（无 HTTP 状态码时的判据，措辞取自 Node fetch/undici 与本网关自有文案） */
+const RETRYABLE_MSG = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|other side closed|fetch failed|terminated|空闲超时|连接失败/i;
+
+/**
+ * 把一次厂商失败分类成"能不能重试"。
+ * @param {Error & {status?: number, aborted?: boolean, retryAfterMs?: number}} err
+ * @returns {{retryable: boolean, reason: string, retryAfterMs: number|null}}
+ */
+export function llmRetryDecision(err) {
+  if (!err) return { retryable: false, reason: '未知失败', retryAfterMs: null };
+  // 用户已停止：**绝不重试**（重试等于把用户按下的停止键又按回去）
+  if (err.aborted) return { retryable: false, reason: '用户已停止', retryAfterMs: null };
+  const st = Number(err.status) || 0;
+  if (st) {
+    const retryable = RETRYABLE_STATUS.has(st);
+    return { retryable, reason: 'HTTP ' + st + (retryable ? '（厂商侧可恢复）' : '（请求被拒，重试无效）'), retryAfterMs: err.retryAfterMs || null };
+  }
+  const msg = String(err.message || '');
+  if (RETRYABLE_MSG.test(msg)) return { retryable: true, reason: '网络/超时类失败', retryAfterMs: err.retryAfterMs || null };
+  // 未分类一律**不重试**（宁可少重试一次，也不要对参数类错误反复打厂商）——非流式兜底仍会走
+  return { retryable: false, reason: '未分类失败（按不可重试处理）', retryAfterMs: null };
+}
+
+/** 解析厂商 Retry-After 头（秒数或 HTTP 日期）。解析不出返回 null（= 不等待，立刻重试）。 */
+export function retryAfterMsOf(headerValue) {
+  if (!headerValue) return null;
+  const s = String(headerValue).trim();
+  if (/^\d+$/.test(s)) return Number(s) * 1000;
+  const t = Date.parse(s);
+  if (Number.isFinite(t)) return Math.max(0, t - Date.now());
+  return null;
+}
+
+/**
+ * 可取消等待（DSH `cancellableDelay` 同款）：等待期间用户"停止"即刻返回 false。
+ * 用 setTimeout 而非 sleep 轮询：不空转，且把监听器在两条路径上都摘干净。
+ * 注意**不 unref**（与 DSH 一致）：这个计时器正是调用方在等的那件事，unref 会让"只有它在等待"时
+ * 进程/测试进程直接退出（本地实测：夹具被 node:test 判成 "event loop has already resolved"）。
+ */
+export function cancellableDelay(delayMs, signal) {
+  const ms = Number(delayMs);
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve(true);
+  if (signal && signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => { clearTimeout(timer); resolve(false); };
+    const timer = setTimeout(() => {
+      if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ } }
+      resolve(true);
+    }, ms);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 // 非流式 + 工具调用（function calling）：返回 { content, toolCalls, usage, reasoning }
-export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 0.4) {
+// opts.signal：外部中止（A5）。原来这里**不接** signal——于是"流式失败后走兜底"那段时间里
+// 用户按停止是无效的（真实洞，2026-09-15 统一口径时修）。厂商自带超时与外部 signal 取并集。
+export async function chatOnceWithTools(providerId, model, messages, tools, keys, temperature = 0.4, opts = {}) {
   const p = resolve(providerId, keys);
   // 工具名去重防御（2026-09 批5）：外部源（MCP server）工具可能与本地/自身重复 → deepseek 报
   // "Tool names must be unique" 400。发送前按 name 去重（保留首个），并记录重名供诊断。
@@ -151,10 +218,16 @@ export async function chatOnceWithTools(providerId, model, messages, tools, keys
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + p.key },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(p.timeoutMs || 90000), // O-3：工具模式超时按厂商（GLM thinking 180s）
+    // O-3：工具模式超时按厂商（GLM thinking 180s）；与外部 signal 取并集（可被"停止"打断）
+    signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(p.timeoutMs || 90000)]) : AbortSignal.timeout(p.timeoutMs || 90000),
   });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${p.name} 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
+  if (!res.ok) {
+    const err = new Error(`${p.name} 调用失败 ${res.status}: ${(j.error?.message || res.statusText || '').slice(0, 200)}`);
+    err.status = res.status;
+    err.retryAfterMs = retryAfterMsOf(res.headers.get('retry-after')); // 等待时长优先用服务端给的（不自己编退避）
+    throw err;
+  }
   const msg = j.choices?.[0]?.message || {};
   const usage = j.usage || {};
   return {
@@ -271,6 +344,7 @@ export async function chatStreamWithTools(providerId, model, messages, tools, ke
     const text = await res.text().catch(() => '');
     const err = new Error(`${p.name}(${model || p.defaultModel}) 流式调用失败 ${res.status}: ${text.slice(0, 200)}`);
     err.status = res.status;
+    err.retryAfterMs = retryAfterMsOf(res.headers.get('retry-after')); // 同上：限流等待时长听服务端的
     throw err;
   }
   const reader = res.body.getReader();

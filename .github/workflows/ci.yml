@@ -24,3 +24,7 @@ jobs:
       # 前缀声明检查：任何进前缀的组件都必须声明缓存影响（v0.3 §4.4.1 规则5），
       # 锚点必须还在源码里，且节点 0 只允许有一个写入点。
       - run: node --test --test-force-exit test/prefix-participants.test.mjs
+      # 工具界限表（2026-09-15）：每个工具调用要么有界，要么**如实**未声明。
+      # 这条机检挡住"把超时写死在实现里"——那种写法既不出现在工具面上（模型/用户看不见），
+      # 也吞掉用户"停止"（私有 AbortSignal.timeout 只认自己那个计时器）。
+      - run: node scripts/tool-bounds.mjs

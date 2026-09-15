@@ -9,113 +9,640 @@
     "kind=milestone: 明确属后续里程碑（M2/M3）⇒ 输出'转 M2/M3'，不计入未完成"
   ],
   "items": [
-    { "id": "RA-01", "title": "换客户环境只改配置不改代码", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/env.js", "pattern": "RW_WORKSPACE" }],
-      "note": "环境事实单一来源；两份配置跑同一份代码" },
-    { "id": "RA-02", "title": "编排核心脱离 HTTP 单跑", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "export async function runAgent" }],
-      "note": "runAgent 不依赖 Express；headless 实测 1 秒返回" },
-    { "id": "RA-03", "title": "加删工具不改核心代码、不整体重启", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/registry.js", "pattern": "startManifestWatch" }],
-      "note": "清单热重载；实测 65↔64 未重启（这条同时关掉 v0.3 §7.1 ④）" },
-    { "id": "RA-04", "title": "前缀五纪律生效；C4=0", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/prefix.js", "pattern": "export function diffCore" }, { "file": "server/agent.js", "pattern": "prefix:invalidate" }],
-      "note": "只追加机检 + C4 账本；机检口径实测 0 行" },
-    { "id": "RA-05", "title": "大结果 → 预览+定位符+省略量，可取回", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/spill.js", "pattern": "export function spillToolResult" }, { "file": "server/tools/index.js", "pattern": "readSpill" }],
-      "note": "spill + fetch_spill 取回" },
-    { "id": "RA-05b", "title": "spill 阈值标定", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/spill.js", "pattern": "export const byteCeiling" }],
-      "note": "原固定 32768 在普通路径几何上不可能触发 → 改为按 cap 派生（cap×2）" },
-    { "id": "RA-06", "title": "存盘失败工具仍成功", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/spill.js", "pattern": "已按内联截断降级" }],
-      "note": "落盘 best-effort，失败不改工具成败" },
-    { "id": "RA-07", "title": "超限结果 → 预览+省略量+定位符，无额外 LLM 调用", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/spill.js", "pattern": "function compose" }],
-      "note": "三路径（stored/reader/degraded）" },
-    { "id": "RA-08", "title": "换小窗口模型折叠阈值自动变小（比例制）", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/modelwindow.js", "pattern": "export" }],
-      "note": "有效阈值 = min(绝对阈值, 窗口×占比)" },
-    { "id": "RA-09", "title": "不用知识的轮次上下文里无知识", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/kbgate.js", "pattern": "export function kbInjectMode" }, { "file": "test/kbgate.test.mjs", "pattern": "none 档" }],
-      "note": "三档按需注入；none 档一个字节都不进" },
-    { "id": "RA-10", "title": "不用技能时只有技能目录", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "const appendNewSkills" }],
-      "note": "技能全文只在载入后注入，且走 in-history 追加（不碰节点 0）" },
-    { "id": "RA-11", "title": "历史 SKU 备货量走精确查询", "owner": "agent", "kind": "manual",
-      "evidence": "RW 无该业务数据；机制在（db_query 精确查询），场景项需真实业务库才能实测" },
-    { "id": "RA-12", "title": "子代理工具清单可收窄到单个工具", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/subtools.js", "pattern": "export function narrowEnabled" }, { "file": "server/subtools.js", "pattern": "export function subtoolRefusal" }],
-      "note": "schema 层与执行层同口径" },
-    { "id": "RA-13", "title": "子代理失败 → 交付物照出并标注未取得", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/subagent.js", "pattern": "degraded" }],
-      "note": "真模型两种失败形态端到端实测" },
-    { "id": "RA-14", "title": "子代理只烧自己额度；未花完显式回收", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "effectiveSubBudget" }],
-      "note": "轮首+轮尾双判定；与段阈值取 min" },
-    { "id": "RA-15..19", "title": "数据视窗/沙箱相关五项", "owner": "平台", "kind": "milestone", "milestone": "M2", "note": "数据出口唯一化未做（OP-01）" },
-    { "id": "RA-20..24", "title": "外部引擎围栏五项", "owner": "平台+agent", "kind": "milestone", "milestone": "M2", "note": "外部前提实测未做（OP-07）" },
-    { "id": "RA-25", "title": "沙箱内看不到原始数据", "owner": "平台", "kind": "milestone", "milestone": "M2", "note": "同 RA-15" },
-    { "id": "RA-26", "title": "等待确认与执行中是两个状态（四面）", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "budgetElapsedMs" }, { "file": "server/agent.js", "pattern": "wait_start" }],
-      "note": "接口/监控/计费/超时四面实测通过" },
-    { "id": "RA-27", "title": "系统故障后从检查点重建", "owner": "agent", "kind": "milestone", "milestone": "M2", "note": "干净沙箱+重放摘要无沙箱不可测；interrupted 可恢复已在" },
-    { "id": "RA-28", "title": "预算耗尽不能自动续", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "budget-total" }],
-      "note": "守卫直接返回挂起文案" },
-    { "id": "RA-29", "title": "检查点不进记忆召回候选", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/checkpoint.js", "pattern": "export" }],
-      "note": "检查点是文件，不进 knowledge/kb_search" },
-    { "id": "RA-30", "title": "定时任务不套空会话", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/scheduler.js", "pattern": "taskExecContext" }],
-      "note": "专用执行会话驱动" },
-    { "id": "RA-31", "title": "agent 暴露结束原因/用量/能力清单", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/capabilities.js", "pattern": "export function capabilityManifest" }, { "file": "server/index.js", "pattern": "/api/agent/capabilities" }],
-      "note": "四件事齐：结束原因/用量/用了哪些能力/自述不可信" },
-    { "id": "RA-32", "title": "AgentAdapter 契约成文 + 两家引擎各接一次", "owner": "agent", "kind": "milestone", "milestone": "M2/M3", "note": "契约未写（OP-05）" },
-    { "id": "RA-33", "title": "三家引擎成本基线", "owner": "agent", "kind": "milestone", "milestone": "M2/M3", "note": "当前只有单一引擎真实流量（OP-06）" },
-    { "id": "RA-34", "title": "客户形态机装上、自检过、账本可导出", "owner": "平台", "kind": "milestone", "milestone": "M2", "note": "Windows Server 适配与离线安装未做" },
-    { "id": "RA-35", "title": "命中率与增量指标", "owner": "agent", "kind": "manual",
+    {
+      "id": "RA-01",
+      "title": "换客户环境只改配置不改代码",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/env.js",
+          "pattern": "RW_WORKSPACE"
+        }
+      ],
+      "note": "环境事实单一来源；两份配置跑同一份代码"
+    },
+    {
+      "id": "RA-02",
+      "title": "编排核心脱离 HTTP 单跑",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "export async function runAgent"
+        }
+      ],
+      "note": "runAgent 不依赖 Express；headless 实测 1 秒返回"
+    },
+    {
+      "id": "RA-03",
+      "title": "加删工具不改核心代码、不整体重启",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/registry.js",
+          "pattern": "startManifestWatch"
+        }
+      ],
+      "note": "清单热重载；实测 65↔64 未重启（这条同时关掉 v0.3 §7.1 ④）"
+    },
+    {
+      "id": "RA-04",
+      "title": "前缀五纪律生效；C4=0",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/prefix.js",
+          "pattern": "export function diffCore"
+        },
+        {
+          "file": "server/agent.js",
+          "pattern": "prefix:invalidate"
+        }
+      ],
+      "note": "只追加机检 + C4 账本；机检口径实测 0 行"
+    },
+    {
+      "id": "RA-05",
+      "title": "大结果 → 预览+定位符+省略量，可取回",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/spill.js",
+          "pattern": "export function spillToolResult"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "readSpill"
+        }
+      ],
+      "note": "spill + fetch_spill 取回"
+    },
+    {
+      "id": "RA-05b",
+      "title": "spill 阈值标定",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/spill.js",
+          "pattern": "export const byteCeiling"
+        }
+      ],
+      "note": "原固定 32768 在普通路径几何上不可能触发 → 改为按 cap 派生（cap×2）"
+    },
+    {
+      "id": "RA-06",
+      "title": "存盘失败工具仍成功",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/spill.js",
+          "pattern": "已按内联截断降级"
+        }
+      ],
+      "note": "落盘 best-effort，失败不改工具成败"
+    },
+    {
+      "id": "RA-07",
+      "title": "超限结果 → 预览+省略量+定位符，无额外 LLM 调用",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/spill.js",
+          "pattern": "function compose"
+        }
+      ],
+      "note": "三路径（stored/reader/degraded）"
+    },
+    {
+      "id": "RA-08",
+      "title": "换小窗口模型折叠阈值自动变小（比例制）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/modelwindow.js",
+          "pattern": "export"
+        }
+      ],
+      "note": "有效阈值 = min(绝对阈值, 窗口×占比)"
+    },
+    {
+      "id": "RA-09",
+      "title": "不用知识的轮次上下文里无知识",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/kbgate.js",
+          "pattern": "export function kbInjectMode"
+        },
+        {
+          "file": "test/kbgate.test.mjs",
+          "pattern": "none 档"
+        }
+      ],
+      "note": "三档按需注入；none 档一个字节都不进"
+    },
+    {
+      "id": "RA-10",
+      "title": "不用技能时只有技能目录",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "const appendNewSkills"
+        }
+      ],
+      "note": "技能全文只在载入后注入，且走 in-history 追加（不碰节点 0）"
+    },
+    {
+      "id": "RA-11",
+      "title": "历史 SKU 备货量走精确查询",
+      "owner": "agent",
+      "kind": "manual",
+      "evidence": "RW 无该业务数据；机制在（db_query 精确查询），场景项需真实业务库才能实测"
+    },
+    {
+      "id": "RA-12",
+      "title": "子代理工具清单可收窄到单个工具",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/subtools.js",
+          "pattern": "export function narrowEnabled"
+        },
+        {
+          "file": "server/subtools.js",
+          "pattern": "export function subtoolRefusal"
+        }
+      ],
+      "note": "schema 层与执行层同口径"
+    },
+    {
+      "id": "RA-13",
+      "title": "子代理失败 → 交付物照出并标注未取得",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/subagent.js",
+          "pattern": "degraded"
+        }
+      ],
+      "note": "真模型两种失败形态端到端实测"
+    },
+    {
+      "id": "RA-14",
+      "title": "子代理只烧自己额度；未花完显式回收",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "effectiveSubBudget"
+        }
+      ],
+      "note": "轮首+轮尾双判定；与段阈值取 min"
+    },
+    {
+      "id": "RA-15..19",
+      "title": "数据视窗/沙箱相关五项",
+      "owner": "平台",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "数据出口唯一化未做（OP-01）"
+    },
+    {
+      "id": "RA-20..24",
+      "title": "外部引擎围栏五项",
+      "owner": "平台+agent",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "外部前提实测未做（OP-07）"
+    },
+    {
+      "id": "RA-25",
+      "title": "沙箱内看不到原始数据",
+      "owner": "平台",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "同 RA-15"
+    },
+    {
+      "id": "RA-26",
+      "title": "等待确认与执行中是两个状态（四面）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "budgetElapsedMs"
+        },
+        {
+          "file": "server/agent.js",
+          "pattern": "wait_start"
+        }
+      ],
+      "note": "接口/监控/计费/超时四面实测通过"
+    },
+    {
+      "id": "RA-27",
+      "title": "系统故障后从检查点重建",
+      "owner": "agent",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "干净沙箱+重放摘要无沙箱不可测；interrupted 可恢复已在"
+    },
+    {
+      "id": "RA-28",
+      "title": "预算耗尽不能自动续",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "budget-total"
+        }
+      ],
+      "note": "守卫直接返回挂起文案"
+    },
+    {
+      "id": "RA-29",
+      "title": "检查点不进记忆召回候选",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/checkpoint.js",
+          "pattern": "export"
+        }
+      ],
+      "note": "检查点是文件，不进 knowledge/kb_search"
+    },
+    {
+      "id": "RA-30",
+      "title": "定时任务不套空会话",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/scheduler.js",
+          "pattern": "taskExecContext"
+        }
+      ],
+      "note": "专用执行会话驱动"
+    },
+    {
+      "id": "RA-31",
+      "title": "agent 暴露结束原因/用量/能力清单",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/capabilities.js",
+          "pattern": "export function capabilityManifest"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "/api/agent/capabilities"
+        }
+      ],
+      "note": "四件事齐：结束原因/用量/用了哪些能力/自述不可信"
+    },
+    {
+      "id": "RA-32",
+      "title": "AgentAdapter 契约成文 + 两家引擎各接一次",
+      "owner": "agent",
+      "kind": "milestone",
+      "milestone": "M2/M3",
+      "note": "契约未写（OP-05）"
+    },
+    {
+      "id": "RA-33",
+      "title": "三家引擎成本基线",
+      "owner": "agent",
+      "kind": "milestone",
+      "milestone": "M2/M3",
+      "note": "当前只有单一引擎真实流量（OP-06）"
+    },
+    {
+      "id": "RA-34",
+      "title": "客户形态机装上、自检过、账本可导出",
+      "owner": "平台",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "Windows Server 适配与离线安装未做"
+    },
+    {
+      "id": "RA-35",
+      "title": "命中率与增量指标",
+      "owner": "agent",
+      "kind": "manual",
       "evidence": "node scripts/cache-fresh.mjs（一条全新对话从 0 开始）· node scripts/toolresult-profile.mjs（每轮新增来源归因）· node scripts/prefix-attribution.mjs（失效归因）· node scripts/metric-parity-compare.mjs（两套口径对照）",
-      "note": "**判据已于 2026-09-15 更正：不设数值线，改成 4 条 0/1 可机检的不变量 + 只报数的观测量。** 原写的三条数值目标（每轮新增≤1000 / 命中率中位≥98%·P90≥99%）已撤回——短会话上命中率由分母决定（上下文 1.09万 vs DSH 44.3万），算术上不可达；DSH 也没有这三条（它的命中率只在前端显示、计量器明确不支持任何设置）" },
-    { "id": "RA-36", "title": "升级不丢数据 + 旧账过账清单闭环 + 存储格式带版本与迁移链", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "scripts/migration-rehearsal.mjs", "pattern": "ALTER" }, { "file": "scripts/audit-ledger.mjs", "pattern": "OP-03" }, { "file": "server/migrations.js", "pattern": "export const VERSIONS" }, { "file": "test/migrations.test.mjs", "pattern": "缺口或乱序" }],
-      "note": "升级演练两次；过账清单已定稿并有取证脚本；**2026-09-15 补齐 G4 的另一半**：结构变更改为带版本号的迁移链（schema_migrations + 序号连续校验 + 只容忍声明过的错误），照 DSH 会话格式迁移链的两条：相邻无缺口、只向前" },
-    { "id": "RA-37", "title": "事件契约成文；仅靠事件流可重建全过程", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "docs/事件契约.md", "pattern": "run_end" }, { "file": "src/eventstream.js", "pattern": "verifyRebuild" }, { "file": "server/index.js", "pattern": "/api/conversations/:id/stream" }],
-      "note": "契约+重建器+真 SSE 三场景；断线续订为只读通道" },
-    { "id": "RA-38", "title": "系统层+工具层逐字节一致", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/prefix.js", "pattern": "export const prefixHash" }, { "file": "test/prefix-epoch.test.mjs", "pattern": "确定性" }],
-      "note": "同输入同哈希；不同档位必不同哈希" },
-    { "id": "RA-39", "title": "同工具同参数第 3/5 次提醒但不阻止", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "repeatReminded" }, { "file": "test/loopguard.test.mjs", "pattern": "3" }],
-      "note": "提醒不阻断；挂起阈值=连续 N 次" },
-    { "id": "RA-40", "title": "折叠后交付物依据仍在", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/agent.js", "pattern": "早期执行轮次已折叠" }],
-      "note": "原文在 messages（只有 INSERT），可按 id 回查" },
-    { "id": "RA-41", "title": "被别的 agent 当 MCP 工具调用成功一次", "owner": "agent", "kind": "milestone", "milestone": "M2", "note": "MCP server 形态未开工" },
-    { "id": "RA-42", "title": "幂等键 / 回调 HMAC / 死信落点", "owner": "agent", "kind": "milestone", "milestone": "M2", "note": "对外形态未开工" },
-
-    { "id": "OP-03", "title": "策略引擎失败语义", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/hooks.js", "pattern": "必须显式声明失败语义" }, { "file": "test/op03-hooks.test.mjs", "pattern": "fail-closed 名单" }],
-      "note": "注册必填 failure + 超时 + 失败留痕 + 改写审计" },
-    { "id": "OP-08", "title": "子代理深度实证", "owner": "agent", "kind": "manual",
+      "note": "**判据已于 2026-09-15 更正：不设数值线，改成 4 条 0/1 可机检的不变量 + 只报数的观测量。** 原写的三条数值目标（每轮新增≤1000 / 命中率中位≥98%·P90≥99%）已撤回——短会话上命中率由分母决定（上下文 1.09万 vs DSH 44.3万），算术上不可达；DSH 也没有这三条（它的命中率只在前端显示、计量器明确不支持任何设置）"
+    },
+    {
+      "id": "RA-36",
+      "title": "升级不丢数据 + 旧账过账清单闭环 + 存储格式带版本与迁移链",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "scripts/migration-rehearsal.mjs",
+          "pattern": "ALTER"
+        },
+        {
+          "file": "scripts/audit-ledger.mjs",
+          "pattern": "OP-03"
+        },
+        {
+          "file": "server/migrations.js",
+          "pattern": "export const VERSIONS"
+        },
+        {
+          "file": "test/migrations.test.mjs",
+          "pattern": "缺口或乱序"
+        }
+      ],
+      "note": "升级演练两次；过账清单已定稿并有取证脚本；**2026-09-15 补齐 G4 的另一半**：结构变更改为带版本号的迁移链（schema_migrations + 序号连续校验 + 只容忍声明过的错误），照 DSH 会话格式迁移链的两条：相邻无缺口、只向前"
+    },
+    {
+      "id": "RA-37",
+      "title": "事件契约成文；仅靠事件流可重建全过程",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "docs/事件契约.md",
+          "pattern": "run_end"
+        },
+        {
+          "file": "src/eventstream.js",
+          "pattern": "verifyRebuild"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "/api/conversations/:id/stream"
+        }
+      ],
+      "note": "契约+重建器+真 SSE 三场景；断线续订为只读通道"
+    },
+    {
+      "id": "RA-38",
+      "title": "系统层+工具层逐字节一致",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/prefix.js",
+          "pattern": "export const prefixHash"
+        },
+        {
+          "file": "test/prefix-epoch.test.mjs",
+          "pattern": "确定性"
+        }
+      ],
+      "note": "同输入同哈希；不同档位必不同哈希"
+    },
+    {
+      "id": "RA-39",
+      "title": "同工具同参数第 3/5 次提醒但不阻止",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "repeatReminded"
+        },
+        {
+          "file": "test/loopguard.test.mjs",
+          "pattern": "3"
+        }
+      ],
+      "note": "提醒不阻断；挂起阈值=连续 N 次"
+    },
+    {
+      "id": "RA-40",
+      "title": "折叠后交付物依据仍在",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/agent.js",
+          "pattern": "早期执行轮次已折叠"
+        }
+      ],
+      "note": "原文在 messages（只有 INSERT），可按 id 回查"
+    },
+    {
+      "id": "RA-41",
+      "title": "被别的 agent 当 MCP 工具调用成功一次",
+      "owner": "agent",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "MCP server 形态未开工"
+    },
+    {
+      "id": "RA-42",
+      "title": "幂等键 / 回调 HMAC / 死信落点",
+      "owner": "agent",
+      "kind": "milestone",
+      "milestone": "M2",
+      "note": "对外形态未开工"
+    },
+    {
+      "id": "OP-03",
+      "title": "策略引擎失败语义",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/hooks.js",
+          "pattern": "必须显式声明失败语义"
+        },
+        {
+          "file": "test/op03-hooks.test.mjs",
+          "pattern": "fail-closed 名单"
+        }
+      ],
+      "note": "注册必填 failure + 超时 + 失败留痕 + 改写审计"
+    },
+    {
+      "id": "OP-08",
+      "title": "子代理深度实证",
+      "owner": "agent",
+      "kind": "manual",
       "evidence": "journalctl -u rw-test | grep '\\[subagent\\] depth='（实际深度分布）；settings.subagent_max_depth 可收紧后复测",
-      "note": "上限已可配 + 每次派生记录深度；'2 层够不够'仍需真实三层任务样本" },
-    { "id": "OP-12", "title": "经验/复盘层归属", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/lessonrecall.js", "pattern": "export function pickLessons" }, { "file": "test/lessonrecall.test.mjs", "pattern": "不沾边" }],
-      "note": "错题按需进尾巴区；闲聊/不沾边一个字节不注入" },
-    { "id": "OP-16", "title": "降级语义（enforcement 三值）", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/capabilities.js", "pattern": "export function enforcementReport" }, { "file": "test/capabilities.test.mjs", "pattern": "不许报 full" }],
-      "note": "三值落成代码名词 + 7 条降级目录；一期如实报 partial" },
-    { "id": "OP-17", "title": "溢出文件保留与清理策略", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/tools/spill.js", "pattern": "export function cleanupSpill" }, { "file": "server/index.js", "pattern": "runSpillCleanup" }],
-      "note": "按龄 7 天 + 按量 64MB；越界不碰；真删才落账本" },
-    { "id": "OP-18", "title": "MCP 工具合流进同一注册表", "owner": "agent", "kind": "manual",
+      "note": "上限已可配 + 每次派生记录深度；'2 层够不够'仍需真实三层任务样本"
+    },
+    {
+      "id": "OP-12",
+      "title": "经验/复盘层归属",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/lessonrecall.js",
+          "pattern": "export function pickLessons"
+        },
+        {
+          "file": "test/lessonrecall.test.mjs",
+          "pattern": "不沾边"
+        }
+      ],
+      "note": "错题按需进尾巴区；闲聊/不沾边一个字节不注入"
+    },
+    {
+      "id": "OP-16",
+      "title": "降级语义（enforcement 三值）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/capabilities.js",
+          "pattern": "export function enforcementReport"
+        },
+        {
+          "file": "test/capabilities.test.mjs",
+          "pattern": "不许报 full"
+        }
+      ],
+      "note": "三值落成代码名词 + 7 条降级目录；一期如实报 partial"
+    },
+    {
+      "id": "OP-17",
+      "title": "溢出文件保留与清理策略",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/spill.js",
+          "pattern": "export function cleanupSpill"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "runSpillCleanup"
+        }
+      ],
+      "note": "按龄 7 天 + 按量 64MB；越界不碰；真删才落账本"
+    },
+    {
+      "id": "OP-18",
+      "title": "MCP 工具合流进同一注册表",
+      "owner": "agent",
+      "kind": "manual",
       "evidence": "grep -n syncMcpExtras server/tools/index.js（现状=拼接而非统一装载器）",
-      "note": "热装载已通；五类来源统一装载器未做" },
-    { "id": "§4.4.1-规则5", "title": "任何进前缀的组件必须声明缓存影响", "owner": "agent", "kind": "auto",
-      "anchors": [{ "file": "server/prefix-participants.js", "pattern": "export const PREFIX_PARTICIPANTS" }, { "file": "test/prefix-participants.test.mjs", "pattern": "前缀破坏者名单" }],
-      "note": "12 个组件逐个声明 where + cacheImpact + 源码锚点；夹具核对锚点还在 + 节点 0 只有一个写入点" }
+      "note": "热装载已通；五类来源统一装载器未做"
+    },
+    {
+      "id": "§4.4.1-规则5",
+      "title": "任何进前缀的组件必须声明缓存影响",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/prefix-participants.js",
+          "pattern": "export const PREFIX_PARTICIPANTS"
+        },
+        {
+          "file": "test/prefix-participants.test.mjs",
+          "pattern": "前缀破坏者名单"
+        }
+      ],
+      "note": "12 个组件逐个声明 where + cacheImpact + 源码锚点；夹具核对锚点还在 + 节点 0 只有一个写入点"
+    },
+    {
+      "id": "RA-43",
+      "title": "工具级界限：声明在工具定义上 + 协作式截止 + 越界如实改写",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/deadline.js",
+          "pattern": "export function armDeadline"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "armDeadline(eff.__signal, tool.timeoutMs)"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "toolTimeoutResult(name, tool.timeoutMs)"
+        },
+        {
+          "file": "scripts/tool-bounds.mjs",
+          "pattern": "无私有超时字面量"
+        },
+        {
+          "file": "test/tool-deadline.test.mjs",
+          "pattern": "等人工的工具绝不能被设线"
+        }
+      ],
+      "note": "对齐 DSH `dsh-tool-call-timeout-policy`：工具声明 `timeoutMs`，execTool 派生到点即中止的 signal 交给工具自己收口——**不抢跑、不丢弃工具 promise**；工具越界才返回则结果如实改写成 `TOOL_TIMEOUT`（走正常留痕成为 fail 行）。界限不再散落在实现里（`server/tools/` 已无 `AbortSignal.timeout(` 字面量），且**绝不给长任务与等人工的工具编一个数**；65 个工具里有界 8 个，其余如实列在 `scripts/tool-bounds.mjs` 的表里。"
+    },
+    {
+      "id": "RA-44",
+      "title": "LLM 失败分类 + 可取消重试（每轮预算可调，等待时长听服务端）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/llm/gateway.js",
+          "pattern": "export function llmRetryDecision"
+        },
+        {
+          "file": "server/llm/gateway.js",
+          "pattern": "export function cancellableDelay"
+        },
+        {
+          "file": "server/llm/gateway.js",
+          "pattern": "export function retryAfterMsOf"
+        },
+        {
+          "file": "server/agent.js",
+          "pattern": "if (d.retryable && attempt < maxRetries)"
+        },
+        {
+          "file": "server/settingsSchema.js",
+          "pattern": "llm_max_retries"
+        },
+        {
+          "file": "test/llm-retry.test.mjs",
+          "pattern": "先落事件再等待"
+        }
+      ],
+      "note": "对齐 DSH `dsh-llm-retry` 的两条：① 只在可恢复失败（限流/网关/网络类）重试，参数/鉴权/模型不存在一类 4xx 不重试，用户已停止绝不重试；② 每次重试**先落事件再做可取消的等待**。退避参数（initialDelayMs/jitterRatio）**有意不引入**（DSH 实际取值在其部署配置里，编一个就是莫须有的值）——等待时长优先用服务端 `Retry-After`，没给就立刻重试；预算来自 settings `llm_max_retries`（默认 1，0=关）。顺带修掉一个真洞：非流式兜底原来不接 signal，\"停止\"在那段时间无效。"
+    },
+    {
+      "id": "RA-45",
+      "title": "数据库连接层：死连接可检测 + 查询可被\"停止\"中断（不设业务超时）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/db.js",
+          "pattern": "keepAliveInitialDelay: 120000"
+        },
+        {
+          "file": "server/db.js",
+          "pattern": "数据库操作已被中止"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "{ signal: ctx.__signal }"
+        }
+      ],
+      "note": "挂死的真因不是\"查询慢\"，而是**对端已经没了而我们还以为它在跑**（隧道断/网络抖动时本地 socket 仍可写）。两条结构手段：连接层 `keepAliveInitialDelay` 复用本项目既有\"120s 无动静即判异常\"口径（不设＝OS 默认 7200s，等于发现不了）+ 把用户\"停止\"接进查询（中止即销毁连接）。**有意不设业务超时**：慢查询归慢查询日志。实测：12 条并发挂死查询中止后连接池 `all/free/queue` 归零、不泄漏；且中止后 mysql2 可能以\"成功\"返回半截结果，故一律以 signal 为准抛中止错（不把半截数据当结果）。"
+    }
   ]
 }
