@@ -6,6 +6,7 @@ import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { summarizeConversation } from './tools/index.js';
 import { config } from './config.js';
+import { RW_WORKSPACE } from './env.js';
 
 export function cronToNext(cron, from = new Date()) {
   const parts = String(cron).trim().split(/\s+/);
@@ -80,7 +81,7 @@ export async function executeScheduledTask(task) {
         const gs = await db.query('SELECT g.name, g.descr FROM evo_goal_tasks b JOIN evo_goals g ON g.id=b.goal_id WHERE b.task_id=? AND g.status="active"', [task.id]);
         if (gs.length) goalLines = '\n\n【本次须执行的目标（进化集勾选，逐条完成）】\n' + gs.map((g, i) => (i + 1) + '. ' + g.name + (g.descr ? '——' + String(g.descr).slice(0, 300) : '')).join('\n');
       } catch { /* 目标绑定不可用则忽略 */ }
-      const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (process.env.RW_WORKSPACE || '/srv/rw-workspace'), __accessRules: accessRules };
+      const ctx = { permission: task.permission || 'full', accountId: task.account_id, conversationId: conv.id, root: task.permission === 'full' ? '/' : (RW_WORKSPACE), __accessRules: accessRules };
       const result = await runAgent({ provider: task.provider, model: task.model, messages: [{ role: 'user', content: task.prompt + goalLines }], permission: task.permission || 'full', ctx, keys: config.keys });
       resultText = (result.content || '').slice(0, 5000);
       // 写入会话消息（可回看）

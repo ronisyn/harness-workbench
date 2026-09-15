@@ -33,6 +33,7 @@ import { takeRestart, isRestartScheduled, markRestartScheduled } from './restart
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
+import { RW_SERVICE, RW_WORKSPACE } from './env.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -56,7 +57,7 @@ async function maybeSelfRestart() {
   setTimeout(async () => {
     try {
       const { execFile } = await import('node:child_process');
-      const svc = process.env.RW_SERVICE || 'rw-test';
+      const svc = RW_SERVICE;
       const ch = execFile('systemctl', ['restart', svc], { detached: true, stdio: 'ignore' });
       ch.unref();
       console.log('[rw] 已触发 systemctl restart ' + svc);
@@ -273,7 +274,7 @@ app.post('/api/skills/:name/smoke', requireAuth, async (req, res) => {
     const result = await runAgent({
       provider: 'deepseek', model: 'deepseek-v4-flash',
       messages: [{ role: 'user', content: '先 skill_load 载入技能 "' + name + '"，然后仅回答：已载入，技能适用场景是 ' + String(s.meta.description || '').slice(0, 200) + '。不要调用其它工具。' }],
-      permission: 'read', ctx: { permission: 'read', accountId: acc, conversationId: cid, root: process.env.RW_WORKSPACE || '/srv/rw-workspace', __light: false }, keys: config.keys,
+      permission: 'read', ctx: { permission: 'read', accountId: acc, conversationId: cid, root: RW_WORKSPACE, __light: false }, keys: config.keys,
     });
     const ok = !result.error && !(result.guard) && (String(result.content || '').includes('已载入') || String(result.content || '').length > 20);
     const summary = String(result.content || result.error || '（无输出）').slice(0, 400);
@@ -828,7 +829,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   // P25(O-25)：去掉 '!== default' 门——default 项目也可放 projects/default/AGENTS.md；存在才注入
   try {
     if (convProject) {
-      const agp = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'projects', convProject, 'AGENTS.md');
+      const agp = path.join(RW_WORKSPACE, 'projects', convProject, 'AGENTS.md');
       if (fs.existsSync(agp)) {
         const ag = fs.readFileSync(agp, 'utf8').slice(0, 16000);
         messages.push({ role: 'system', content: '【项目 ' + convProject + ' 说明（AGENTS.md）】\n' + ag });
@@ -978,7 +979,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     {
       // Agent 执行循环（统一通道）：带工具（function calling）；full 权限开放整个服务器，write/read 限定工作区
       // 实时流式：agent 每轮 emit 事件（思考中/工具开始/工具完成）即时转发给前端
-      const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+      const ws = RW_WORKSPACE;
       // 长任务现场：登记/复用 run（断点恢复外壳）；纯问答（light）不登记现场（问答无断点恢复需求，省 run 噪音）
       let run = null;
       if (!light) {
@@ -1384,7 +1385,7 @@ app.post('/api/upload', requireAuth, async (req, res) => {
     const buf = Buffer.from(data, 'base64');
     if (buf.length === 0) return res.status(400).json({ ok: false, message: '空文件' });
     if (buf.length > 8 * 1024 * 1024) return res.status(400).json({ ok: false, message: '文件超过 8MB 上限' });
-    const dir = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'uploads');
+    const dir = path.join(RW_WORKSPACE, 'uploads');
     fs.mkdirSync(dir, { recursive: true });
     const safe = path.basename(String(name).replace(/[\\/]/g, '_')).slice(0, 120) || 'file';
     const file = path.join(dir, Date.now() + '-' + safe);
@@ -1396,7 +1397,7 @@ app.post('/api/upload', requireAuth, async (req, res) => {
 // ---------- 下载文件（uploads 目录，登录后可下载；防目录穿越）——2026-09-09 会话393 Excel 收发链路恢复 ----------
 app.get('/api/download/:name', requireAuth, async (req, res) => {
   try {
-    const dir = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', 'uploads');
+    const dir = path.join(RW_WORKSPACE, 'uploads');
     const name = path.basename(decodeURIComponent(req.params.name || ''));
     if (!name) return res.status(400).json({ ok: false, message: '文件名缺失' });
     const file = path.join(dir, name);

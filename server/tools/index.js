@@ -15,6 +15,7 @@ import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoi
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
+import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
@@ -35,9 +36,9 @@ function rejectPh(l, s) { if (typeof s === 'string' && PH_RE.test(s)) throw new 
 const SECRET_RE = /\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
 export function redactSecrets(s) { return typeof s === 'string' ? s.replace(SECRET_RE, '[REDACTED]') : s; }
 // 路径安全：write 级限定工作区（limitPath 时检查）
-export const WORKSPACE = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+export const WORKSPACE = RW_WORKSPACE;
 // 技能根目录（F15）：skills/<名称>/SKILL.md
-export const SKILLS_ROOT = process.env.RW_SKILLS || path.join(WORKSPACE, 'skills');
+export const SKILLS_ROOT = RW_SKILLS;
 
 // SKILL.md frontmatter 极简解析（--- 块内 name:/description:/version:）
 function parseSkillFront(full) {
@@ -691,8 +692,8 @@ export const TOOLS = [
       // P5 auto-commit（2026-09 批4）：业务/工作区 git 仓库自动提交（非平台代码目录——平台走 C5 手动+提案）。
       // 判定：root（工作区根）非平台目录 /srv/harness-workbench，且该目录是 git 仓库，且有未提交改动。
       try {
-        const ws = ctx?.root || process.env.RW_WORKSPACE || '/srv/rw-workspace';
-        const platformDir = process.env.RW_PLATFORM_DIR || '/srv/harness-workbench';
+        const ws = ctx?.root || RW_WORKSPACE;
+        const platformDir = RW_PLATFORM_DIR;
         const isPlatform = ws === platformDir || ws.startsWith(platformDir + '/');
         if (!isPlatform && ctx && !ctx.__skipAutoCommit) {
           const fsx = await import('node:fs');

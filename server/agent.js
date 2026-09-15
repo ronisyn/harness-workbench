@@ -3,6 +3,7 @@
 // 运行护栏（WS2 v1.0 语义=防失控保险丝，非能力上限）：时间预算/轮次/循环检测 —— 全部可在 settings 表调整或关闭（0=不限），
 // 护栏现值每轮读取（5s 缓存仅防 DB 风暴），并随【运行时快照】每轮注入上下文：模型看得见钱包与规则版本，中途变更最快 5s 内可见生效
 import { chatOnceWithTools, chatStreamWithTools, chatOnce, calcCost } from './llm/gateway.js';
+import { RW_PLATFORM_DIR, RW_WORKSPACE, RW_SEARCH_ENGINE } from './env.js';
 import { toolDefs, execTool, plans, jobs } from './tools/index.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
@@ -171,12 +172,12 @@ async function agentLimits() {
 // P13 提示三层（2026-09 批1）：ENV_MAP 拆为【身份/环境/纪律】三层——
 // 身份层随会话 permission 动态生成（read/write 会话不再被注入"当前 full 权限"式越权暗示）；
 // 环境层=真实资源位置；纪律层=行动条款（原文保留防行为回归）。三层静态内容同会话内不变，前缀稳定。
-export const ENV_ENV = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',  '- 平台代码目录：/srv/harness-workbench（可用 write_file/append_file/run_command/git_commit 修改其中代码、执行 node/npm、提交——能否修改与部署见身份层当前权限）',
-  '- Agent 工作区：/srv/rw-workspace（含用户上传文件 uploads/）',
+export const ENV_ENV = [  '环境信息（真实资源位置，可直接访问，不要臆测数据不存在或能力不具备）：',  `- 平台代码目录：${RW_PLATFORM_DIR}（可用 write_file/append_file/run_command/git_commit 修改其中代码、执行 node/npm、提交——能否修改与部署见身份层当前权限）`,
+  `- Agent 工作区：${RW_WORKSPACE}（含用户上传文件 uploads/）`,
   '- 数据存储：MySQL（用 db_query/db_write 访问，可查全部库）',
   '  关键表：conversations(会话) / messages(消息) / usage_stats(用量统计) / tool_calls(工具调用) / models(模型) / providers(厂商) / knowledge(知识库)',
-  '- 联网搜索：web_search 工具（SearXNG）；网页抓取 fetch_url',
-  '提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；改平台代码用 write_file 改 /srv/harness-workbench 下文件。',
+  `- 联网搜索：web_search 工具（${RW_SEARCH_ENGINE}）；网页抓取 fetch_url`,
+  `提示：查询用量/数据/项目文件时，直接用工具访问上述真实位置（如 db_query 查 usage_stats 表）；改平台代码用 write_file 改 ${RW_PLATFORM_DIR} 下文件。`,
 ].join('\n');
 
 export const ENV_IDENTITY = (permission = 'full') => [
@@ -186,7 +187,7 @@ export const ENV_IDENTITY = (permission = 'full') => [
     : permission === 'guard'
       ? '- 当前会话权限=guard：具备 full 级操作能力，但高危工具（删文件/db_write/git 推送/run_command 等受控清单）执行前需用户审批弹卡。'
       : permission === 'write'
-        ? '- 当前会话权限=write：可读写工作区（/srv/rw-workspace）内文件、运行测试/技能/知识沉淀；平台代码/系统/数据库写入不可执行。'
+        ? `- 当前会话权限=write：可读写工作区（${RW_WORKSPACE}）内文件、运行测试/技能/知识沉淀；平台代码/系统/数据库写入不可执行。`
         : '- 当前会话权限=read：只读——可读/搜/查（含 db_query 审计查询与联网检索），不可写文件、不改代码、不执行改动类工具。',
 ].join('\n');
 
@@ -200,7 +201,7 @@ export const ENV_DISCIPLINE = [  '行动原则（务必遵守）：',
   '- 本机是 Linux 服务器，命令用 Linux 语法；用户电脑是 Windows，但你在服务器上工作，两者隔离。',
   '- 运行护栏（时间预算/轮次上限/循环检测）是可调整可关闭的配置（0=不限），是防失控保险丝而非能力上限：用户要求取消/放宽时，直接用 set_limits 工具改（0=不限），或说明原因后调大。',
   '- 运行时快照：平台每轮自动注入【运行时快照】（轮次/用时/护栏现值/累计 token 与费用/会话属性/政策版本）。以最新快照为准；看到政策版本变化=规则已更新，请丢弃旧理解。',
-  '- 行为准则：/srv/harness-workbench/docs/RW行为准则-服务器版.md 是本平台行为准则（诚实/小步/命令纪律/护栏哲学/自改纪律/验证与收尾），日常遵守，需要时 read_file 读全文。',
+  `- 行为准则：${RW_PLATFORM_DIR}/docs/RW行为准则-服务器版.md 是本平台行为准则（诚实/小步/命令纪律/护栏哲学/自改纪律/验证与收尾），日常遵守，需要时 read_file 读全文。`,
   '- 修改平台自身代码后如需生效：先用 syntax_check 验证，再调用 reload_platform 工具——平台会在你本轮回复结束后自动重启并加载新代码，你不需要（也不应）手动 systemctl restart（那会中断你自己）。',
 ].join('\n');
 

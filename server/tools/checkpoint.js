@@ -9,8 +9,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { RW_WORKSPACE } from '../env.js';
 
-const CP_ROOT = path.join(process.env.RW_WORKSPACE || '/srv/rw-workspace', '.rw-checkpoints');
+const CP_ROOT = path.join(RW_WORKSPACE, '.rw-checkpoints');
 const SNAPSHOT_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'delete_file']);
 const MAX_FILES = 20;
 const MAX_BYTES = 5 * 1024 * 1024; // 单文件 >5MB 不快照（平台代码/文本远小于此）

@@ -7,6 +7,7 @@ import { db } from '../db.js';
 import { runAgent } from '../agent.js';
 import { config } from '../config.js';
 import { getToken as getFeishuToken } from '../tools/feishu.js';
+import { RW_WORKSPACE } from '../env.js';
 
 const FEISHU_API = 'https://open.feishu.cn/open-apis';
 
@@ -90,7 +91,7 @@ export function registerFeishuWebhook(app) {
       await db.query('INSERT INTO messages (conversation_id, role, content) VALUES (?,?,?)', [conv.id, 'user', msg.text]);
       const hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id', [conv.id]);
       const messages = hist.map((m) => ({ role: m.role, content: m.content }));
-      const ctx = { permission: conv.permission || 'read', accountId: null, conversationId: conv.id, root: process.env.RW_WORKSPACE || '/srv/rw-workspace' };
+      const ctx = { permission: conv.permission || 'read', accountId: null, conversationId: conv.id, root: RW_WORKSPACE };
       const result = await runAgent({ provider: 'deepseek', model: 'deepseek-v4-flash', messages, permission: conv.permission || 'read', ctx, keys: config.keys });
       const reply = result.content || '（无回复）';
       await sendFeishuText(chatId, 'chat_id', reply);

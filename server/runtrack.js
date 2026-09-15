@@ -5,11 +5,12 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { db } from './db.js';
+import { RW_WORKSPACE } from './env.js';
 
 // P16 唤醒包（2026-09 批1）：恢复任务时注入工作区 git 状态摘要——模型知道"改到哪、脏区在哪、HEAD 在哪"，
 // 避免恢复后盲目重读/重做或误判现场。工作区非 git 仓库/不可读时静默返回空（不阻塞恢复）。
 function gitStateSummary() {
-  const ws = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+  const ws = RW_WORKSPACE;
   try {
     if (!fs.existsSync(ws)) return '';
     const run = (args) => execFileSync('git', ['-C', ws, ...args], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();

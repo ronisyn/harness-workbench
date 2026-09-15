@@ -12,8 +12,9 @@ import path from 'node:path';
 import { db } from './db.js';
 import { runAgent } from './agent.js';
 import { config } from './config.js';
+import { RW_WORKSPACE } from './env.js';
 
-const WS = process.env.RW_WORKSPACE || '/srv/rw-workspace';
+const WS = RW_WORKSPACE;
 const MAX_AUTO_ROUNDS = 60;        // 单契约每次激活最多自动轮次（进展型护栏，防失控账单）
 const MAX_IDLE_CONCLUDE = 2;       // 连续"没调用 finish_task 就收尾"几次后请你裁决
 let running = new Set();           // 正在执行的 contract id（驱动器自身并发 ≤2）
