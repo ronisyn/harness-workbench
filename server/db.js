@@ -241,6 +241,8 @@ const SCHEMA = [
     result_bytes INT DEFAULT 0,
     duration_ms INT DEFAULT 0,
     status VARCHAR(16),
+    error_code VARCHAR(32) NULL,
+    shell_id INT NULL,
     created_at DATETIME DEFAULT NOW()
   )`,
   `CREATE TABLE IF NOT EXISTS price_table (

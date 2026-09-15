@@ -1,6 +1,7 @@
 // server/llm/gateway.js - OpenAI 兼容统一网关
 // 护栏标准（参照 3080）：模型 API 调用超时 60-90s；流式连接 60s
 import { findProvider } from './providers.js';
+import { FAIL } from '../failures.js'; // 失败码表只此一处（工具侧与 LLM 侧同表，见 server/failures.js）
 
 // 真实计费价目（元/M tokens，三档 hit/miss/out）
 // deepseek 档=2026-09 真实账单加权有效单价（平台两档价并存，按用量加权：hit≈0.086/miss≈2.30/out≈8.0）；
@@ -140,23 +141,28 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 522, 5
 const RETRYABLE_MSG = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|other side closed|fetch failed|terminated|空闲超时|连接失败/i;
 
 /**
- * 把一次厂商失败分类成"能不能重试"。
+ * 把一次厂商失败分类成"能不能重试"。**码表在 server/failures.js 一处**（统一失败分类）——
+ * 这里只做映射，`retryable` 从表里读，避免"同一件事在两个地方各判一次、时间久了不一致"。
  * @param {Error & {status?: number, aborted?: boolean, retryAfterMs?: number}} err
- * @returns {{retryable: boolean, reason: string, retryAfterMs: number|null}}
+ * @returns {{code: string, retryable: boolean, reason: string, retryAfterMs: number|null}}
  */
 export function llmRetryDecision(err) {
-  if (!err) return { retryable: false, reason: '未知失败', retryAfterMs: null };
+  const mk = (code, reason) => ({ code, retryable: !!(FAIL[code] && FAIL[code].retryable), reason, retryAfterMs: (err && err.retryAfterMs) || null });
+  if (!err) return { code: 'LLM_UNKNOWN', retryable: false, reason: '未知失败', retryAfterMs: null };
   // 用户已停止：**绝不重试**（重试等于把用户按下的停止键又按回去）
-  if (err.aborted) return { retryable: false, reason: '用户已停止', retryAfterMs: null };
+  if (err.aborted) return mk('LLM_ABORTED', '用户已停止');
+  // 流式帧损坏：走"非流式兜底"这条**另一条**机制，不属于重试
+  if (err.needFallback) return mk('LLM_STREAM_BROKEN', '流式帧损坏（改用非流式兜底）');
   const st = Number(err.status) || 0;
   if (st) {
-    const retryable = RETRYABLE_STATUS.has(st);
-    return { retryable, reason: 'HTTP ' + st + (retryable ? '（厂商侧可恢复）' : '（请求被拒，重试无效）'), retryAfterMs: err.retryAfterMs || null };
+    if (st === 429) return mk('LLM_RATE_LIMITED', 'HTTP 429（厂商限流）');
+    if (RETRYABLE_STATUS.has(st)) return mk('LLM_HTTP_RETRYABLE', 'HTTP ' + st + '（厂商侧可恢复）');
+    return mk('LLM_HTTP_FATAL', 'HTTP ' + st + '（请求被拒，重试无效）');
   }
   const msg = String(err.message || '');
-  if (RETRYABLE_MSG.test(msg)) return { retryable: true, reason: '网络/超时类失败', retryAfterMs: err.retryAfterMs || null };
+  if (RETRYABLE_MSG.test(msg)) return mk('LLM_NETWORK', '网络/超时类失败');
   // 未分类一律**不重试**（宁可少重试一次，也不要对参数类错误反复打厂商）——非流式兜底仍会走
-  return { retryable: false, reason: '未分类失败（按不可重试处理）', retryAfterMs: null };
+  return mk('LLM_UNKNOWN', '未分类失败（按不可重试处理）');
 }
 
 /** 解析厂商 Retry-After 头（秒数或 HTTP 日期）。解析不出返回 null（= 不等待，立刻重试）。 */

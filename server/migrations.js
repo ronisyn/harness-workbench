@@ -107,6 +107,13 @@ export const VERSIONS = [
     // 后续新增的迁移**不写 tolerate**（默认不容忍）：新变更必须是干净的。
     tolerate: /Duplicate column|Duplicate key name|already exists|Duplicate entry/i,
   },
+  {
+    id: '0002_tool_error_code', note: '工具失败码（统一失败分类）',
+    // 2026-09-15：失败从"一句自由中文"改成"带码"，码表见 server/failures.js。
+    // 有这一列才回答得了"最常见的是哪种失败"，也才分得清"被拦截"与"执行后失败"。
+    // 存量行留 NULL（不回溯猜测），新增行由 execTool 落码。
+    statements: ['ALTER TABLE tool_calls ADD COLUMN error_code VARCHAR(32) NULL'],
+  },
 ];
 
 const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -117,13 +124,28 @@ const TBL = `CREATE TABLE IF NOT EXISTS schema_migrations (
 
 /**
  * 应用待执行的迁移。
- * @returns {{applied:string[], skipped:number, tolerated:number, failed:?{id:string, error:string}}}
+ * @returns {{applied:string[], skipped:number, tolerated:number, fresh?:boolean, failed:?{id:string, error:string}}}
  * 失败处理：**记录不落、后续不再应用、日志醒目**，但不阻断启动（与既有 fail-soft 一致；
  * 真正"关键列缺失"由 initSchema 末尾的启动自检兜底告警）。
+ *
+ * **全新库特例（2026-09-15）**：initSchema 先用 SCHEMA 按**最终形状**建表，迁移描述的是"老形状 → 新形状"
+ * 的变化，对最终形状没有意义。所以迁移表此前不存在**且核心表也不存在**时，直接把整条链标记为已应用。
+ * 不这么做会怎样（实测推演，加 0002 时发现）：新库已含 error_code，0002 的 ADD COLUMN 报重复列，
+ * 而"新迁移不写 tolerate"的纪律使它**判失败并 break** —— 于是链停在 0002、**后续迁移永远不会应用**，
+ * 而且每次启动都刷一条迁移失败日志。客户装机正是这条路径。
+ * 与 DSH 会话格式同一思路：新文件直接写在最新版本上，不存在"迁移"这回事。
+ * 判定依据是"核心表此前不存在"，不是"猜测列结构"——存量库（有表、没迁移表）必须照常走链。
  */
 export async function runMigrations(pool, { versions = VERSIONS, log = console } = {}) {
   validateChain(versions);
+  const fresh = !(await tableExists(pool, 'tool_calls')); // 判定必须在建 schema_migrations **之前**做
   await pool.query(TBL);
+  if (fresh) {
+    for (const v of versions) await pool.query('INSERT IGNORE INTO schema_migrations (id, note) VALUES (?,?)', [v.id, String(v.note || '').slice(0, 200)]);
+    // log 是注入的（默认 console）：夹具可能只给 error —— 不因为少一个方法就把迁移搞崩
+    if (typeof log.log === 'function') log.log('[db] 全新库：表按最终形状建立，迁移链 ' + versions.length + ' 条标记为已应用（无需逐条执行）');
+    return { applied: [], skipped: versions.length, tolerated: 0, fresh: true, failed: null };
+  }
   const rows = await pool.query('SELECT id FROM schema_migrations');
   const appliedIds = (rows[0] || []).map((r) => String(r.id));
   const todo = pendingMigrations(versions, appliedIds);
@@ -156,4 +178,12 @@ export async function schemaVersion(pool) {
     const r = await pool.query('SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1');
     return r[0] && r[0][0] ? String(r[0][0].id) : null;
   } catch { return null; }
+}
+
+/** 表是否存在（`SHOW TABLES LIKE`，不依赖 information_schema 的权限细节） */
+async function tableExists(pool, name) {
+  try {
+    const r = await pool.query('SHOW TABLES LIKE ?', [name]);
+    return !!(r[0] && r[0].length);
+  } catch { return false; }
 }

@@ -38,10 +38,17 @@ test('分类：网络/空闲超时类可重试；用户已停止一律不重试'
   assert.match(aborted.reason, /用户已停止/);
 });
 
-test('分类：未分类失败按**不可重试**处理（宁可少重试，也不对未知错误反复打厂商）', () => {
-  const d = llmRetryDecision(err({ needFallback: true, message: '工具 参数流式累积解析失败' }));
-  assert.equal(d.retryable, false, '流式帧损坏走非流式兜底，不属于"重试"');
-  assert.match(d.reason, /未分类/);
+test('分类：流式帧损坏走"非流式兜底"（另一条机制），未分类失败按**不可重试**处理', () => {
+  // 2026-09-15 统一失败分类后，needFallback 有了自己的码（LLM_STREAM_BROKEN）——
+  // 它仍然"不重试"，但理由不再含糊地说"未分类"：它压根不属于重试，而是另一条机制（换非流式拿完整响应）。
+  const broken = llmRetryDecision(err({ needFallback: true, message: '工具 参数流式累积解析失败' }));
+  assert.equal(broken.code, 'LLM_STREAM_BROKEN');
+  assert.equal(broken.retryable, false);
+  assert.match(broken.reason, /兜底/);
+  const unknown = llmRetryDecision(err({ message: '莫名其妙的失败' }));
+  assert.equal(unknown.code, 'LLM_UNKNOWN');
+  assert.equal(unknown.retryable, false, '未分类一律不重试（宁可少重试，也不对未知错误反复打厂商）');
+  assert.match(unknown.reason, /未分类/);
   assert.equal(llmRetryDecision(null).retryable, false);
 });
 

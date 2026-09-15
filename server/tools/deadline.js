@@ -11,6 +11,7 @@
 //      误报成"工具超时"，模型的下一步判断就错了。DSH 用一个自有 code 给 signal 打标来区分嵌套截止。
 //
 // 本模块只有"派生一个到点即中止的 signal"这一件事；判定与改写结果在 execTool（唯一执行收口）。
+import { fail } from '../failures.js'; // 超时结果与其它失败同形（带码），码表只此一处
 
 /** 本接口自有的截止分类码（与 DSH 同名）：用于把"本工具的声明界限到期"从其它中止里认出来。 */
 export const TOOL_TIMEOUT = 'TOOL_TIMEOUT';
@@ -60,10 +61,8 @@ export function armDeadline(upstream, timeoutMs) {
  * @param {number} timeoutMs 声明的界限
  */
 export function toolTimeoutResult(name, timeoutMs) {
-  return {
-    error: '工具 ' + name + ' 超时：本次调用超出该工具声明的执行界限 ' + timeoutMs + 'ms，工具已不再等待（其内部收尾可能仍在进行）。'
-      + '请改用更小的粒度重试（例如分段读/收窄查询范围），或换用其它工具。',
-    code: TOOL_TIMEOUT,
-    timeoutMs,
-  };
+  return fail('TOOL_TIMEOUT',
+    '工具 ' + name + ' 超时：本次调用超出该工具声明的执行界限 ' + timeoutMs + 'ms，工具已不再等待（其内部收尾可能仍在进行）。'
+    + '请改用更小的粒度重试（例如分段读/收窄查询范围），或换用其它工具。',
+    { timeoutMs });
 }

@@ -681,6 +681,43 @@
         }
       ],
       "note": "挂死的真因不是\"查询慢\"，而是**对端已经没了而我们还以为它在跑**（隧道断/网络抖动时本地 socket 仍可写）。两条结构手段：连接层 `keepAliveInitialDelay` 复用本项目既有\"120s 无动静即判异常\"口径（不设＝OS 默认 7200s，等于发现不了）+ 把用户\"停止\"接进查询（中止即销毁连接）。**有意不设业务超时**：慢查询归慢查询日志。实测：12 条并发挂死查询中止后连接池 `all/free/queue` 归零、不泄漏；且中止后 mysql2 可能以\"成功\"返回半截结果，故一律以 signal 为准抛中止错（不把半截数据当结果）。"
+    },
+    {
+      "id": "RA-46",
+      "title": "统一失败分类：失败带码、一律落账、可统计",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/failures.js",
+          "pattern": "export const FAIL"
+        },
+        {
+          "file": "server/failures.js",
+          "pattern": "export function classifyToolThrow"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "result = classifyToolThrow(e)"
+        },
+        {
+          "file": "server/tools/index.js",
+          "pattern": "error_code"
+        },
+        {
+          "file": "server/migrations.js",
+          "pattern": "0002_tool_error_code"
+        },
+        {
+          "file": "scripts/failure-report.mjs",
+          "pattern": "按失败码"
+        },
+        {
+          "file": "test/failures.test.mjs",
+          "pattern": "源码交叉核对"
+        }
+      ],
+      "note": "**2026-09-15 落地**：失败从\"一句自由中文\"改成**带码**（码表唯一出处在 `server/failures.js`，用表外的码 `fail()` 直接抛错；夹具交叉核对 server/ 里出现的码都在表里）。DSh 的做法是全线结构化 `error.info.code`，我们照做其中最小可用的一份。同一轮还修掉一个真问题：`execTool` 里 `checkPerm`/`validateArgs`/db_write 只读闸原本是**在 try 之外 throw 或提前 return** —— throw 会让 agent 的 `Promise.all` 拒绝、**整轮中断**且该次调用**一行账都不落**（\"工具调用必须落账\"这条不变量在拦截路径上直接失效）。现在全函数**单出口**：所有拦截汇成 `{error, code}` → 同一段留痕 → 账本 `tool_calls.error_code` 有码（迁移 0002）。码按真实失败分布定，不拍脑袋：近 14 天 96 次失败里 db_query「Unknown column」22 次、edit_file「old 不匹配」6 次、ENOENT 9 次 → 因此单列 `TOOL_INPUT_REJECTED`（模型改参数即可，平台没坏），与 `TOOL_ERROR`（要工程师看）分开。统计入口：`node scripts/failure-report.mjs [天数]`。"
     }
   ]
 }

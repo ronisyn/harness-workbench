@@ -55,14 +55,17 @@ test('pending 计算：库里有多余记录（比如回滚过）不影响结果
 function fakePool(behavior = {}) {
   const log = [];
   let applied = new Set(behavior.applied || []);
+  // 默认当作**存量库**（核心表已在）；behavior.fresh=true 模拟全新库（什么表都还没有）
+  const tables = behavior.fresh ? [] : ['tool_calls'];
   return {
     log,
     appliedRows: () => [...applied],
     async query(sql, params) {
       log.push(sql);
+      if (/^SHOW TABLES LIKE/.test(sql)) return [tables.includes(params && params[0]) ? [{ Tables: params[0] }] : [], []];
       if (/CREATE TABLE IF NOT EXISTS schema_migrations/.test(sql)) return [[], []];
       if (/^SELECT id FROM schema_migrations/.test(sql)) return [[...applied].map((id) => ({ id })), []];
-      if (/^INSERT INTO schema_migrations/.test(sql)) { applied.add(params[0]); return [{}, []]; }
+      if (/^INSERT (IGNORE )?INTO schema_migrations/.test(sql)) { applied.add(params[0]); return [{}, []]; }
       const boom = (behavior.failOn || []).find((f) => sql.includes(f.match));
       if (boom) throw new Error(boom.error);
       return [{}, []];
@@ -104,4 +107,27 @@ test('运行器：链有缺口时**在执行任何语句之前**就抛错（不�
   const p = fakePool();
   await assert.rejects(() => runMigrations(p, { versions: [V('0001_a'), V('0003_c')], log: { error() {} } }), /缺口或乱序/);
   assert.equal(p.log.filter((s) => /^ALTER|^SELECT 1/.test(s)).length, 0, '校验失败 ⇒ 一条都不该执行');
+});
+
+// 2026-09-15（加 0002 时发现的真问题）：initSchema 先按**最终形状**建表，新迁移刻意不写 tolerate，
+// 于是全新库上 0002 的 ADD COLUMN 会报重复列 → 判失败并 break → **后续迁移永远不应用**，且每次启动刷错误日志。
+// 客户装机正是这条路径。修法与 DSH 会话格式同思路：新库直接就是最新版本，不存在"迁移"。
+test('运行器：全新库（核心表还不存在）→ 整条链标记为已应用，不执行任何结构语句、不报失败', async () => {
+  const p = fakePool({ fresh: true });
+  const said = [];
+  const r = await runMigrations(p, { versions: [V('0001_a', ['ALTER TABLE t ADD COLUMN a']), { id: '0002_b', statements: ['ALTER TABLE t ADD COLUMN b'] }], log: { error() {}, log: (m) => said.push(m) } });
+  assert.equal(r.fresh, true);
+  assert.equal(r.failed, null, '全新库不得报迁移失败');
+  assert.deepEqual(r.applied, [], '一条都不执行');
+  assert.equal(p.log.filter((s) => /^ALTER|^DROP/.test(s)).length, 0, '全新库不得跑任何结构语句（表已是最终形状）');
+  assert.deepEqual(p.appliedRows().sort(), ['0001_a', '0002_b'], '整条链都要记为已应用（否则下次启动又从头跑）');
+  assert.ok(said.some((m) => /全新库/.test(m)), '必须出声说明为什么一条都没执行');
+});
+
+test('运行器：存量库（有表、没有迁移表）必须照常走链 —— 与"全新库"判然两分', async () => {
+  const p = fakePool(); // 有 tool_calls、无 schema_migrations
+  const r = await runMigrations(p, { versions: [V('0001_a', ['ALTER TABLE t ADD COLUMN a']), { id: '0002_b', statements: ['ALTER TABLE t ADD COLUMN b'] }], log: { error() {} } });
+  assert.equal(r.fresh, undefined, '存量库不走走全新库分支');
+  assert.deepEqual(r.applied, ['0001_a', '0002_b'], '存量库必须真的把新迁移执行掉');
+  assert.ok(p.log.some((s) => s === 'ALTER TABLE t ADD COLUMN b'), '0002 的语句必须真的执行（新库不会执行它）');
 });

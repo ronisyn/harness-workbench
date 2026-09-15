@@ -788,7 +788,9 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       });
       const status = result.error ? 'fail' : 'done';
       const resultText = result.error ? ('错误: ' + result.error) : (result.content || result.stdout || result.result || JSON.stringify(result).slice(0, 500));
-      const toolItem = { name: call.function.name, args, result: resultText, status, durationMs: Date.now() - tStart, seq };
+      // 失败码带上事件流（2026-09-15 统一失败分类）：前端/重建器据此区分"超时/未授权/参数错…"，
+      // 不必再解析中文文案。result 本身已含 code，模型看到的那份无需额外处理。
+      const toolItem = { name: call.function.name, args, result: resultText, status, code: result.code || null, durationMs: Date.now() - tStart, seq };
       results[idx] = toolItem;
       emitEv(ctx.conversationId, emit, { type: 'tool_done', tool: toolItem });
       return result;

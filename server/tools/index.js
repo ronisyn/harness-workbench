@@ -16,6 +16,7 @@ import { planRead, noteServed, repeatNotice, partialNotice, planGrep, noteGrepSe
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { armDeadline, toolTimeoutResult } from './deadline.js';
+import { fail, classifyToolThrow, inputError } from '../failures.js';
 import { buildRepoMap } from './repomap.js';
 import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE } from '../env.js';
@@ -233,7 +234,7 @@ const RAW_TOOLS = [
       if (ctx.limitPath && !inside(a.path, ctx.root)) throw new Error('路径超出工作区');
       rejectPh('edit_file.new', a.new); rejectPh('edit_file.old', a.old);
       const content = fs.readFileSync(a.path, 'utf8');
-      if (!content.includes(a.old)) throw new Error('未找到要替换的原文（old 须与文件内容完全匹配，可用 read_file 先确认）');
+      if (!content.includes(a.old)) throw inputError('未找到要替换的原文（old 须与文件内容完全匹配，可用 read_file 先确认）');
       const updated = content.split(a.old).join(a.new ?? '');
       fs.writeFileSync(a.path, updated, 'utf8');
       return { edited: true, diff: '- ' + String(a.old).slice(0, 500) + '\n+ ' + String(a.new ?? '').slice(0, 500) };
@@ -1286,38 +1287,18 @@ function validateArgs(tool, args) {
   return args;
 }
 export async function execTool(name, args, ctx) {
-  // RA-12 子代理工具面收窄的执行层同口径门禁（§14.4）：schema 层已裁（agent.js 的 toolDefs），
-  // 这里再拦一次——否则"看不见却能调"，等于没收窄。返回 {error} 而非 throw，与上面 MCP 拦截同口径
-  // （失败可见、模型可改用它法继续；throw 会逸出本函数 catch 并中断整轮）。
-  const subRefusal = ctx && ctx.__subTools ? subtoolRefusal(ctx.__subTools, name) : null;
-  if (subRefusal) return { error: subRefusal };
-  // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
-  // 2026-09-15（OP-18 统一装载器）：不再按名字模式**现造**伪工具——MCP 工具已在同一注册表里
-  // （syncMcpTools 注册，条目校验与内置工具同口径），这里就是一次普通查表。仅保留两处**策略**判断：
-  // 按壳 MCP 白名单（A2/A3）与壳级 force_off，且都从工具条目自己的字段读（不再解析名字）。
-  const tool = findTool(name);
-  if (!tool) throw new Error('未知工具: ' + name);
-  // A2/A3 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝。
-  // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw —— throw 会逸出 execTool 的 catch 并中断整轮
-  // （与其它 hook 纪律拦截"失败可见、模型可改用它法继续"口径不一致），且导致该轮观测不落表。
-  if (tool.mcpServer && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow) && !ctx.__shellSchema.mcpAllow.includes(tool.mcpServer)) {
-    return { error: 'MCP server ' + tool.mcpServer + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试，或改用本壳已装配的工具完成。' };
-  }
-  // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）。
-  // 口径修正（2026-09-11 自审）：返回 {error} 而非 throw——throw 逸出 execTool catch → 整轮判"执行失败"中断
-  // （模型无法改用其它工具继续，且该轮观测/计量收尾被跳过）。拦截语义不变：绝不执行，仅以失败结果回填给模型。
-  if (ctx.shellToolsOff && ctx.shellToolsOff.length && ctx.shellToolsOff.includes(name) && !PLATFORM_EXEMPT.includes(name)) {
-    return { error: '工具 ' + name + ' 已被当前壳禁用（force_off）。如需使用，请切换会话/壳或修改壳配置后重试；本轮请改用本壳可用工具完成。' };
-  }
-  if (!checkPerm(tool, ctx.permission)) throw new Error(`工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）`);
-  // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
-  if (ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
-    throw new Error('工具 db_write 需要 write 级及以上权限（当前 read 会话为只读）');
-  }
-  // P26 通用参数校验（MCP 伪工具无契约 params 定义，跳过）
-  if (tool.params && Object.keys(tool.params).length) validateArgs(tool, args);
+  // 2026-09-15（统一失败分类）：本函数改成**单出口**——所有拦截与失败都汇成 result（带 code），
+  // 不再有"提前 return"或"在 try 之外 throw"。两个理由，都是实测出来的：
+  //   ① 提前 return 会绕过下面的留痕块 ⇒ 这次调用**一行账都不落**（"工具调用必须落账"这条不变量
+  //      在拦截路径上直接失效）；
+  //   ② 在 try 之外 throw 会逸出本函数 → agent 的 Promise.all 拒绝 → **整轮中断**，模型无法改用
+  //      其它工具继续（这正是本文件在 force_off/MCP 拦截处已经写明的口径，但 checkPerm/validateArgs/
+  //      未知工具三处一直是 throw —— 口径与实现不一致，这次一并统一）。
+  // 失败码见 server/failures.js（表外码会在 fail() 里直接抛错，不许悄悄流进账本）。
   const t0 = Date.now();
   let result;
+  let blocked = null;      // 拦截原因（模型可见的说明）
+  let blockedCode = null;  // 失败码（账本/统计用）
   // ⚠️ 这两个必须在执行块**外面**声明（2026-09-15 踩过，代价是账本断了 40 分钟）：
   // 留痕代码在下面那个 try/catch 之**后**，若把 `hookStop`/`argsAsked` 声明在执行 try 内部，
   // 引用时就是 ReferenceError —— 而留痕那段的 catch 是"静默不影响主流程"，于是**每次工具调用都少两行账**，
@@ -1325,18 +1306,61 @@ export async function execTool(name, args, ctx) {
   // 现在的护栏：留痕失败会打日志（见下面 catch），并有 scripts/agent-smoke.mjs 端到端核对"工具调用必须落账"。
   let hookStop = null;
   let argsAsked = {};
+  // `payload`（hook 载荷，含可能被改写的 args）必须同样在**执行块之外**声明：执行分支要用它采用
+  // 被 hook 改写后的参数（`payload.args !== args`）——2026-09-15 重构时我把它留在块内，
+  // 结果每次 read_file 失败都报 `payload is not defined`（`hookStop is not defined` 那次的同一类错，
+  // 由 4 行探针当场抓到）。凡是"执行块之后/之外还要用"的东西，一律声明在执行块之前。
+  let payload = null;
   // full 权限不限制路径（limitPath=false）；read/write 级才检查工作区边界（guard=full 级能力+审批，不受限）
   const eff = { ...ctx, limitPath: ctx.permission === 'read' || ctx.permission === 'write' };
   try {
-    let blocked = null;
-    if (hasPh(args)) blocked = '工具 ' + name + ' 参数疑似含截断/裁剪/归档占位符（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加后重试，勿把历史中的占位符文本复制进写参数。';
-    // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
-    if (eff.limitPath && tool.permission === 'read') {
+    // ---------- 前置门禁（全部走 blocked，不再 throw / 提前 return） ----------
+    // RA-12 子代理工具面收窄的执行层同口径门禁（§14.4）：schema 层已裁（agent.js 的 toolDefs），
+    // 这里再拦一次——否则"看不见却能调"，等于没收窄。
+    const subRefusal = ctx && ctx.__subTools ? subtoolRefusal(ctx.__subTools, name) : null;
+    if (subRefusal) { blockedCode = 'TOOL_SCOPE_DENIED'; blocked = subRefusal; }
+    // P24(O-21) MCP 工具并入 execTool 主通道（2026-09）：与本地工具同走 checkPerm/纪律 hooks/占位符检疫/审计脱敏留痕。
+    // 2026-09-15（OP-18 统一装载器）：不再按名字模式**现造**伪工具——MCP 工具已在同一注册表里
+    // （syncMcpTools 注册，条目校验与内置工具同口径），这里就是一次普通查表。
+    const tool = findTool(name);
+    if (!tool && !blocked) { blockedCode = 'TOOL_UNKNOWN'; blocked = '未知工具: ' + name + '（本会话的工具面里没有它；请改用本壳可用工具完成）。'; }
+    // A2/A3 按壳 MCP：schema 层已按壳裁剪（toolDefs），执行层同口径拦截——壳未装载的 MCP server 直接拒绝
+    if (tool && !blocked && tool.mcpServer && ctx.__shellSchema && Array.isArray(ctx.__shellSchema.mcpAllow) && !ctx.__shellSchema.mcpAllow.includes(tool.mcpServer)) {
+      blockedCode = 'TOOL_SHELL_DENIED';
+      blocked = 'MCP server ' + tool.mcpServer + ' 未被当前壳装载（按壳 MCP 白名单）。请在 Agent 装配向导 step6 为该壳勾选该 MCP 后重试，或改用本壳已装配的工具完成。';
+    }
+    // B1-④ 壳级三态：force_off 在执行前拦截（平台豁免工具除外；MCP 工具同受约束）
+    if (tool && !blocked && ctx.shellToolsOff && ctx.shellToolsOff.length && ctx.shellToolsOff.includes(name) && !PLATFORM_EXEMPT.includes(name)) {
+      blockedCode = 'TOOL_SHELL_DENIED';
+      blocked = '工具 ' + name + ' 已被当前壳禁用（force_off）。如需使用，请切换会话/壳或修改壳配置后重试；本轮请改用本壳可用工具完成。';
+    }
+    if (tool && !blocked && !checkPerm(tool, ctx.permission)) {
+      blockedCode = 'TOOL_PERMISSION_DENIED';
+      blocked = `工具 ${name} 需要 ${tool.permission} 权限（当前 ${ctx.permission}）。本轮请改用本会话权限允许的工具，或请用户提权后重试。`;
+    }
+    // P24(O-22) 四层权限无逃逸：read 会话禁写类 global 工具（db_write 原 checkPerm global 恒放行）
+    if (tool && !blocked && ctx.permission === 'read' && tool.permission === 'global' && name === 'db_write') {
+      blockedCode = 'TOOL_PERMISSION_DENIED';
+      blocked = '工具 db_write 需要 write 级及以上权限（当前 read 会话为只读）。';
+    }
+    // P26 通用参数校验（MCP 工具无内部 params 契约 → 跳过；其入参由 MCP 自带 schema 描述）
+    if (tool && !blocked && tool.params && Object.keys(tool.params).length) {
+      try { validateArgs(tool, args); } catch (e) { blockedCode = 'TOOL_ARGS_INVALID'; blocked = String((e && e.message) || e); }
+    }
+    // ---------- 纪律与审批 ----------
+    if (tool && !blocked) {
+      if (hasPh(args)) {
+        blockedCode = 'TOOL_ARGS_PLACEHOLDER';
+        blocked = '工具 ' + name + ' 参数疑似含截断/裁剪/归档占位符（与平台瘦身占位符同格式），拒绝执行防静默写坏文件；请拆成 ≤400 字符小步写入或 append_file 分段追加后重试，勿把历史中的占位符文本复制进写参数。';
+      }
+      // 工作区边界：read/write 会话中，read 级工具带本地路径须落在工作区内（防越权读）；相对路径按工作区根解析
+      if (!blocked && eff.limitPath && tool.permission === 'read') {
       const key = ['path', 'file', 'dir', 'base', 'src'].find((k) => args[k] !== undefined);
       const cand = key ? args[key] : undefined;
       if (cand) {
         const abs = path.isAbsolute(String(cand)) ? String(cand) : path.join(eff.root, String(cand));
         if (!inside(abs, eff.root)) {
+          blockedCode = 'TOOL_PATH_DENIED';
           blocked = '路径超出工作区（本会话权限只允许访问 ' + eff.root + '）';
         } else if (!path.isAbsolute(String(cand))) {
           args[key] = abs; // 相对路径按工作区根解释，避免落到进程 cwd
@@ -1349,17 +1373,20 @@ export async function execTool(name, args, ctx) {
     // 若直接落库，账上记的就是"改写后"，**模型当初要执行什么就永久丢失了**。
     // 因此先把"模型请求的原始参数"留一份，改写明细单独落 `hook:rewrite` 账本。
     argsAsked = { ...args };
-    const payload = { args, ctx: eff };
-    try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ }
+    payload = { args, ctx: eff };
+    if (!blocked) { try { hookStop = await emitHooks('before', name, payload); } catch { /* 事件总线异常忽略（不应阻断工具） */ } }
     if (hookStop && hookStop.stopped) {
+      blockedCode = 'TOOL_HOOK_BLOCKED';
       blocked = '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）';
     }
     // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队。
     // P6：access 规则 allow 命中（hookStop.allowed）→ 免审批（规则=管理员显式放行）；hooks 未拦且未被规则放行才弹卡
     if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && GUARDED_TOOLS.has(name)) {
       if (eff.__autonomous) {
-        const payload = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
-        if (eff.__needInput) await eff.__needInput(payload);
+        // 命名避开外层的 `payload`（hook 载荷）：同名遮蔽过一次就会有人读错对象
+        const needInput = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
+        if (eff.__needInput) await eff.__needInput(needInput);
+        blockedCode = 'TOOL_QUEUED_UNATTENDED';
         blocked = '【无人值守】该操作需要你授权，已排队（' + name + '）。请停止当前任务并输出阶段性总结。';
       } else {
         // P26 diff/命令预览：run_command 显示命令、edit_file 显示 old→new 片段、write_file 注明目标与大小，让"看清再批"
@@ -1387,15 +1414,19 @@ export async function execTool(name, args, ctx) {
           if (eff.__onWait) eff.__onWait('end', { round: eff.__round, kind: 'approval', id: ap.id, decision: verdict && verdict.decision, ms: Date.now() - waitT0 });
         }
         if (!verdict || verdict.decision !== 'approve') {
-          blocked = verdict && verdict.decision === 'aborted' ? '用户停止了操作' : ('用户未批准该操作' + (verdict && verdict.decision === 'timeout' ? '（审批等待超时）' : ''));
+          if (verdict && verdict.decision === 'aborted') { blockedCode = 'ABORTED'; blocked = '用户停止了操作'; }
+          else if (verdict && verdict.decision === 'timeout') { blockedCode = 'TOOL_APPROVAL_TIMEOUT'; blocked = '用户未批准该操作（审批等待超时）'; }
+          else { blockedCode = 'TOOL_APPROVAL_DENIED'; blocked = '用户未批准该操作'; }
         }
       }
     }
+    } // ← 关闭"工具存在且未被前置门禁拦下"这一段（纪律/审批只对可执行的调用做）
     if (blocked) {
-      result = { error: blocked };
+      // 单出口：拦截结果同样带码 → 同样落账（见下方留痕块）
+      result = fail(blockedCode || 'TOOL_ERROR', blocked);
     } else {
       // hooks before 已在上方（审批前）执行且未拦；此处若钩子改写过参数则采用（浅合并结果在 payload.args）
-      if (payload.args !== args) args = payload.args;
+      if (payload && payload.args !== args) args = payload.args;
       // P1-2 自动 checkpoint（安全网）：写类工具执行前自动快照原内容，undo_checkpoint 可回滚；快照失败不阻断主流程
       try { snapshotBeforeWrite(name, args, eff); } catch { /* 快照失败不影响主流程 */ }
       // 工具级截止（架构对齐 DSH `dsh-tool-call-timeout-policy`）：工具在**自己的定义上**声明 `timeoutMs`，
@@ -1427,7 +1458,8 @@ export async function execTool(name, args, ctx) {
       } catch { /* after 钩子异常忽略 */ }
     }
   } catch (e) {
-    result = { error: e.message };
+    // 统一兜底分类：只认错误对象的字段/名字/标准 errno（见 failures.js），不靠中文文案猜
+    result = classifyToolThrow(e);
   }
   // 留痕（audit_log + tool_calls；用户"停止"中止的不留痕，避免孤儿 fail 行回填到后续消息）
   if (!eff.__signal || !eff.__signal.aborted) {
@@ -1453,9 +1485,12 @@ export async function execTool(name, args, ctx) {
       // result_summary 只存前 2000 字符（大结果不可回查分布），此列是 spill 阈值标定的唯一数据源。
       // 存量行可用同一条算式从"未截断的 result_summary"精确重建；被截断的行只能得下界（见 scripts/backfill-result-bytes.mjs）。
       const rBytes = resultBytesOf(result);
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0 })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
-      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, result_bytes, duration_ms, status, shell_id) VALUES (?,?,?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), rBytes, Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null]);
+      // 失败码落账（2026-09-15 统一失败分类）：账本里从此能回答"最常见的是哪种失败"，
+      // 也能看出"被拦截"与"执行后失败"的区别（此前两者都只是 status=fail）。
+      const errCode = (result && result.code) ? String(result.code) : null;
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0, code: errCode })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
+      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, result_bytes, duration_ms, status, shell_id, error_code) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), rBytes, Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null, errCode]);
     } catch (e) {
       // 留痕失败**必须出声**：这里过去是静默 `catch {}`，于是"每次工具调用都少两行账"能瞒过所有人
       // 直到有人去查库（2026-09-15 实测：账本断了 40 分钟才被端到端冒烟发现）。
