@@ -375,7 +375,7 @@
       "anchors": [
         {
           "file": "scripts/migration-rehearsal.mjs",
-          "pattern": "ALTER"
+          "pattern": "function chainUndo("
         },
         {
           "file": "scripts/audit-ledger.mjs",
