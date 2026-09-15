@@ -134,7 +134,9 @@ async function agentLimits() {
       collapseChars: pick('collapse_trigger_chars', 0) || 30000,
       collapseInput: pick('collapse_input_chars', 0) || 18000,
       // F4 连续失败：schema hint=0 关闭，须与"无行缺省 3"区分（0||3 会把显式 0 变 3——修复）
-      failGuardN: failPick('consecutive_fail_guard', 3),
+      // 注：原先另写一个 failPick 完成同样语义，但它引用的 rows 是 try 块内的 const（词法作用域不可见），
+      // 必然抛 "rows is not defined" 并让整个护栏读取回退默认值 —— 故直接用同语义的 pick。
+      failGuardN: pick('consecutive_fail_guard', 3),
       rev: pick('__policy_rev', 0),
     };
   } catch (e) {
@@ -145,12 +147,6 @@ async function agentLimits() {
   limitsCacheAt = Date.now();
   if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars }));
   return limitsCache;
-  // 行存在时按值（含 0=关）；行缺失时才用默认——与 pick 的"缺省回退"区分
-  function failPick(k, d) {
-    const r = rows.find((x) => x.skey === k);
-    if (!r) return d;
-    try { const n = Number(JSON.parse(r.svalue)); return Number.isFinite(n) && n >= 0 ? n : d; } catch { return d; }
-  }
 }
 
 // P13 提示三层（2026-09 批1）：ENV_MAP 拆为【身份/环境/纪律】三层——
