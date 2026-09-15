@@ -139,6 +139,7 @@ async function agentLimits() {
     };
   } catch { limitsCache = { ...def, budgetYuan: 20, budgetTotal: 100, rev: 0, collapseGap: 20, collapseKeep: 80, collapseChars: 30000, collapseInput: 18000, failGuardN: 3 }; }
   limitsCacheAt = Date.now();
+  if (process.env.RW_PREFIX_DEBUG === '1') console.log('[limits-debug] ' + JSON.stringify({ gap: limitsCache.collapseGap, keep: limitsCache.collapseKeep, trig: limitsCache.collapseChars, rows: (typeof rows !== 'undefined' ? rows.length : 'ERR') }));
   return limitsCache;
   // 行存在时按值（含 0=关）；行缺失时才用默认——与 pick 的"缺省回退"区分
   function failPick(k, d) {
