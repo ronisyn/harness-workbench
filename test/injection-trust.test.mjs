@@ -223,3 +223,22 @@ test('A2-a：skill_save 的返回值带 source，且写入路径落在技能根�
   assert.ok(r.path.startsWith(TMP_SKILLS), '写入必须落在技能根目录内：' + r.path);
   assert.ok(fs.readFileSync(r.path, 'utf8').includes('步骤一'));
 });
+
+// ── A2-a 的另一半（2026-09-16）：三处"不可信/持久化注入块"的块头必须带来源句 ──────────────
+// 为什么锁它：知识/错题/技能这三处都是**以 system 角色**进上下文的，而它们的正文来自"过去某次写入"或
+// "本地文件"——模型有权知道"这是数据、来自哪里"，而不是把它当平台刚下达的指令。
+// 技能那句在**两个文件**里各出现一次（开跑前注入 index.js / 运行期追加 agent.js），所以两处都断言：改一处必红。
+test('A2-a：三处 system 注入块的块头都带来源句（来源＝… + 不覆盖系统与用户指令）', () => {
+  const blocks = [
+    ['server/kbgate.js', '知识库条目', '来源＝本账号历次写入'],
+    ['server/lessonrecall.js', '历史错题', '来源＝reviews 表·人工复盘录入'],
+    ['server/index.js', '已载入技能', '来源＝平台技能库 skills/'],
+    ['server/agent.js', '已载入技能', '来源＝平台技能库 skills/'],
+  ];
+  for (const [file, header, src] of blocks) {
+    const s = fs.readFileSync(new URL('../' + file, import.meta.url), 'utf8');
+    assert.ok(s.includes(header), file + ' 里应还有 ' + header + ' 这个块');
+    assert.ok(s.includes(src), file + ' 的 ' + header + ' 块头缺来源句：' + src);
+    assert.match(s, /不(得|覆盖本轮系统与用户指令)/, file + ' 的来源句要带上"不得覆盖系统与用户指令"的分寸');
+  }
+});
