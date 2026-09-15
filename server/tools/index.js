@@ -12,6 +12,7 @@ import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
 import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools, registerToolSource } from './registry.js';
 import { subtoolRefusal } from '../subtools.js';
+import { checkRepeat, noteReadFull, repeatNotice } from '../readcache.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
@@ -138,10 +139,19 @@ function planOf(ctx) {
 const RAW_TOOLS = [
 
 // ---------- B1-B10 文件 ----------
-  { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）', permission: 'read',
-    params: { path: { type: 'string', required: true, desc: '文件绝对路径' }, numbered: { type: 'boolean', desc: 'true=输出带行号前缀' } },
-    run: async (a) => {
+  { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true', permission: 'read',
+    params: { path: { type: 'string', required: true, desc: '文件绝对路径' }, numbered: { type: 'boolean', desc: 'true=输出带行号前缀' }, force: { type: 'boolean', desc: 'true=即使本会话已读过也重新给全文' } },
+    run: async (a, ctx) => {
+      // RA-35 措施②：同会话重复读去重（实测 read 类里 41.7% 是重复读同一文件）
+      const abs = path.resolve(String(a.path || ''));
+      let st = null;
+      try { st = fs.statSync(abs); } catch { /* 不存在则照常走下面的读取报错路径 */ }
+      if (st && st.isFile()) {
+        const seen = checkRepeat({ cid: ctx && ctx.conversationId, kind: 'read_file', absPath: abs, mt: st.mtimeMs, size: st.size, force: !!a.force });
+        if (seen.hit) return { content: repeatNotice('read_file', abs, seen), deduped: true, bytes: st.size };
+      }
       const raw = readTxt(a.path).slice(0, 50000);
+      if (st && st.isFile()) noteReadFull({ cid: ctx && ctx.conversationId, kind: 'read_file', absPath: abs, mt: st.mtimeMs, size: st.size });
       if (!a.numbered) return { content: raw };
       return { content: raw.split('\n').map((l, i) => `${i + 1}| ${l}`).join('\n') };
     } },
@@ -199,14 +209,22 @@ const RAW_TOOLS = [
         for (const it of items) { const f = path.join(d, it.name); if (it.isDirectory()) { if (!['node_modules', '.git'].includes(it.name)) walk(f); } else searchFile(f); } };
       walk(root); return { matches, files };
     } },
-  { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）', permission: 'read',
-    params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' } },
-    run: async (a) => {
+  { name: 'read_file_range', description: '分段读取大文件（offset 字符偏移）。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true', permission: 'read',
+    params: { path: { type: 'string', required: true }, offset: { type: 'number' }, length: { type: 'number' }, force: { type: 'boolean', desc: 'true=即使已读过该段也重新给出' } },
+    run: async (a, ctx) => {
       const c = readTxt(a.path);
       const off = a.offset == null ? 0 : Number(a.offset);
       const len = a.length == null ? 10000 : Number(a.length);
       if (!Number.isFinite(off) || off < 0) throw new Error('offset 必须为非负数字: ' + a.offset);
       if (!Number.isFinite(len) || len <= 0) throw new Error('length 必须为正数字: ' + a.length);
+      const abs = path.resolve(String(a.path || ''));
+      let st = null;
+      try { st = fs.statSync(abs); } catch { /* ignore */ }
+      if (st && st.isFile()) {
+        const seen = checkRepeat({ cid: ctx && ctx.conversationId, kind: 'read_file_range', absPath: abs, off, len, mt: st.mtimeMs, size: st.size, force: !!a.force });
+        if (seen.hit) return { content: repeatNotice('read_file_range', abs, seen) + `（本次请求区间 offset=${off} length=${len}）`, deduped: true, offset: off, length: len, total: c.length };
+        noteReadFull({ cid: ctx && ctx.conversationId, kind: 'read_file_range', absPath: abs, off, len, mt: st.mtimeMs, size: st.size });
+      }
       return { content: c.slice(off, off + len), offset: off, length: len, total: c.length };
     } },
 

@@ -22,6 +22,7 @@ import { parseKnowledgeUpload } from './knowledge.js';
 import { kbVisibleWhere } from './knowledge.js';
 import { kbInjectMode, kbBlock } from './kbgate.js';
 import { streamPatch } from './streampatch.js';
+import { clearReadCache } from './readcache.js';
 import { listTemplates, getTemplate, buildLaunchPrompt, toProfileFragment, isTplKeyOk, validateTemplate, writeTemplateFile, cloneTemplate, removeTemplateDir, templateFilePath } from './templates.js';
 import { listApps, getApp, buildLaunchDraft, toAppProfileFragment, isAppKeyOk } from './apps.js';
 import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from './llm/market.js';
@@ -369,6 +370,7 @@ app.delete('/api/conversations/:id', requireAuth, async (req, res) => {
   try { const actrl = abortMap.get(req.user.id + ':' + req.params.id); if (actrl) actrl.abort('delete'); } catch { /* 忽略 */ }
   // 先删 conversations 行再清子表：会话行消失即向并发迟到写"关门"（存在校验即刻为假），随后子表删除按 id 全清
   await db.query('DELETE FROM conversations WHERE id=? AND account_id=?', [req.params.id, req.user.id]);
+  clearReadCache(req.params.id); // RA-35 措施②：重复读去重状态随会话一起清掉（不长期占内存）
   // 契约事件（contract_events 挂在 task_contracts 下、无 conversation_id）须先按其所属契约清理，避免孤儿
   try { await db.query('DELETE FROM contract_events WHERE contract_id IN (SELECT id FROM task_contracts WHERE conv_id=?)', [req.params.id]); } catch { /* 表未建则跳过 */ }
   for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_summaries', 'conv_skills', 'goals', 'knowledge', 'task_contracts', 'model_telemetry', 'reviews']) {

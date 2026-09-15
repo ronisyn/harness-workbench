@@ -747,7 +747,7 @@
     },
     {
       "name": "read_file",
-      "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"/srv/harness-workbench/server/agent.js\"}",
+      "description": "读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 \"N| \" 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）。同一会话内重复读同一未改动文件会返回极短回执（内容已在上文，省 token）；确需重取传 force=true\n何时用：读文本内容、改前先读、查实现细节\n勿用：大文件超限用 read_file_range；列目录用 list_dir\n例：read_file {path:\"/srv/harness-workbench/server/agent.js\"}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -758,6 +758,10 @@
           "numbered": {
             "type": "boolean",
             "description": "true=输出带行号前缀"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "true=即使本会话已读过也重新给全文"
           }
         },
         "required": [
@@ -767,7 +771,7 @@
     },
     {
       "name": "read_file_range",
-      "description": "分段读取大文件（offset 字符偏移）\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
+      "description": "分段读取大文件（offset 字符偏移）。同一会话内重复读同一未改动文件的同一段会返回极短回执；确需重取传 force=true\n何时用：大文件按 offset/length 分段读\n勿用：小文件直接用 read_file\n例：read_file_range {path, offset:10000, length:5000}",
       "parameters": {
         "type": "object",
         "properties": {
@@ -779,6 +783,10 @@
           },
           "length": {
             "type": "number"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "true=即使已读过该段也重新给出"
           }
         },
         "required": [
@@ -1791,6 +1799,10 @@
         "numbered": {
           "type": "boolean",
           "desc": "true=输出带行号前缀"
+        },
+        "force": {
+          "type": "boolean",
+          "desc": "true=即使本会话已读过也重新给全文"
         }
       }
     },
@@ -1807,6 +1819,10 @@
         },
         "length": {
           "type": "number"
+        },
+        "force": {
+          "type": "boolean",
+          "desc": "true=即使已读过该段也重新给出"
         }
       }
     },
