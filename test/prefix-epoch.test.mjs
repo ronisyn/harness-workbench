@@ -4,7 +4,7 @@
 // 系统提示一个字都没变时必须判"没换纪元"（否则每次启动都无谓预热、白花钱）。
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { prefixHash, epochKey, laneKey, isEpochChange, diffCore, isUnexpectedBreak } from '../server/prefix.js';
+import { prefixHash, epochKey, laneKey, isEpochChange, needsWarm, diffCore, isUnexpectedBreak } from '../server/prefix.js';
 
 const ENV = '身份：你是 RW 工作台智能体\n环境信息…\n行动原则…';
 const TOOLS = 'abc123def456';
@@ -39,6 +39,15 @@ test('负例：首次记录（prev 为空）不算变更，不报警不预热', 
 test('负例：当前值不可用（空串）按"不变"处理 —— 宁可漏预热，不可每次启动都预热', () => {
   assert.equal(isEpochChange(epochKey(ENV, TOOLS), ''), false);
   assert.equal(isEpochChange(epochKey(ENV, TOOLS), null), false);
+});
+
+test('预热判据要宽一档：没有记录也要预热（那说明我们从没为这个面保温过），但"没变化"绝不再预热', () => {
+  const k = epochKey(ENV, TOOLS);
+  assert.equal(needsWarm(null, k), true, '首次记录 ⇒ 预热（它多半是冷的）');
+  assert.equal(needsWarm('', k), true, '记录不可用 ⇒ 按"没记录"处理');
+  assert.equal(needsWarm(k, k), false, '没变化 ⇒ 绝不预热（否则每次重启都白花钱）');
+  assert.equal(needsWarm('000000000000', k), true, '变了 ⇒ 预热');
+  assert.equal(needsWarm(k, ''), false, '当前值不可用 ⇒ 不预热');
 });
 
 test('拼接不歧义：("ab","c") 与 ("a","bc") 必须给出不同纪元键', () => {

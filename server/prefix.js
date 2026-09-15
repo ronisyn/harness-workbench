@@ -51,3 +51,12 @@ export const laneKey = (permission, preset, light = false) =>
  * 纪元是否变了。`prev` 为空 = 首次记录（不是变更，不报警）；任一为空串 = 数据不可用，按"不变"处理。
  */
 export const isEpochChange = (prev, cur) => !!prev && !!cur && prev !== cur;
+
+/**
+ * **要不要为这个面发一次预热**。比 `isEpochChange` 宽一档：**没有记录也要预热**。
+ * 依据：没有记录 = 我们从没为这个面做过保温 —— 它的前缀多半是冷的，而"冷"意味着下一次真实请求要
+ * 整段重建。此时预热的花费上界就是那笔重建（本来也要付），下界几乎是 0（若它其实是热的，走命中价）。
+ * 反例（为什么要留 `isEpochChange` 单独一个函数）：**没变化时绝不能预热** —— 那会在每次重启都白花钱，
+ * 实测第二次重启的日志就是 `前缀面无变化（已核对 4 条泳道×面，未产生任何调用）`。
+ */
+export const needsWarm = (prev, cur) => (!!cur) && (prev == null || prev === '' || prev !== cur);

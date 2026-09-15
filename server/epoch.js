@@ -21,7 +21,7 @@
 // · 只预热"近 7 天真实用过"的泳道（见 lanesInUse），不给没人用的组合白花钱。
 // · 预热失败绝不影响启动（全部 try/catch，只打日志 + 落账）。
 import { db } from './db.js';
-import { prefixHash, epochKey, laneKey, isEpochChange } from './prefix.js';
+import { prefixHash, epochKey, laneKey, isEpochChange, needsWarm } from './prefix.js';
 import { buildEnvFor, lightDefs } from './agent.js';
 import { toolDefs } from './tools/index.js';
 import { chatOnceWithTools } from './llm/gateway.js';
@@ -149,7 +149,9 @@ export async function checkEpochAndWarm({ provider = 'deepseek', model = 'deepse
             [null, 'prefix:epoch-change', `lane=${e.lane} face=${face.name} ${prev}→${e.key} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length}`]).catch(() => {});
         }
         await writePrev(e.lane, e.key);
-        if (isEpochChange(prev, e.key)) out.warm.push(await warmLane({ permission: lane.permission, preset: lane.preset, light: face.light }, { provider, model }));
+        // 预热条件比"变更"宽一档：**没有记录也要预热**（我们从没为这个面做过保温，它多半是冷的）。
+        // 但"没变化"绝不预热 —— 否则每次重启都白花钱（实测第二次重启：零调用）。
+        if (needsWarm(prev, e.key)) out.warm.push(await warmLane({ permission: lane.permission, preset: lane.preset, light: face.light }, { provider, model }));
       } catch (err) {
         console.warn('[epoch] 检查失败 lane=' + JSON.stringify(lane) + ' light=' + face.light + '：' + String((err && err.message) || err).slice(0, 160));
       }
