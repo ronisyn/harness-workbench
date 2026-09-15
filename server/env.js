@@ -52,3 +52,9 @@ export const RW_FS_ROOT = path.parse(RW_PLATFORM_DIR).root;
 
 export const RW_SEARCH_ENGINE = process.env.RW_SEARCH_ENGINE || 'SearXNG';               // 联网搜索后端名
 export const RW_IDLE_MIN = Number(process.env.RW_IDLE_MIN || 60);                        // 长空闲判定阈值（分钟；C5 豁免归因用）
+
+// ---- v0.3 §7.1 ⑦/②：两个"可替换实现"的选择开关（默认值＝现行实现，行为不变）----
+// 存储（v0.3 §4.1「存储走接口」/ G1「不依赖我们的数据库」）：选择 server/storage/ 下的实现。
+export const RW_STORAGE = process.env.RW_STORAGE || 'mysql';
+// 执行后端（v0.3 §4.2 三层分离的第三层 / §5 跨平台）：选择 server/exec/ 下的实现。
+export const RW_EXEC_BACKEND = process.env.RW_EXEC_BACKEND || 'local';
