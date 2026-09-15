@@ -22,6 +22,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CRITERIA, evaluatePriority, sortProposals, CRITERIA_CN } from './priority.js';
 import { fingerprint, METRIC_STATUS } from './collect.js';
+// 指标告警线（2026-09-16，v0.3 §4.4.1 规则4「给'每轮新增'设阈值并监控」）：
+// 阈值**机制**在 `./alerts.js`（可配置、缺省不设线、不发明数字），这里只把越线结果转成待审提案。
+import { evaluateLines, metricsFromSnapshot } from './alerts.js';
 
 /** v0.3 的引用前缀：每条提案的 `basis` 都要能指到条款或实测数据，不许"凭空觉得"。 */
 export const V03 = 'proposals/RW-Agent引擎架构优化方案-v0.3.md';
@@ -245,8 +248,12 @@ const fmt = (n) => (n == null ? '未取到' : Number(n).toLocaleString('en-US'))
  * 从快照派生提案（纯函数）。规则的设计口径：**只用"有/无/结构性事实"当触发条件，
  * 不用自造阈值**。例如"某会话成本占比最高"是结构性事实（一定能算出），
  * 而"占比 > 25% 才提案"就是自造阈值 —— 后者一律不做（v0.3 §0.3 只报数不设线）。
+ *
+ * @param {object} snapshot
+ * @param {string} [alertLines] 可选的"告警线"原始配置（`settings.metric_alert_lines`，由调用方读库后传入）。
+ *   缺省/空串 ⇒ **不设线 ⇒ R8 不产出任何东西**（与改造前逐字相同）。数字**只可能来自这里**。
  */
-export function rulesFromSnapshot(snapshot) {
+export function rulesFromSnapshot(snapshot, alertLines = '') {
   const m = (snapshot && snapshot.metrics) || {};
   const c1c2 = m.c1c2 || {};
   const real = (c1c2.cohorts && c1c2.cohorts.real) || {};
@@ -386,6 +393,29 @@ export function rulesFromSnapshot(snapshot) {
     });
   }
 
+  // R8 · 指标告警线越线（v0.3 §4.4.1 规则4「给'每轮新增'设阈值并监控」；2026-09-16 主导架构师拍板：
+  //      **阈值机制在位、缺省不设线、由配置给数**）
+  //   · 线来自 `settings.metric_alert_lines`（调用方读库后经 `alertLines` 传进来）；缺省/空 ⇒ 本规则**不产出**；
+  //   · 本模块**不写任何默认数字**，`alerts.js` 里也没有——线只可能来自配置；
+  //   · 越线只产一条**待审提案**（人在审批台上处置）：走既有处置路径，**不是**阻断，也不是自动改什么。
+  const alerts = evaluateLines({ lines: alertLines, metrics: metricsFromSnapshot(snapshot) });
+  if (alerts.length) {
+    const summarize = alerts.map((a) => a.message).join('；');
+    out.push({
+      rule: 'R8-metric-alert-line',
+      title: `指标越线 ${alerts.length} 项（${alerts.map((a) => a.metric).join('、')}）：按配置的线核对并处置`,
+      basis: `${ref('§4.4.1 规则4')}（增量最小化：给"每轮新增"设阈值并监控）＋实测：窗口 ${win} 天读数越过了 \`settings.metric_alert_lines\` 里配的线——${summarize}。`
+        + '⚠️ 线的**唯一**来源是那条设置键（本模块不发明阈值；缺省为空＝不设线、只报数）。',
+      action: `读同窗口的 \`node scripts/selfeval-collect.mjs --days ${win} --json\` 与 \`node scripts/ra35-report.mjs\`，先确认越线不是采样/口径问题（真实流量档、逐轮样本有没有被 LIMIT 截断），再决定是改机制、改配置的线，还是把线调回不设。**不要**为了消掉告警去改口径。`,
+      locator: 'server/selfeval/alerts.js（线的解析与比较，取值域 METRIC_DEFS）· server/settingsSchema.js 的 metric_alert_lines（配置入口）',
+      expectedBenefit: '让"每轮新增"这类成本指标一旦越过人配的线就有人看见（机制在位）；平时不设线时保持"只报数"的原状',
+      risk: '线配错了会造出持续噪音（例如把一次性窗口尖峰当常态）；越线只告警、**不阻断**任何执行——别把本提案读成"系统已被拦下"',
+      verification: `改完重跑 \`node scripts/selfeval-collect.mjs --days ${win} --json\`，用同一份读数调 \`server/selfeval/alerts.js\` 的 \`evaluateLines\`；线调空后本规则必须不再产出（缺省不设线＝零提案，这条就是反向核对）`,
+      judged: { 'c4-or-cost': true, 'delivery-speed': null, 'manual-effort': null },
+      evidence: '配置的告警线 + 同窗口读数（线由配置给，不由本模块给）',
+    });
+  }
+
   return out;
 }
 
@@ -421,14 +451,17 @@ function toProposal(seed, { source, batchId }) {
 
 /**
  * 三源 → 提案数组（纯函数；不碰库、不写文件）。
- * @param {{snapshot:object, benchmark?:{items:Array,errors?:Array}, feedback?:{items:Array,errors?:Array}}} input
+ * @param {{snapshot:object, benchmark?:{items:Array,errors?:Array}, feedback?:{items:Array,errors?:Array},
+ *          alertLines?:string}} input
+ *   `alertLines`：`settings.metric_alert_lines` 的原始值（由 **调用方**读库/读脚本参数后传入，本函数不读库）。
+ *   缺省 ⇒ 不设线 ⇒ R8 不产出（缺省行为与改造前逐字相同）。
  */
-export function buildProposals({ snapshot, benchmark, feedback } = {}) {
+export function buildProposals({ snapshot, benchmark, feedback, alertLines = '' } = {}) {
   const batchId = (snapshot && snapshot.batchId) || 'selfeval-unknown';
   const list = [];
   const notes = [];
 
-  for (const seed of rulesFromSnapshot(snapshot)) list.push(toProposal(seed, { source: 'selfeval', batchId }));
+  for (const seed of rulesFromSnapshot(snapshot, alertLines)) list.push(toProposal(seed, { source: 'selfeval', batchId }));
 
   // 外部对标：**逐条**产提案（每条都要人判适配性），但上限截断并如实标注（防一次刷屏几百条）
   const bItems = (benchmark && benchmark.items) || [];

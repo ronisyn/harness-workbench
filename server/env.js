@@ -81,6 +81,11 @@ export const RW_EXEC_BACKEND = process.env.RW_EXEC_BACKEND || 'local';
 // 当前唯一实现＝fts（MySQL FULLTEXT + ngram）。这一行就是"向量留位置"的入口：将来写好向量实现模块、
 // 在 server/kbsearch/index.js 的实现表加一行，然后把这台机器的 RW_KB_SEARCH 指过去即生效——调用方不改。
 export const RW_KB_SEARCH = process.env.RW_KB_SEARCH || 'fts';
+// 提醒投递通道（v0.3 §5「提醒由产品层配置的通道投递，引擎提供通道接口」）：选择 `server/reminders/` 下的实现。
+// **默认空串 = 没配通道**（如实语义：本仓现在只有飞书一条真实通道，没有"默认通道"这回事）；
+// 配了不存在的实现名 ⇒ `server/reminders/index.js` 在**装配期**如实抛错，不静默回落（§4.6）。
+// 飞书通道要同时配 FEISHU_APP_ID / FEISHU_APP_SECRET（缺了 `available()` 如实报 false，投递时报明确错误）。
+export const RW_REMINDER_CHANNEL = process.env.RW_REMINDER_CHANNEL || '';
 
 // ---- v0.3 §4.6 沙箱的严格语义开关 ----
 // 默认 **关**：拿不到沙箱（本机没有可用 runner）时按"显式降级"走——如实上报 enforcement:'none'、

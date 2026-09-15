@@ -11,6 +11,8 @@
 //   · `--write` 也只允许写 `extension_demands`（待审）与 `evo_goals`（`server/selfeval/write.js` 的白名单）；
 //   · 提案文本里出现"自动执行/自动提交"字样 → 拒；缺"验证方式" → 拒（`checkIronLaw`）；
 //   · **不会**改代码、**不会** git 提交。
+//   · 告警线（`settings.metric_alert_lines`）**缺省为空＝不设线**：此时 R8 不产出，行为与改造前逐字相同；
+//     设了线且越线，只多一条**待审提案**（告警），不阻断任何执行（v0.3 §4.4.1 规则4）。
 //
 // 用法（服务器上）：
 //   node scripts/selfeval-propose.mjs                              # dry-run：采集 + 打印提案
@@ -24,6 +26,9 @@ import { ROOT } from '../server/config.js';
 import { pool } from '../server/db.js';
 import { collectSnapshot, BENCHMARK_SOURCES } from '../server/selfeval/collect.js';
 import { buildProposals, collectBenchmarkCandidates, readFeedbackFile, formatProposals } from '../server/selfeval/propose.js';
+// 指标告警线（v0.3 §4.4.1 规则4；2026-09-16）：线**只**来自设置键 `metric_alert_lines`，缺省为空＝不设线
+// （不设线时 R8 不产出，整条链路的行为与改造前逐字相同）。这与三源里的**读库那一半**同处：读库在这里，成型在纯函数里。
+import { loadMetricAlertLines } from '../server/selfeval/alerts.js';
 import { writeProposals, WRITABLE_TABLES } from '../server/selfeval/write.js';
 
 const args = process.argv.slice(2);
@@ -63,7 +68,12 @@ try {
   let feedback = { items: [], errors: [] };
   if (FEEDBACK) feedback = readFeedbackFile({ root: ROOT, file: FEEDBACK });
 
-  const result = buildProposals({ snapshot, benchmark, feedback });
+  // ── 告警线（**配置给数**，缺省为空＝不设线）─────────────────────────────────────────
+  // 为什么在这里读：`propose.js` 是纯函数（dry-run 才能真正只读），读设置与三源读库同处。
+  // 读不到/为空 ⇒ 传空串 ⇒ R8 不产出（与改造前逐字相同）。线上没有这条键的种子行，缺行就是缺省。
+  const alertLines = await loadMetricAlertLines();
+
+  const result = buildProposals({ snapshot, benchmark, feedback, alertLines });
   console.log(formatProposals(result, { verbose: VERBOSE }));
 
   if (result.rejected.length) {

@@ -50,7 +50,10 @@ function parseMessageContent(contentStr) {
 }
 
 // 发送飞书文本消息
-async function sendFeishuText(receiveId, receiveIdType, text) {
+// 导出（2026-09-16）：提醒投递层（`server/reminders/feishu.js`）复用的就是**这一个**发信函数——
+// v0.3 §5 的"提醒由产品层配置的通道投递，引擎提供通道接口"落到代码上＝接口在 `server/reminders/`，
+// 而"怎么发飞书"这件事**只有这一份实现**（渠道回信与提醒走同一条路，不另写一个发信器）。
+export async function sendFeishuText(receiveId, receiveIdType, text) {
   const token = await getFeishuToken();
   const res = await fetch(`${FEISHU_API}/im/v1/messages?receive_id_type=${receiveIdType}`, {
     method: 'POST',

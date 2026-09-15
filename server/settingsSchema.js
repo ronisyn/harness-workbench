@@ -28,6 +28,11 @@ export const SETTINGS_SCHEMA = [
   { key: 'max_concurrent_chats', label: '并发对话上限', group: 'runtime', type: 'number', def: 5, min: 0, hint: '同账号同时在跑的对话数上限；0=不限。超限时新对话被拒并提示前面还有几轮在跑' },
   // 2026-09-11 A1（总方案 §8.10 缓存命中率目标）：观测类键——不入 runtime（PUT 不 bump policy_rev）；0 与空同义=不启用
   { key: 'cache_hit_rate_target', label: '缓存命中率目标（%）', group: 'observe', type: 'number', def: 0, min: 0, max: 100, hint: '0=不启用（留空同义）。启用后：命中率(近7/30日均值)低于目标→首页状态带横条告警+进化集生成建议；状态带同时显示当日值与均值' },
+  // 2026-09-16（v0.3 §4.4.1 规则 4「给"每轮新增"设阈值并监控」；主导架构师拍板：**阈值机制在位、缺省不设线**）：
+  // 本键是"线"的**唯一**配置处，**缺省为空 = 不设线、只报数**（与改造前的行为逐字相同）。
+  // ⚠️ 取值域由 `server/selfeval/alerts.js` 的 defs 独占（哪个指标可设线、单位是什么），本行不另列一份。
+  // ⚠️ 代码里**不写任何默认数字**：线只可能来自这里；越线**只告警**（产一条待审提案/页面标记），**绝不阻断**。
+  { key: 'metric_alert_lines', label: '指标告警线（JSON，缺省空=不设线）', group: 'observe', type: 'json', def: '', hint: '留空＝不设线、只报数（默认，也是现行的"如实上报"口径）。要设线就填 JSON 对象，如 {"c2Median":{"op":"<=","value":1000},"c4Invalidate":{"op":"<=","value":0}}；可设的键与单位见 server/selfeval/alerts.js 的 METRIC_DEFS。越线只告警（待审提案+页面标记），不阻断任何执行' },
 ];
 
 export function schemaByKey(key) {
@@ -41,6 +46,14 @@ export function validateSetting(key, val) {
     const n = Number(val);
     if (!Number.isFinite(n) || n < s.min) return { ok: false, error: `${key} 需为 ≥${s.min} 的数字` };
     return { ok: true, value: n };
+  }
+  // json 类型（2026-09-16 随 metric_alert_lines 新增）：空串/空值＝不设（放行，语义由消费方定）；
+  // 非空必须能被 JSON.parse —— 否则写进去的"线"谁也用不了，宁可在**写入时**就拒（别让它躺进库里当摆设）。
+  if (s.type === 'json') {
+    const t = String(val == null ? '' : val).trim();
+    if (!t) return { ok: true, value: '' };
+    try { JSON.parse(t); } catch (e) { return { ok: false, error: `${key} 需为合法 JSON（留空＝不设）：${e.message}` }; }
+    return { ok: true, value: t };
   }
   return { ok: true, value: val };
 }
