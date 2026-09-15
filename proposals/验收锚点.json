@@ -1102,6 +1102,35 @@
         }
       ],
       "note": "**2026-09-16 落地（C-34，Windows 端到端实测撞出来的装机阻断）**。实测：全新空库上服务能起、`/api/health` 200，但 `POST /api/conversations` **永久挂住**（客户端 240 秒超时），服务端只有一行 `unhandledRejection: Unknown column 'provider'`。根因两条且与操作系统无关：① `db.js` 的建表语句与 `migrations.js` 的迁移链**漂移了 11 列**；② 全新库走\"按最终形状建表 + 整条链标记为已应用\"的特例 ⇒ 那些 ALTER 一条都不跑。**任何新机器装机都会撞上。**修法：补齐 11 列（类型逐字抄自 0001_baseline）；新增**静态一致性夹具** `test/schema-sync.test.mjs`（链里加过的每一列/每张表都必须在 db.js 的建表语句里 —— 两条路径从此由机器对齐）；启动自检的列清单**改为从迁移链推导**（原来是手写的一小段，实测漏了 5 列）。**真机验证**：服务器上建一次性空库 `rw_fresh_probe`、起第二个实例、缺列数 0、建会话 28ms 返回（不再挂住）、**selfcheck 12/12（不改库）**、日志里 `Unknown column`/`unhandledRejection` 0 次，验完停实例删库（库残留 0）。"
+    },
+    {
+      "id": "RA-59",
+      "title": "数据出口边界：注入层按账号过滤 + 边界如实声明（D3/OP-01）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/lessonrecall.js",
+          "pattern": "export const LESSON_CANDIDATE_SQL"
+        },
+        {
+          "file": "server/lessonrecall.js",
+          "pattern": "export async function recallLessons"
+        },
+        {
+          "file": "server/index.js",
+          "pattern": "recallLessons(db, { accountId: req.user.id"
+        },
+        {
+          "file": "server/capabilities.js",
+          "pattern": "export const DATA_EGRESS"
+        },
+        {
+          "file": "test/data-egress.test.mjs",
+          "pattern": "拿不到账号就不召回"
+        }
+      ],
+      "note": "**2026-09-16 落地（D3/OP-01）**。做法是**先量后改**：把\"平台数据进模型上下文\"的每条通道过一遍——知识库块（`kbVisibleWhere` 按账号+范围过滤）、会话内数据（早期摘要/目标/现场/后台任务通知，都限本会话）、技能/壳/项目 AGENTS.md（平台配置，共享是设计）、运行时快照（本会话自己的用量）都成立；**只有一条没有边界**：错题召回（OP-12）的候选 SQL 写在 index.js 里、`SELECT ... FROM reviews WHERE result='bug' ...` **没有任何账号过滤** ⇒ 全平台所有账号的错题标题会被注进任意会话，而同一份数据在 HTTP 面（`GET /api/reviews`）是按 `account_id=?` 过滤的——两处口径不一致，模型上下文成了绕过账号边界的数据出口。**修法照 HTTP 面那一条口径**（不发明新规则）：SQL 与过滤条件收进 `lessonrecall.js:recallLessons`（缺账号就不召回、且不发查询），index.js 改走它；跨**会话**召回保留（OP-12 原意），跨**账号**召回不行。另加一等字段 `capabilities.dataEgress`，如实写出\"注入层按账号过滤 / 工具出口按会话权限放行 / `db_query` 是全库只读、不做行级账号隔离\"，边界报 `partial`（没有行级租户隔离——工作台形态的有意选择，但要写出来，不能让人以为已经隔离好了）。**真机验证**（真库）：造一条别的账号的、与问句强重叠的错题 → 管理员账号召回 **0 条**（不泄漏）；同一账号自己问 → 召回到（说明过滤没过头）；闲聊 → 0 条（原口径未退化）；清单字段就位；验完删除哨兵数据。夹具 6 条，**反向核对过**（去掉 account_id 过滤 → 前两条报红）。**沙箱本身随 D5 一起搁置**（不接外部引擎）。"
     }
   ]
 }

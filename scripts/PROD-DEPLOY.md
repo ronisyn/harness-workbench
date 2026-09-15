@@ -72,3 +72,24 @@ nginx -t && systemctl reload nginx
 - [ ] 飞书：给机器人发消息收到回复
 - [ ] 模型市场/设置/统计正常
 - [ ] 880 TEST 保留为 staging（预发）
+
+## 7. 对外形态（2026-09-16 起）
+对外只走**一份契约**：`docs/会话API契约-v1.md`（会话 API 的端点、SSE 帧序、错误码、幂等键、已知限制逐条写死）。
+运维侧要记住的四条：
+
+- **幂等键**：外部调用 `POST /api/chat` 时带 `Idempotency-Key`，同一键重发**返回原始接受结果**、不会重复执行；
+  调用方断线重连就该这么发，别自己发明重试去重。
+- **死信**：`GET /api/deliveries?state=failed` 列出"没做完的外部调用"（含 attempts 与错误码）。
+  **不自动重试**——重放＝用同一个幂等键重发；谁来看由人定（没有"几次算死"的阈值，因为平台没有投递重试引擎）。
+- **回调来源校验**：`/api/feishu/webhook` 按飞书官方规范验签（`X-Lark-Signature`）。
+  配了 `FEISHU_ENCRYPT_KEY` 就**必须**带签名，否则 401；两个密钥都没配时启动日志会明确告警"本入口不校验来源"。
+- **把它当 MCP 工具给别的 agent 用**：
+  ```json
+  { "mcpServers": { "rw": { "command": "node",
+      "args": ["/srv/harness-workbench/scripts/rw-mcp-server.mjs"],
+      "env": { "RW_MCP_BASE_URL": "http://127.0.0.1:880", "RW_MCP_USER": "...", "RW_MCP_PASS": "...",
+               "RW_MCP_PERMISSION": "read" } } } }
+  ```
+  暴露三个平台能力：`rw_chat` / `rw_status` / `rw_export`（**不暴露平台内部的模型工具**）。
+  `RW_MCP_PERMISSION` 默认 `read`（最小权限），要让它真干活由运维显式提权。
+  自检：`node scripts/selfcheck.mjs`（13 项，含"write 权限会话也能跑完一轮"）。
