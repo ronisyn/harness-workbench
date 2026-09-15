@@ -9,11 +9,31 @@
 // 本模块的立场：**这是声明，不是自夸**。一期没有沙箱，四层隔离里只有第 3 层真在工作，
 //   所以整体只能如实报 `partial` —— 把"我们到底拦住了什么、没拦住什么"逐层写出来，
 //   比给一个漂亮的 `full` 有用得多（§7.2：禁止静默降级）。
+//
+// 2026-09-16 增补（候选 D，《提示注入防线-方案-20260916》§3-D / §5）：新增一等字段 `promptInjection`。
+//   此前清单里**根本没有"提示注入"这一项**，读清单的人（和用户）会以为四层就是全部风险面——那是自夸。
 import { listHooks, hookPolicySummary } from './tools/hooks.js';
 import { toolDefs } from './tools/index.js';
 import { TOOL_META } from './tools/registry.js';
 
 export const ENFORCEMENT_VALUES = ['full', 'partial', 'none'];
+
+/**
+ * 候选 D（2026-09-16 拍板）：提示注入的**如实声明**。
+ *
+ * 为什么是一等字段、而不是塞进 `enforcement.layers`：四层是 §7.2 定义的**隔离层**（少一层就是漏报），
+ *   而"提示注入有没有防住"是另一件事——今天平台侧**没有任何**"按来源判定能不能当指令"的机制
+ *   （方案 §4-2/§4-3 明确不做按来源加门禁）；硬塞会让 `layers.length===4` 与 §7.2 语义同时失真（方案 D7）。
+ * 取值沿用 §7.2 的三值语义：`full | partial | none` —— 今天是 `none`（不是"没做全"，是"一条都没有"）。
+ *   ⚠️ 没有防线就不得改口：把它写成 `partial`/`full` 必须同时带来一条**真机制** + 一条夹具（见 test/capabilities.test.mjs）。
+ * 为什么必须进用户可见面：清单里没有它，读清单的人会以为四层就是全部风险面（RA-31 ④"自述不可信"的同一立意）。
+ * ⚠️ 它**不进模型上下文**：这份清单只走 HTTP `/api/agent/capabilities` 与 run_end 事件（**给人看**）。
+ *   这是诚实性声明，不是提示词——把它塞进系统提示是另一件事（会换纪元、也改变了权威面），本文件不做。
+ */
+export const PROMPT_INJECTION = {
+  level: 'none',
+  note: '提示注入未防住：外部内容（网页/飞书文档/MCP 返回/渠道消息）与用户输入一样以普通消息进上下文，平台不判定"哪条能当指令"；动作层只有 7 项受控工具审批（按工具名，不按来源）与占位符检疫（按内容形状）。',
+};
 
 /**
  * 四层隔离在本平台的真实状态（§7.2）。逐层给 state + 一句实话。
@@ -73,6 +93,7 @@ export function capabilityManifest(ctx = {}, extra = {}) {
   return {
     version: 1,
     enforcement,
+    promptInjection: PROMPT_INJECTION, // 候选 D：用户可见的诚实性字段（不进模型上下文）
     session: {
       permission: ctx.permission || 'full',
       preset: ctx.preset || 'all',
@@ -95,5 +116,6 @@ export function capabilityManifest(ctx = {}, extra = {}) {
 /** 事件流里用的紧凑版（RA-31：run_end 带"用了哪些能力"，但不要把整个清单塞进每一条事件）。 */
 export function capabilitySummary(ctx = {}, used = []) {
   const e = enforcementReport(ctx);
-  return { enforcement: e.level, layers: e.layers.filter((l) => l.state !== 'full').map((l) => l.id + ':' + l.state), used: [...new Set(used || [])].slice(0, 40) };
+  // 候选 D：run_end 同样要带诚实性字段（D8 拍板=进用户可见面）。只带取值，不带那句实话——紧凑版要小。
+  return { enforcement: e.level, promptInjection: PROMPT_INJECTION.level, layers: e.layers.filter((l) => l.state !== 'full').map((l) => l.id + ':' + l.state), used: [...new Set(used || [])].slice(0, 40) };
 }

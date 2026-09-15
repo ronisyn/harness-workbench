@@ -101,7 +101,11 @@ test('端到端：真实 spawn 一个 MCP server，分页 tools/list 全取回�
     assert.equal(n, 2);
     assert.deepEqual((await callMcpTool('fake', 'echo', { text: 'ok' })).content, 'echo:ok');
     const r = await execTool('mcp_fake_echo', { text: 'ok' }, CTX());
-    assert.equal(r.content, 'echo:ok', 'execTool 必须能直接调用注册进注册表的 MCP 工具');
+    // 2026-09-16（A1 提示注入防线）：MCP 属**外部来源**，结果会带一段"不可信内容"声明头——
+    // 那是刻意加的（照 DSH 只对 web 用 EXTERNAL_WEB_CONTENT_NOTICE 的窄口径），所以这里断言的
+    // 是"声明在位 + 真实结果仍在"，而不是"整串等于 echo:ok"。
+    assert.match(String(r.content || ''), /不可信数据/, '外部来源结果必须带不可信声明：' + JSON.stringify(r).slice(0, 120));
+    assert.match(String(r.content || ''), /echo:ok$/, 'execTool 必须能把注册进注册表的 MCP 工具调通（真实结果在声明之后）');
   } finally { disconnectMcp('fake'); syncMcpTools([]); }
 });
 

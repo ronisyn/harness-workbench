@@ -867,6 +867,31 @@
         }
       ],
       "note": "**2026-09-16 落地（RA-47 登记的未闭环项）**：`events` 只追加；到期行**先搬进 `events_archive` 再删原表**，删的是\"刚搬过的那批 id\"（不是再按时间条件删一遍——那样在部分插入失败时会删掉没搬走的行）；任一步失败原样抛出，events 一行不动。**90 天沿用 `audit_log` 那条既有口径**（不自己发明天数；DSH 做的是按窗口的语义压缩，按龄清理只有 spill 文件 30 天，所以这个天数只能取本项目自己的审计口径）。接线照 runSpillCleanup（启动一次 + 每 6h + unref）；真库端到端用**自己造的 100 天前行**验证并清理，**绝不动真实事件**；CI 无 MySQL 时该用例按可达性探测**跳过并说明**（本地能跑、CI 判红＝没人看 CI）。"
+    },
+    {
+      "id": "RA-52",
+      "title": "提示注入防线（外部来源声明 + 不可信注入块来源句 + 策略写入可识别 + 如实能力声明）",
+      "owner": "agent",
+      "kind": "auto",
+      "anchors": [
+        {
+          "file": "server/tools/index.js",
+          "pattern": "不可信数据"
+        },
+        {
+          "file": "server/capabilities.js",
+          "pattern": "promptInjection"
+        },
+        {
+          "file": "test/injection-trust.test.mjs",
+          "pattern": "不得出现在 system 层"
+        },
+        {
+          "file": "test/policy-write.test.mjs",
+          "pattern": "策略"
+        }
+      ],
+      "note": "**2026-09-16 落地**（方案：`proposals/提示注入防线-方案-20260916.md`，含 DSH 对照：它只对 **web** 用 `EXTERNAL_WEB_CONTENT_NOTICE`、消息带 `source{kind}`、技能/AGENTS 以 **user 角色**注入；**没有** taint、没有按来源的工具门禁、\"策略只能人改\"没有强制点）。做了四件：A1 外部来源（网页/飞书/MCP）结果加**不可信内容声明**（结果头 + 工具描述一句，只加给外部来源——标记多了等于没标记）；A2-a 不可信注入块加来源句 + 知识/技能写入带归属；B-①② 策略类写入必须**可识别 + 单独审计**（不是硬拦——硬拦是安全剧场：挡不住 write_file 路径，且与\"模型可自改+reload\"主线冲突）；D 能力清单**新增一等字段**如实声明\"提示注入未防住\"，进用户可见面但**不进模型上下文**。**明确不做**：A2-b 角色降级（缓，先做真机对照实验）、C 按\"本轮含外部内容\"给高危工具加门禁（可绕 + 误伤 + 无真实样本）→ 转观测项。**最锋利的两条发现**（只报告，未改）：`kb_add` 是 `permission:'read'`（只读会话即可写 `scope=global`、对全会话以 system 注入的长期记忆）；`db_write` 是 `permission:'global'`（checkPerm 对 global 恒真）⇒ write/full 会话可无审批改 settings 任意策略键。"
     }
   ]
 }

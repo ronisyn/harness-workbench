@@ -364,3 +364,105 @@ registerHook('after', 'finish_task', 'finish_selfcheck_note', ({ args, result })
   } catch { /* 忽略 */ }
   return {};
 }, { builtin: true, failure: 'open' });
+
+// ---------------------------------------------------------------------------
+// B-①② 策略写入的归属 + 单独可审计（2026-09-16 拍板 ·《提示注入防线-方案-20260916》§3-B / §5）
+//
+// 要解决的问题（P1）：`db_write` 是 global 级，而 write / full 会话**不弹审批**（审批只对 guard 档生效），
+//   于是改 `settings` 里的策略键（access_rules / toolset_enabled / systemPrompt / mcp_servers …）与
+//   "插一条业务数据"在账本里**完全同形**：都只有一条 `tool:db_write`，事后一眼看不出"这次改的是策略"。
+//   本节把它变成**可识别 + 可归属 + 单独一行账**——**不拦截**。
+// 为什么不做拦截（B-③ 已明确不做）：full 会话能 write_file 改平台源码 + reload_platform，拦 settings 挡不住
+//   那条路，是安全剧场；平台真正的硬门禁是权限层 + guard 审批（那是"按动作"的，不可被上下文绕开）。
+// 清单口径（一次定全，方案 §3-B / §6-D3）：settings 里的策略键 6 个 + 模型能改的"保险丝"键。
+//   护栏键以 `server/settingsSchema.js` 的**实际键名**为准：方案里写的 `max_progress_stall_n` 不存在，
+//   真名是 `progress_stall_n`；`max_parallel_tools` 方案没点名，但 `set_limits` 能写它（同一把保险丝），一并纳入。
+// 边界（如实说，别当全覆盖）：识别点是**工具执行路径**（db_write 的 after 钩子）。
+//   绕过工具直接改库（mysql CLI / 别的进程 / 其它写 settings 的代码）**不会被识别**——那需要库内机制
+//   （settings 上的触发器）或对账，都超出了"最小改动"的范围，见交付报告的"需决策"一节。
+//   本节的承诺只到："凡经平台工具改的策略键，都单独留下一行可定位的账。"
+// ---------------------------------------------------------------------------
+export const POLICY_SETTINGS_KEYS = [
+  // settings 里的策略键（消费点：server/index.js 的 getSetting 调用，逐键有锚点，见 test/policy-write.test.mjs）
+  'access_rules', 'systemPrompt', 'toolset_enabled', 'mcp_servers', 'task_budget_total', 'max_concurrent_chats',
+  // 运行护栏键（`set_limits` 能写的那几个 + 无进展判据，都是同一类"保险丝"）
+  'time_budget_min', 'round_cap', 'loop_guard', 'max_parallel_tools', 'progress_stall_n',
+];
+
+// 写 settings 的语句形态：只认三种"目标就是 settings"的写法。
+// 为什么不直接搜 `settings` 字样：`INSERT INTO x SELECT … FROM settings` 是**读** settings，不该误判成策略写入。
+const SETTINGS_WRITE_FORMS = [
+  { kind: 'insert', re: /^\s*(?:insert|replace)\s+(?:ignore\s+)?into\s+`?settings`?(?![\w])/i },
+  { kind: 'update', re: /^\s*update\s+`?settings`?(?![\w])/i },
+  { kind: 'delete', re: /^\s*delete\s+from\s+`?settings`?(?![\w])/i },
+];
+
+/**
+ * 从一条 SQL 认出"这是不是在改策略"（**纯函数**：不碰库、不看工具名、不依赖调用方是谁）。
+ * 键名按**标识符边界**匹配，`my_round_cap_backup` 不会命中 `round_cap`。
+ * 只认出现在语句里的策略键字面量——`db_write` 不带参数（`db.run(sql, undefined)`），所以键名必然在文本里。
+ * @returns {{kind:'insert'|'update'|'delete', keys:string[]}|null} 非策略写入返回 null
+ */
+export function policyWriteOf(sql) {
+  const s = String(sql || '');
+  const form = SETTINGS_WRITE_FORMS.find((f) => f.re.test(s));
+  if (!form) return null;
+  const padded = ' ' + s + ' ';
+  const keys = POLICY_SETTINGS_KEYS.filter((k) => new RegExp('[^A-Za-z0-9_]' + k + '[^A-Za-z0-9_]').test(padded));
+  return keys.length ? { kind: form.kind, keys } : null; // 改 settings 但没碰策略键（temperature / prefix_epoch:… ）= 普通写入
+}
+
+/**
+ * 策略写入的账本 detail（**纯函数**，便于夹具核对"谁改的 / 改前改后 / 都带了"）。
+ * 截断到 1000 字符——与 `tool:<名>` 那行的既有口径一致。
+ */
+export function policyWriteDetail({ kind, keys, from, to, ctx = {}, result, sql } = {}) {
+  const cut = (v) => (v === undefined || v === null ? null : String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 160));
+  const brief = (o) => Object.fromEntries((keys || []).map((k) => [k, cut(o && o[k])]));
+  return JSON.stringify({
+    // 「模型还是人」：人改策略走设置页 API（PUT /api/settings、/api/access-rules），那条路不经过 execTool；
+    // 能走到这里的只可能是模型经工具发起的写入（approval 只对 guard 档生效，write/full 无卡）。
+    actor: 'model-via-tool',
+    via: 'db_write',
+    kind, keys,
+    from: brief(from), to: brief(to),
+    affected: (result && result.affected) ?? null,
+    by: { accountId: ctx.accountId ?? null, conversationId: ctx.conversationId ?? null, shellId: ctx.shellId ?? null },
+    sql: String(sql || '').slice(0, 300),
+  }).slice(0, 1000);
+}
+
+/** 读策略键的当前值（只读）。失败返回 null，由账本如实标成 `from:null`，不假装读到了。 */
+async function readPolicyValues(keys) {
+  try {
+    const rows = await db.query('SELECT skey, svalue FROM settings WHERE skey IN (' + keys.map(() => '?').join(',') + ')', keys);
+    return Object.fromEntries(rows.map((r) => [r.skey, r.svalue]));
+  } catch { return null; }
+}
+
+// 改**前**的值只能在写之前读：before 阶段读一次，留在 ctx 上（before 与 after 拿到的是同一个 eff 对象）。
+registerHook('before', 'db_write', 'policy_write_capture', async ({ args, ctx = {} }) => {
+  const p = policyWriteOf(args && args.sql);
+  if (!p) return {}; // 非策略写入：一个多余查询都不做（这条钩子挂在**每一次** db_write 上）
+  ctx.__policyBefore = { ...p, sql: String(args.sql).slice(0, 300), from: await readPolicyValues(p.keys) };
+  return {};
+}, { builtin: true, failure: 'open' });
+
+// 改**后**：落一条**单独**的账本行 `policy:settings-write`（与 `tool:db_write` 并列，一眼可辨），
+// detail 带 键 / 改前→改后 / 谁（账号·会话·壳）/ 原始 SQL。失败语义 open：留痕绝不影响工具本身。
+registerHook('after', 'db_write', 'policy_write_audit', async ({ args, result, ctx = {} }) => {
+  const cap = ctx.__policyBefore;
+  const p = cap || policyWriteOf(args && args.sql);
+  if (!p) return {};
+  // 写失败 = 什么都没改：不写"策略被改"的行（失败本身已由 `tool:db_write` 行带错误码记下），免得账本谎报。
+  if (result && result.error) return {};
+  const detail = policyWriteDetail({ kind: p.kind, keys: p.keys, from: cap ? cap.from : null, to: await readPolicyValues(p.keys), ctx, result, sql: cap ? cap.sql : (args && args.sql) });
+  try {
+    await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+      [ctx.accountId ?? null, 'policy:settings-write', detail, ctx.shellId ?? null, ctx.conversationId ?? null]);
+  } catch (e) {
+    // 留痕失败必须出声（与 tool-audit 同口径）：工具已经改完了，不能因为写账失败就改判，但绝不能静默。
+    console.error('[policy-audit] 策略写入账本缺行（策略已被改）conv=' + (ctx.conversationId || '-') + ' keys=' + p.keys.join(',') + '：' + ((e && e.message) || e));
+  }
+  return {};
+}, { builtin: true, failure: 'open' });
