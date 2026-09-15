@@ -10,7 +10,7 @@ import { activeProviders, allProviders, findProvider, syncChatModels } from './l
 import { calcCost } from './llm/gateway.js';
 import { runAgent, activitySince, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, TOOL_CN, TOOL_TIER_CN } from './tools/meta.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, TOOL_CN, TOOL_TIER_CN } from './tools/registry.js';
 import { shellContext, rowToPack } from './shells.js';
 import { classifyIntent } from './intent.js';
 import { resolveTaskProfile } from './profile.js';

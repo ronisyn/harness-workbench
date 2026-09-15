@@ -11,7 +11,7 @@ import { ROOT } from './config.js';
 import { db } from './db.js';
 import { classifyIntent } from './intent.js';
 import { toolDefs } from './tools/index.js';
-import { PLATFORM_EXEMPT } from './tools/meta.js';
+import { PLATFORM_EXEMPT } from './tools/registry.js';
 
 export const EVAL_ROOT = path.join(ROOT, 'eval');
 const PLATFORM_EXEMPT_SET = new Set(PLATFORM_EXEMPT);

@@ -10,7 +10,7 @@ import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } f
 import { createApproval, cancelApproval } from '../approval.js';
 import { requestRestart } from '../restart.js';
 import { createAsk, cancelAsk } from '../asks.js';
-import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT } from './meta.js';
+import { TOOL_META, DEFAULT_TOOLSET, PLATFORM_EXEMPT, assembleTools } from './registry.js';
 import { snapshotBeforeWrite, listCheckpoints, undoCheckpoint } from './checkpoint.js';
 import { emitHooks, listHooks } from './hooks.js';
 import { buildRepoMap } from './repomap.js';
@@ -122,7 +122,9 @@ function planOf(ctx) {
   return plans.get(key);
 }
 
-export const TOOLS = [
+// 实现侧清单：**只声明"怎么做"**（name/description/params/permission/run）；
+// "暴露与否/档位/提示/集合"等策略一律在 tools/manifest.js 声明，由 tools/registry.js 一次性装配校验。
+const RAW_TOOLS = [
 
 // ---------- B1-B10 文件 ----------
   { name: 'read_file', description: '读取文本文件内容（max 50KB）。需行号定位时传 numbered=true（输出每行带 "N| " 前缀，方便报告行号/定位；默认不带行号以保持原样粘贴）', permission: 'read',
@@ -1225,7 +1227,7 @@ export async function execTool(name, args, ctx) {
 }
 
 // P1-2 undo_checkpoint：回滚自动快照（Claude Code 式文件时间线安全网的恢复端；SNAPSHOT_TOOLS 不含本工具，undo 不会再次触发快照）
-TOOLS.push({
+RAW_TOOLS.push({
   name: 'undo_checkpoint',
   description: '回滚一次自动文件快照：写类工具(write_file/append_file/edit_file/delete_file)执行前系统已自动快照原内容。{list:true} 查看最近快照；{n:1} 回滚最近第 n 次（1=最新）。改坏了代码/文件时用它回到操作前一刻',
   permission: 'write',
@@ -1242,7 +1244,7 @@ TOOLS.push({
 });
 
 // P1-1 hooks_list：查看事件钩子注册（排查"已被 hook 拦截"原因；只读审计，不暴露清除能力给模型）
-TOOLS.push({
+RAW_TOOLS.push({
   name: 'hooks_list',
   description: '列出当前已注册的 hooks 事件钩子（before/after、目标工具、名称、是否内置）。当工具执行返回"已被 hook 拦截"时，用它查看是哪个纪律钩子拦的、为什么',
   permission: 'read',
@@ -1255,7 +1257,7 @@ TOOLS.push({
 
 // P2-3 repo_map：代码库结构地图（借鉴 Aider tree-sitter repo map 的轻量版——目录树+行数+imports+顶层符号摘要）
 // 价值：长代码库任务先取一张"地图"，少做盲目 list_dir/find/grep 探测；容量受控（repomap.js 内 MAX_TEXT 截断）
-TOOLS.push({
+RAW_TOOLS.push({
   name: 'repo_map',
   description: '生成代码库结构地图：目录树 + 每文件行数/imports/顶层符号摘要（容量受控，输出 text 约几千~3万字符）。大仓库任务开始时或对陌生目录做规划时先调用一次，看清结构再动手，避免盲目探测',
   permission: 'read',
@@ -1270,7 +1272,7 @@ TOOLS.push({
 
 // 步6 fetch_spill：溢出的取回端（与 spill.js 成对）——上下文出现"全文已存 <路径>"时的闭环。
 // 恒可用（PLATFORM_EXEMPT）：模型拿到定位符却没有取回工具，等于把信息丢了。
-TOOLS.push({
+RAW_TOOLS.push({
   name: 'fetch_spill',
   description: '取回被溢出（spill）的工具结果全文。上下文里出现"已省略 N 字节…全文已存 <路径>"时，用它按范围分段读回',
   permission: 'read',
@@ -1281,3 +1283,9 @@ TOOLS.push({
   },
   run: async (a) => readSpill(a.path, a.offset, a.length),
 });
+
+// ===== 装载（架构 §4.3「一次性声明化，不分批」）：清单 × 实现 → 运行时工具表 =====
+// 校验与默认拒绝语义见 registry.js；工具上下线只改 tools/manifest.js，不改这里。
+export const TOOLS = assembleTools(RAW_TOOLS);
+// 元数据/集合由清单派生后在此转发，保持"从 tools/index.js 一处取用"的既有引用面
+export { TOOL_META, TOOL_CN, DEFAULT_TOOLSET, PLATFORM_EXEMPT, LIGHT_TOOLSET, TOOL_TIER_CN } from './registry.js';

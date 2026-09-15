@@ -10,7 +10,7 @@ import { spillToolResult } from './tools/spill.js';
 import { db } from './db.js';
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
-import { LIGHT_TOOLSET } from './tools/meta.js';
+import { LIGHT_TOOLSET } from './tools/registry.js';
 
 // 会话活动事件环（旁观/断连页面实时性修复）：runAgent 的 emit 事件同时写入内存环，
 // 前端轮询 /api/conversations/:id/activity 拿增量（SSE 直达时零影响，断连/旁观时兜底）

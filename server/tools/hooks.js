@@ -13,7 +13,7 @@
 // P2（2026-09 批2）：3/4/5/6 为"纪律统一层"——从 execTool 内联门禁迁来，纪律集中一处可 listHooks 审计、可动态调整。
 // 平台扩展：server/index.js 等可 import { registerHook } 追加纪律钩子；模型侧用 hooks_list 工具查看（只读）。
 import { execFileSync } from 'node:child_process';
-import { TOOL_META, PLATFORM_EXEMPT } from './meta.js';
+import { TOOL_META, PLATFORM_EXEMPT } from './registry.js';
 import { db } from '../db.js';
 const registry = [];
 const MAX_HOOKS = 128;
