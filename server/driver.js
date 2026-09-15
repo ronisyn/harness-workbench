@@ -139,10 +139,18 @@ async function driveContract(c) {
     // 而账本不接受无归属的账（eventlog 的既有口径）—— 那就会丢掉这轮执行的起点。
     convId = await findOrCreateConv(c);
     await addEvent(c.id, 'start', '驱动器开始一轮执行', convId);
-    // 历史（最多最近 30 条 用户/助手 文本，早期并入一行提示）
-    let hist = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id DESC LIMIT 30', [convId]);
-    hist = hist.reverse();
-    const msgs = hist.length > 26 ? [{ role: 'user', content: '（更早的执行记录见任务会话，勿重复已完成部分）' }, ...hist.slice(-26)] : hist;
+    // 历史：**全量、原样**（v0.3 §4.4.1 规则1「只追加：禁止中途改写早期消息；折叠只在**段边界整段替换一次**」）。
+    // 2026-09-16 改（与 `/api/chat`、headless 同一口径）：这里原有**两道**窗口，都已删除 ——
+    //   ① SQL 的 `ORDER BY id DESC LIMIT 30`（只取最近 30 条，再 `reverse()`）；
+    //   ② `hist.length > 26 ? [一行提示, ...hist.slice(-26)] : hist`（越过 26 条就把最老的换成一行提示）。
+    // 为什么它们是缺陷：历史一旦越过 26 条，**每一轮**的前缀头一条都被换掉 —— 前缀按逐字节匹配，
+    //   被换掉之处起的整段缓存作废。这与规则1 的"只追加"直接冲突，且成本由每一轮重复支付。
+    // **不在这里发明新的窗口/阈值**：要压体积用既有机制——`agent.js` 的 `maybeCollapseEarly`
+    //   （段边界**整段替换一次**，落 `prefix:collapse`、不计 C4）与工具结果 spill（§4.4.1 规则4）。
+    // 如实记一条（与 C-59 同源，登记见 `proposals/架构文档冲突登记-20260915.md` 的 C-60）：这条路径
+    //   **没有组装侧跨轮账**（不在 web/headless/渠道那三条入口里）—— 改完"只追加"是靠口径一致，
+    //   不是靠机检看得见；要不要把它也接上那套账，是另一件事。
+    const msgs = await db.query('SELECT role, content FROM messages WHERE conversation_id=? AND role IN ("user","assistant") ORDER BY id', [convId]);
     const goal = String(c.goal || '').slice(0, 3000);
     const accLines = (() => { try { return JSON.parse(c.acceptance || '[]'); } catch { return []; } })();
     msgs.push({

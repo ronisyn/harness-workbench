@@ -15,7 +15,9 @@
 //      (b) `enforcement:'none'` 时照常执行且不谎报、(c) `RW_SANDBOX_REQUIRED=1` 且拿不到 runner 时**如实拒绝**；
 //   ④ 清单不变量：server/ 下能直接起进程的文件只剩执行后端与沙箱后端；沙箱例外（q1）逐条列名并写清理由；
 //   ⑤ 驱动器那条验收路径（driver.js）：经 db/agent 注入缝驱动一轮契约，证明它也走后端 argv 接缝；
-//      另钉住 q2：MCP 的"要不要 shell 透传"由后端按平台决定，引擎层不再有平台判据。
+//      另钉住 q2：MCP 的"要不要 shell 透传"由后端按平台决定，引擎层不再有平台判据；
+//   ⑥ 驱动器那条**组装路径**（driver.js 的历史读取）按 v0.3 §4.4.1 规则1 必须"全量、原样、升序"进请求
+//      （复用 ⑤ 的 db/agent 注入缝：驱动器没有可直测的导出，它这一轮的 messages 只在 runAgent 处看得见）。
 import { test } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
@@ -392,6 +394,64 @@ test('注入缝：驱动器的验收命令行也走后端 argv 接缝（execPlan
   assert.equal(seen[0].maxBuffer, 4 * 1024 * 1024, 'maxBuffer 沿用既有值 4MB');
   assert.ok(writes.some(([sql, p]) => String(sql).includes('SET status=?') && p && p[0] === 'candidate_done'),
     '验收结论必须跟着接缝给的命令走（必然失败的验收行 + stub 的成功命令 ⇒ 通过）：' + JSON.stringify(writes.map((w) => w[1]).slice(0, 8)));
+});
+
+// ---------------------------------------------------------------------------
+// ⑥ 驱动器那条组装路径（driver.js 的历史读取）：v0.3 §4.4.1 规则1「只追加」
+// ---------------------------------------------------------------------------
+// 为什么放在这份文件里：驱动器**没有**自己的导出可供直测（`driveContract` 是模块内私有），
+//   而它这一轮的 messages 只有通过 `runAgent` 才看得见 —— 那正是这里已经建好的 db/agent 注入缝
+//   （见本文件头 ⑤ 与 `globalThis.__rwFakeDb` / `__rwFakeAgent`）。另起一份夹具就要把整套 module.register
+//   钩子再写一遍（同一份基建两份实现，正是本轮要避免的东西）。
+// 判据（2026-09-16，v0.3 §4.4.1 规则1）：driver 读的是**发进模型上下文的请求前缀**，所以必须"全量、原样、
+//   升序"，不许有窗口或"截断中段再拼起来"。它原有两道窗口（`DESC LIMIT 30` + `length > 26 ? …slice(-26)`），
+//   越过 26 条后**每一轮**都换掉前缀头一条 —— 与 headless 那处同形（同批一起改掉）。
+test('规则1（v0.3 §4.4.1）：驱动器的历史**全量、原样、升序**进请求 —— 不许有窗口/截断中段', async () => {
+  // 造 40 条历史（远超旧实现的 26 条线）：内容可辨认，便于断言"最老那条还在最前面"
+  const history = [];
+  for (let i = 1; i <= 40; i++) history.push({ role: i % 2 ? 'user' : 'assistant', content: '第' + i + '条' });
+  const contract = {
+    id: 5150, account_id: null, conv_id: 808, title: '夹具契约（历史口径）', goal: '证明历史只追加',
+    acceptance: '[]', status: 'queued', attempts: 0,
+  };
+  const sqls = [];
+  globalThis.__rwFakeDb = {
+    query: async (sql) => {
+      const s = String(sql);
+      sqls.push(s.replace(/\s+/g, ' ').trim());
+      if (s.includes('FROM task_contracts')) return [contract];
+      if (/FROM messages WHERE conversation_id=\?/.test(s)) return history.map((m) => ({ ...m }));
+      return [];
+    },
+    run: async () => ({}),
+  };
+  let seen = null;
+  globalThis.__rwFakeAgent = { runAgent: async (args) => { seen = args; return { toolLog: [{ name: 'finish_task' }], content: '本轮完成' }; } };
+  try {
+    const driver = await import(url('driver.js')); // 已在本文件 ⑤ 装载过；这里拿同一份（钩子仍生效）
+    await driver.driverTickNow();
+    const until = Date.now() + 5000;
+    while (Date.now() < until && !seen) await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    globalThis.__rwFakeDb = null;
+    globalThis.__rwFakeAgent = null;
+  }
+  assert.ok(seen, '驱动器这一轮必须真的跑起来（否则本夹具什么都没证明）：sqls=' + JSON.stringify(sqls.slice(0, 6)));
+  const msgs = seen.messages;
+  assert.equal(msgs.length, 41, '40 条历史 + 1 条契约 system 全部进请求（旧实现只剩 26+1+1=28）：' + msgs.length);
+  assert.equal(msgs[0].content, '第1条', '最老的那条历史必须仍在前缀最前（窗口一回来这里变成"第15条"）');
+  assert.equal(msgs[39].content, '第40条', '最新那条历史紧邻契约块之前');
+  assert.equal(msgs[40].role, 'system', '契约块（目标/验收/执行规则）仍在最后');
+  assert.match(msgs[40].content, /【任务契约 · 你在无人值守模式下执行】/);
+  // 源码面：SQL 形状直接钉住（不看注释，看代码）
+  const q = sqls.find((s) => /FROM messages WHERE conversation_id=\?/.test(s));
+  assert.ok(q, '必须真读了历史');
+  assert.equal(/ORDER BY id DESC/.test(q), false, '不得再按 DESC 读（窗口形状）：' + q);
+  assert.equal(/LIMIT/.test(q), false, '不得再有 LIMIT 窗口（一个界限一个出处：压体积走折叠/spill）：' + q);
+  assert.match(q, /ORDER BY id$/, '必须按 id 升序读全量');
+  // 那行"更早的执行记录见任务会话"的替代提示必须消失（它正是"把最老的换成一行提示"的产物）
+  assert.equal(msgs.some((m) => m.content === '（更早的执行记录见任务会话，勿重复已完成部分）'), false,
+    '旧的"早期并入一行提示"写法不得复活');
 });
 
 test('q2：MCP 的"要不要 shell 透传"是**声明的意图**，平台判据落在后端（引擎层不再有平台分叉）', async () => {
