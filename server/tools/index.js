@@ -21,6 +21,11 @@ import { kbVisibleWhere } from '../knowledge.js';
 import { RW_PLATFORM_DIR, RW_SKILLS, RW_WORKSPACE, RW_JOBS_DIR, RW_FS_ROOT } from '../env.js';
 import { execArgv, execShell, killTree, spawnShell } from '../exec/index.js';
 import { readSpill, lineAlignedPreview, detailSummary, READ_INLINE_CHARS } from './spill.js';
+// v0.3 §4.6「提高审批」：**策略**与**触发条件**都从 ⑰ 取，本文件不复写第二份判据。
+// 刻意只静态 import 这两个**轻**模块：policy.js 零依赖（纯函数）；degrade.js 只依赖 db/env，本文件早已加载。
+// 探测结论（enforcement）不走静态 import —— probe-state.js 在加载期会起一次沙箱探针，见下面 sandboxStateOf。
+import { subsystemOf, modeForPermission, SANDBOXED_TOOLS } from '../sandbox/policy.js';
+import { approvalRequired as sandboxApprovalRequired, sandboxRequired } from '../sandbox/degrade.js';
 
 // F20 受控工具：guard 权限会话中执行前必须经用户批准（默认 full 权限不受影响）
 // O-15（2026-09 批2）：补齐契约第二章档位表"确认或先问"要求的工具——reload_platform/set_limits 此前不在集内，
@@ -1493,6 +1498,123 @@ function validateArgs(tool, args) {
   }
   return args;
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// 审批判据（**唯一出处**）：v0.3 §4.6「显式降级三件套」的第三件＝提高审批
+//
+// 两条**正交**的轴（照 DSH `dsh-permission-presets` 的两旋钮模型：sandbox 模式与 approval 政策被预设捆在一起，
+// 但判据是两条，不能混成一条）：
+//   轴 1 `guard`：清单 `approval:true` 的 7 项高危工具 —— **既有行为，一字不动**。
+//   轴 2 `sandbox`（本轮接线）：第 2 层（OS 隔离）拿不到模式时，**命令子系统**的那一格今天没有任何东西兜得住。
+//     路径边界与命令白名单（第 3 层）判的是"能不能起这条命令"，而 `run_test` 这类命令**跑起来之后**会执行
+//     工作区里的任意代码（`npm test` 会跑到仓库里任何一个测试脚本）——那一格只有 OS 隔离能兜。
+//
+// 粒度＝**会话级**（用户拍板）：同一会话批准过一次，同类调用不再问；换会话重新问一次。
+//   · 为什么不是每次调用都问：审批一旦变成噪音就会被点穿，等于没有（与 DSH"预设＝一次决定"同义）；
+//   · 为什么不是进程级/全局：换一个会话就是另一个人/另一件事在做决定。
+//
+// 会话级状态放这里（模块级 Map，键＝conversationId），**不放** server/agent.js 里那两个按会话的 Map：
+//   · `activity` 的生命周期是**每次运行**（run_end 后 60s 就被 delete）——放那里会让"同一会话的下一次运行"
+//     重新问一遍，那就不是会话级；
+//   · `toolsFace` 存的是工具面哈希，且超过 2000 会整体 clear()——把审批记进去会被无关的清理顺手抹掉。
+// 生命周期＝**进程内**（与同文件的 plans/jobs 同一层）：重启后重新确认一次。不新增表/列，也不设上限与过期
+// （用户口径：不要发明阈值）。拒绝/超时/中止**不记账**——只有真的"批准过"才免下一次。
+const sandboxApproved = new Map(); // conversationId -> true（本会话已为"降级下的命令调用"确认过一次）
+
+/** 会话键（与同文件 planOf 的口径一致：没有 conversationId 的调用共用一个桶）。 */
+const sessionKeyOf = (conversationId) => String(conversationId || 'g');
+
+/** 本会话是否已确认过（读口）。 */
+export function sandboxApprovedIn(conversationId) { return sandboxApproved.has(sessionKeyOf(conversationId)); }
+
+/** 记账（唯一写口）：用户**批准**了这一次之后调用（拒绝/超时/中止都不算批准）。 */
+export function markSandboxApproved(conversationId) { sandboxApproved.set(sessionKeyOf(conversationId), true); }
+
+/** 夹具用：复位会话级状态（进程内状态，夹具要能重复断言"第一次"）。 */
+export function resetSandboxApproved() { sandboxApproved.clear(); }
+
+// ---- ⑰ 的 enforcement 读取缝（同步读缓存、不起进程；`ctx.sandbox` 是注入缝）----
+// 为什么不顶层 `import '../sandbox/index.js'`：它在加载期会发起一次沙箱探针（probe-state.js 的 warmup——
+// 真起子进程、还往 stderr 打一行），而本文件被启动链、脚本与几乎每个夹具 import。顶层 import 会把
+// "探测沙箱"变成"加载即发生"的副作用（capabilities.js 为同一件事已立过同一条缝；test/sandbox.test.mjs ⑰-11
+// 那条"声明面不得静态依赖 sandbox"的判据就是它）。
+// 读不到时（首次调用 / 加载中 / 加载失败）**如实**按"没有隔离"处置：审批面 fail-closed —— 宁可多问一次，
+// 也不静默放行。（生产路径上启动链的 `guard()` 会先真探一次，所以实际几乎总能读到真结论。）
+let __sandboxMod = null;      // 就绪后的模块命名空间
+let __sandboxLoading = null;  // 进行中的加载 promise（同一个进程内只发一次 import）
+function loadSandbox() {
+  if (__sandboxLoading) return __sandboxLoading;
+  if (__sandboxMod) return null;
+  __sandboxLoading = import('../sandbox/index.js')
+    .then((m) => { __sandboxMod = m; return m; })
+    .catch((e) => { console.warn('[tools] 沙箱模块加载失败，审批判据按"没有隔离"处置：' + ((e && e.message) || e)); return null; });
+  return __sandboxLoading;
+}
+
+/**
+ * 本次调用的沙箱态 `{enforcement, reason}`（同步；`eff.sandbox` 给了就用它——与 capabilities.js 的注入缝同名同义）。
+ * `reason` 是"为什么没有隔离"（探针给的 unavailableReason）：审批卡上光写 enforcement=none 等于没说。
+ */
+function sandboxStateOf(eff) {
+  if (eff && eff.sandbox && typeof eff.sandbox.enforcement === 'string') {
+    return { enforcement: eff.sandbox.enforcement, reason: String(eff.sandbox.reason || '') };
+  }
+  const mod = __sandboxMod;
+  if (mod && typeof mod.compose === 'function') {
+    const composed = mod.compose({ permission: eff && eff.permission, root: eff && eff.root });
+    const p = typeof mod.readProbe === 'function' ? mod.readProbe() : {};
+    return { enforcement: composed.enforcement, reason: String((p && p.unavailableReason) || '') };
+  }
+  loadSandbox();
+  return { enforcement: 'none', reason: '沙箱探测结果尚未就绪（本轮按"没有隔离"处置）' };
+}
+
+/**
+ * 「这次调用要不要人工审批」的**唯一判据**（纯函数：输入全部从参数来，夹具可直测）。
+ *
+ * @param {string} name 工具名
+ * @param {{permission?:string}} eff 生效 ctx（execTool 里那个 eff）
+ * @param {{sandbox?:object|Function, approved?:boolean}} [state]
+ *        `sandbox`＝⑰ 的合成结果 `{enforcement, reason}`，或**取它的函数**（生产路径传函数：判据真的走到
+ *        "命令子系统且非 full 档"那一格时才去读 ⑰ 的缓存——读文件、搜索这类调用不该顺带起一次沙箱探测）；
+ *        `approved`＝本会话是否已确认过（调用方从 sandboxApprovedIn 取）。
+ * @returns {{required:boolean, kind:'guard'|'sandbox'|null, why:string}}
+ */
+export function needsApproval(name, eff = {}, state = {}) {
+  // 轴 1：guard 档 + 受控工具（既有判据，一字不改）。两轴同时命中时由它先答——**不叠加成两张卡**。
+  if (eff.permission === 'guard' && approvalRequired(name)) {
+    return { required: true, kind: 'guard', why: 'guard 档受控工具（清单 approval:true）：' + name };
+  }
+  // 轴 2：§4.6 提高审批。只对**命令子系统**——fs 子系统（write_file/edit_file/…）的边界由工具层路径判据
+  // （limitPath + inside）兜住，OS 隔离对它们不是关键那一格，也就不因为降级而提高审批（用户口径：不动 fs）。
+  if (subsystemOf(name) !== 'command') {
+    return { required: false, kind: null, why: '不在命令子系统（' + name + '）：§4.6 只对工具层兜不住的那一格提高审批' };
+  }
+  // 严格语义（RW_SANDBOX_REQUIRED=1）：拿不到隔离时 §4.6 的落点是**拒绝执行**（confine() 抛
+  // SandboxUnavailableError，见 test/exec-callsites.test.mjs 接线(c)）——那条路上根本不会发生"未隔离执行"，
+  // 此时弹卡既没用、文案还是假话（它会说"将以未隔离方式执行"）。拒绝由执行路径原样抛出，这里不拦。
+  if (sandboxRequired()) {
+    return { required: false, kind: null, why: 'RW_SANDBOX_REQUIRED=1（严格语义）：拿不到隔离就直接拒绝执行，不存在"未隔离执行"，因此不弹卡' };
+  }
+  // 走到这里才需要 ⑰ 的结论（惰性，见 state.sandbox 的说明）
+  const sb = typeof state.sandbox === 'function' ? (state.sandbox() || {}) : (state.sandbox || {});
+  const enforcement = String(sb.enforcement || 'none');
+  // §4.6 的触发条件**唯一出处**＝sandbox/degrade.js 的 approvalRequired（本轮就是把它接上，不再抄一份）：
+  // enforcement=none/未探到 ⇒ 要审批；partial/full ⇒ runner 在工作；full-access ⇒ 权限档使然，不额外提高审批。
+  const gate = sandboxApprovalRequired({ enforcement }, {
+    mode: modeForPermission(eff.permission || 'full'), subsystem: 'command',
+  });
+  if (!gate.required) return { required: false, kind: null, why: gate.why };
+  if (state.approved) return { required: false, kind: null, why: '本会话已确认过：同类命令调用不再询问（会话级）' };
+  return {
+    required: true,
+    kind: 'sandbox',
+    why: '⚠️ 本会话没有 OS 隔离（enforcement=' + enforcement + (sb.reason ? '；原因：' + sb.reason : '') + '）：'
+      + '这条命令会以未隔离方式执行——工作区外的文件、网络与其它进程它都碰得到'
+      + '（工具层的路径/白名单判据在命令跑起来之后就管不着了）。'
+      + '批准一次后，本会话内同类命令（' + SANDBOXED_TOOLS.command.join(' / ') + '）不再询问。',
+  };
+}
+
 export async function execTool(name, args, ctx) {
   // 2026-09-15（统一失败分类）：本函数改成**单出口**——所有拦截与失败都汇成 result（带 code），
   // 不再有"提前 return"或"在 try 之外 throw"。两个理由，都是实测出来的：
@@ -1586,9 +1708,15 @@ export async function execTool(name, args, ctx) {
       blockedCode = 'TOOL_HOOK_BLOCKED';
       blocked = '已被 hook 拦截：' + (hookStop.reason || name) + '（可用 hooks_list 查看钩子；确需执行可 ask_user 请平台管理员调整/豁免）';
     }
-    // F20 审批门禁：guard 会话 + 受控工具 → 先发 approval 事件等用户批准；无人值守则排队。
+    // F20 审批门禁：受控工具 / §4.6 沙箱降级下的命令调用 → 先发 approval 事件等用户批准；无人值守则排队。
     // P6：access 规则 allow 命中（hookStop.allowed）→ 免审批（规则=管理员显式放行）；hooks 未拦且未被规则放行才弹卡
-    if (!blocked && !hookStop?.allowed && eff.permission === 'guard' && approvalRequired(name)) {
+    // 判据**只有一处**：needsApproval（两条正交的轴都在它里面，见它的注释）。这里只负责"问一次 + 记账"。
+    // `sandbox` 传**函数**（惰性）：读文件/搜索这类调用不该顺带把 ⑰ 的探测拉起来。
+    const judge = needsApproval(name, eff, {
+      approved: sandboxApprovedIn(eff.conversationId),
+      sandbox: () => sandboxStateOf(eff),
+    });
+    if (!blocked && !hookStop?.allowed && judge.required) {
       if (eff.__autonomous) {
         // 命名避开外层的 `payload`（hook 载荷）：同名遮蔽过一次就会有人读错对象
         const needInput = { kind: 'approval', desc: '需要授权：' + name + ' ' + JSON.stringify(args).slice(0, 200) };
@@ -1600,9 +1728,12 @@ export async function execTool(name, args, ctx) {
         let preview = '';
         if (name === 'edit_file') preview = `\n替换片段:\n- ${String(args.old || '').slice(0, 200)}\n+ ${String(args.new !== undefined ? args.new : '').slice(0, 200)}`;
         else if (name === 'write_file' || name === 'append_file') preview = `\n目标: ${args.path}（${String(args.content || '').length} 字符）`;
+        // 沙箱降级那一轴的"为什么"必须写在卡上（模型与用户都看得见）：本会话没有 OS 隔离 + 原因 + 会未隔离执行
+        // + 批准一次后同类不再问。工具**结果**的形状一个字段都不动（形状不变是硬约束，见 exec-callsites 接线(b)）。
         const argsDesc = JSON.stringify(args).slice(0, 300);
-        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}`);
-        if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}${preview}` });
+        const sandboxNote = judge.kind === 'sandbox' ? '\n' + judge.why : '';
+        const ap = createApproval(`工具 ${name} 需要确认\n参数: ${argsDesc}${preview}${sandboxNote}`);
+        if (eff.__emit) eff.__emit({ type: 'approval', id: ap.id, desc: ap.desc || `工具 ${name} 需要确认\n参数: ${argsDesc}${preview}${sandboxNote}` });
         // RA-26 四面②：等待人工确认是一个**独立状态**（不是"还在跑"）——进出各发一次事件，
         // 并把这段等待时长从"执行用时"里扣掉（见 agent.js 的 __onWait；时间预算不该为等待买单）。
         const waitT0 = Date.now();
@@ -1620,6 +1751,9 @@ export async function execTool(name, args, ctx) {
         } finally {
           if (eff.__onWait) eff.__onWait('end', { round: eff.__round, kind: 'approval', id: ap.id, decision: verdict && verdict.decision, ms: Date.now() - waitT0 });
         }
+        // 会话级记账（§4.6 那一轴）：只有**真的批准**才记——拒绝/超时/中止都不算批准。
+        // 记完这一次，本会话内同类命令调用不再问（判据在 needsApproval 里读 sandboxApprovedIn）。
+        if (verdict && verdict.decision === 'approve' && judge.kind === 'sandbox') markSandboxApproved(eff.conversationId);
         if (!verdict || verdict.decision !== 'approve') {
           if (verdict && verdict.decision === 'aborted') { blockedCode = 'ABORTED'; blocked = '用户停止了操作'; }
           else if (verdict && verdict.decision === 'timeout') { blockedCode = 'TOOL_APPROVAL_TIMEOUT'; blocked = '用户未批准该操作（审批等待超时）'; }
