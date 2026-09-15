@@ -48,7 +48,14 @@ export function runShellLine(line, { cwd, timeout = 30000, maxBuffer = 2 * 1024 
       SHELL_FILE,
       shellArgs(line),
       { timeout, windowsHide: true, maxBuffer, ...(cwd ? { cwd } : {}) },
-      (err, stdout, stderr) => done({ ok: !err, code: err?.code ?? 0, out: clip(stdout, 8000), err: clip(stderr, 2000) }),
+      (err, stdout, stderr) => {
+        let e = clip(stderr, 2000);
+        // 超时：execFile 终止的是**我们起的那个 shell 进程**。POSIX 上 `bash -c '<单条命令>'` 会直接 exec
+        // 成那条命令（同 pid，杀得到）；PowerShell 起的是子进程，超时后子进程可能仍活着——这与 DSH 在同一
+        // 平台上的行为一致（它的 pwsh 工具也是终止 pwsh 自身）。如实说出来，别让"超时了但进程还在"变成隐形状态。
+        if (err && err.killed) e = (e ? e + '\n' : '') + '[超时] 命令已被终止（shell 已杀；Windows 上被它拉起的子进程可能仍在，必要时用 taskkill /IM <名> /F 清理）';
+        done({ ok: !err, code: err?.code ?? 0, out: clip(stdout, 8000), err: e });
+      },
     );
     // shell 本身起不来（缺可执行文件等）时 execFile 发的是异步 error 事件，没有监听器会带走整个进程。
     ch.on('error', (e) => done({ ok: false, code: e.code ?? 1, out: '', err: 'shell 启动失败（' + SHELL_CN + '）: ' + e.message }));

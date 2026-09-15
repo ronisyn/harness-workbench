@@ -1,21 +1,25 @@
 #!/usr/bin/env node
 // scripts/selfcheck.mjs - RW 平台自检脚本（可在服务器上随时重复执行）
 // 用法: node scripts/selfcheck.mjs [baseUrl] [username] [password]
-// 默认 http://127.0.0.1:880 ，账号优先取 RW_ADMIN_USER/RW_ADMIN_PASS 环境变量或 /root/.rw-keys.env
+// 账号取值顺序：命令行参数 → 环境变量 RW_ADMIN_USER/RW_ADMIN_PASS → 平台目录 .env（config.js 已解析）
+//              → 运行账户家目录的 .rw-keys.env（原来是写死的 /root/.rw-keys.env，客户机上不存在）
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { config } from '../server/config.js';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:880';
-let user = process.argv[3];
-let pass = process.argv[4];
+let user = process.argv[3] || config.admin.user || '';
+let pass = process.argv[4] || config.admin.pass || '';
 if (!user || !pass) {
   try {
-    const env = fs.readFileSync('/root/.rw-keys.env', 'utf8');
+    const env = fs.readFileSync(path.join(os.homedir(), '.rw-keys.env'), 'utf8');
     const get = (k) => env.split('\n').find((l) => l.startsWith(k + '='))?.split('=').slice(1).join('=').trim();
     user = user || get('RW_ADMIN_USER');
     pass = pass || get('RW_ADMIN_PASS');
   } catch { /* 环境不可用时走参数 */ }
 }
-if (!user || !pass) { console.error('缺账号：传参或设 RW_ADMIN_USER/RW_ADMIN_PASS'); process.exit(2); }
+if (!user || !pass) { console.error('缺账号：传参、设 RW_ADMIN_USER/RW_ADMIN_PASS，或在平台 .env / ' + path.join(os.homedir(), '.rw-keys.env') + ' 里写'); process.exit(2); }
 
 const ok = [];
 const fail = [];

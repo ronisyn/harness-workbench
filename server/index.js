@@ -43,7 +43,8 @@ import { takeRestart, isRestartScheduled, markRestartScheduled, restartPlan } fr
 import { ensureRun, markRun, resumeHint, interruptStaleOnBoot } from './runtrack.js';
 import { decideAsk } from './asks.js';
 import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
-import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR } from './env.js';
+import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN } from './env.js';
+import { SHELL_CN } from './shell.js';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -2723,6 +2724,9 @@ async function main() {
   }
   app.listen(config.port, () => {
     console.log(`[RW] Roni Workbench 启动: http://localhost:${config.port} (env=${process.env.NODE_ENV || 'dev'})`);
+    // 一行环境事实：客户机上排障最常见的问题是"它到底在看哪个目录/用哪个 shell/听哪个端口"——
+    // 这些都由 env.js 推导，把它们打出来，比让人去反推要快得多（也顺带证明推导结果与预期一致）。
+    console.log(`[RW] 环境: os=${RW_OS_CN} shell=${SHELL_CN} 平台=${RW_PLATFORM_DIR} 工作区=${RW_WORKSPACE} 任务日志=${RW_JOBS_DIR} 重启方式=${restartPlan().how}`);
   });
 }
 

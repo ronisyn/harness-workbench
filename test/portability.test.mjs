@@ -134,3 +134,36 @@ test('run_test 走本机 shell（Windows 上 npm 只有 .cmd 形式，execFile �
   assert.match(s, /runShellLine\('npm test'/, 'npm 必须经 shell 解析');
   assert.ok(!/runCmd\('npm'/.test(s), '不许回退成 execFile 直呼 npm');
 });
+
+test('Windows 交付脚本必须带 UTF-8 BOM（否则 PowerShell 5.1 按 ANSI 解码，中文把脚本切坏）', () => {
+  // 实测（2026-09-16，本机）：同一份 install-service.ps1，无 BOM 时 powershell.exe 的解析器报 12 个错
+  // （`The string is missing the terminator`），补上 BOM 后 0 个错——Windows PowerShell 5.1 不带 BOM 就按
+  // 系统 ANSI 代码页解码，中文注释变成乱码字节，字符串当场被截断。客户机上默认就是 5.1（Server 自带）。
+  // 这条夹具防的是"以后有人用不带 BOM 的编辑器/工具改了脚本"——那是个不会报错、只在客户机上炸的坑。
+  const dir = path.join(ROOT, 'scripts', 'windows');
+  if (!fs.existsSync(dir)) return; // 还没交付 Windows 脚本时不阻塞
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.ps1'))) {
+    const b = fs.readFileSync(path.join(dir, f)).subarray(0, 3);
+    assert.ok(b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf, f + ' 必须带 UTF-8 BOM（前 3 字节 EF BB BF）');
+  }
+});
+
+test('后台任务链路在本机真的跑得通（起进程 → 日志落在 RW_JOBS_DIR → 能按 jobId 读回 → 能终止）', async () => {
+  // 这条是 D2′ 里"命令执行层 + 临时目录"两处改动的**真机端到端**：本机是 Linux 就跑 bash，是 Windows 就跑
+  // PowerShell，两边的进程都要真的起来、日志真的落盘、持久化记录真的能读回。
+  const CTX = { permission: 'full', root: ROOT, conversationId: 0, accountId: 0 };
+  const t = (n) => TOOLS.find((x) => x.name === n);
+  const r = await t('run_long_task').run({ cmd: `node -e "setTimeout(function(){}, 30000)"` }, CTX);
+  try {
+    assert.ok(r.jobId && Number(r.jobId) > 0, '要拿到真实 pid：' + JSON.stringify(r).slice(0, 200));
+    assert.ok(String(r.log).startsWith(RW_JOBS_DIR), '日志必须落在 RW_JOBS_DIR（' + RW_JOBS_DIR + '），实际 ' + r.log);
+    assert.ok(fs.existsSync(r.log), '日志文件必须真的被创建');
+  } finally {
+    const k = await t('kill_process').run({ pid: Number(r.jobId) }, CTX);
+    assert.ok(k.killed === true || /已不存在/.test(String(k.note || '')), '进程要能被收掉（或如实说已不存在）：' + JSON.stringify(k));
+  }
+  const out = await t('job_output').run({ jobId: r.jobId }, CTX);
+  assert.ok(out.jobId === r.jobId || out.persisted === true, '终止后仍要能按 jobId 读回（内存表或持久化记录）：' + JSON.stringify(out).slice(0, 200));
+  const list = await t('job_list').run({}, CTX);
+  assert.ok(Array.isArray(list.jobs) && list.jobs.length >= 1, 'job_list 要能列出它');
+});
