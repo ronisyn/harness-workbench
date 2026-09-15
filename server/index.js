@@ -1092,35 +1092,35 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         provider, model, messages, permission, ctx: agentCtx, keys: config.keys, temperature,
         emit: (ev) => {
           if (ev.type === 'agent_thinking') {
-            send({ type: 'thinking', round: ev.round });
+            send({ ...ev, type: 'thinking', round: ev.round });
           } else if (ev.type === 'think') {
             thinkBuf += ev.text;
-            send({ type: 'think', text: ev.text });
+            send({ ...ev, type: 'think', text: ev.text });
           } else if (ev.type === 'tool_start') {
-            send({ type: 'tool_start', tool: ev.tool });
+            send({ ...ev, type: 'tool_start', tool: ev.tool });
           } else if (ev.type === 'tool_done') {
-            send({ type: 'tool_done', tool: ev.tool });
+            send({ ...ev, type: 'tool_done', tool: ev.tool });
           } else if (ev.type === 'plan') {
-            send({ type: 'plan', plan: ev.plan });
+            send({ ...ev, type: 'plan', plan: ev.plan });
           } else if (ev.type === 'approval') {
-            send({ type: 'approval', id: ev.id, desc: ev.desc });
+            send({ ...ev, type: 'approval', id: ev.id, desc: ev.desc });
           } else if (ev.type === 'ask') {
-            send({ type: 'ask', id: ev.id, question: ev.question, options: ev.options });
+            send({ ...ev, type: 'ask', id: ev.id, question: ev.question, options: ev.options });
           } else if (ev.type === 'wait_start') {
             // RA-26 四面①：等待确认/答复的**进入**事件（接口面能区分"等确认"与"执行中"）
-            send({ type: 'wait_start', wait: ev.wait });
+            send({ ...ev, type: 'wait_start', wait: ev.wait });
           } else if (ev.type === 'wait_end') {
-            send({ type: 'wait_end', wait: ev.wait });
+            send({ ...ev, type: 'wait_end', wait: ev.wait });
           } else if (ev.type === 'fake_done_warn') {
-            send({ type: 'fake_done_warn', text: ev.text });
+            send({ ...ev, type: 'fake_done_warn', text: ev.text });
           } else if (ev.type === 'delta') {
             // P20：agent 每轮流式正文实时透出（final 真流；工具轮旁白由前端灰字化）
             if (!firstTokenMs) firstTokenMs = Date.now() - t0;
-            send({ type: 'delta', delta: ev.delta });
+            send({ ...ev, type: 'delta', delta: ev.delta });
           } else if (ev.type === 'llm_retry') {
             // 2026-09-15（统一失败分类/重试）：重试必须**看得见**——原先没有这个分支，
             // 于是客户端与账本都收不到它（一个只写在代码里、没人能观测到的事件等于不存在）
-            send({ type: 'llm_retry', retry: ev.retry });
+            send({ ...ev, type: 'llm_retry', retry: ev.retry });
           } else {
             // 未知类型照发（客户端按契约忽略未知类型），好让**账本**不漏事件——账本是回放/投影的源，
             // 漏一种就少一种。这里刻意不做白名单过滤。
@@ -2590,6 +2590,22 @@ async function main() {
   await runSpillCleanup('启动清理');
   const spillTimer = setInterval(() => { runSpillCleanup('定时清理'); }, 6 * 60 * 60 * 1000);
   if (spillTimer.unref) spillTimer.unref();
+  // 事件账本保留与归档（RA-47）：账本只追加不删除，保留口径沿用审计账本那一条（90 天，见 migrations 里 A9 的注释）。
+  // 与 spill 清理同一套接法：启动跑一次 + 每 6h；只有真搬了东西才落账（避免每天一条空账）。
+  const runEventArchive = async (when) => {
+    try {
+      const { archiveOldEvents } = await import('./eventlog.js');
+      const a = await archiveOldEvents();
+      if (a.archived) {
+        console.log('[eventlog-archive] ' + when + '：归档 ' + a.archived + ' 行（>90 天）');
+        await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+          [null, 'eventlog:archive', JSON.stringify(a).slice(0, 800)]).catch(() => {});
+      }
+    } catch (e) { console.error('[eventlog-archive] 失败:', e.message); }
+  };
+  await runEventArchive('启动归档');
+  const eventArchTimer = setInterval(() => { runEventArchive('定时归档'); }, 6 * 60 * 60 * 1000);
+  if (eventArchTimer.unref) eventArchTimer.unref();
   // 定时任务调度器（F14）
   try { startScheduler(); } catch (e) { console.error('[scheduler] 启动失败:', e.message); }
   // RA-03：清单热重载——工具上下线/改档位改提示，只改 tools/manifest.js，**不重启服务**即刻生效

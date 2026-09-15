@@ -67,8 +67,14 @@ test('唯一写入点：只有 eventlog.js 往 events 表写，且挂在**对外
   assert.match(read('server/db.js'), /CREATE TABLE IF NOT EXISTS events/, '新库 SCHEMA 也要建这张表');
 });
 
-test('账本只追加：代码里不得出现对 events 的 UPDATE/DELETE', () => {
+test('账本只追加：对 events 的 UPDATE/DELETE 只允许出现在归档器里（RA-47，且必须删在插入之后）', () => {
   const src = read('server/eventlog.js');
-  assert.ok(!/UPDATE\s+events|DELETE\s+FROM\s+events/i.test(src), '账本只追加，不改写不删除');
+  assert.ok(!/UPDATE\s+events/i.test(src), '账本不改写：任何地方都不许 UPDATE events');
+  // 归档是唯一的例外（RA-47）：它删的两行（DELETE 与那条搬运动作）必须紧挨着，且 DELETE 在 INSERT 之后 ——
+  // "先插入归档表、插入成功才删原表"这条顺序就是"不许丢数据"的全部实现，位置写错就静默丢账。
+  const at = src.indexOf('DELETE FROM events');
+  assert.ok(at > 0, '归档器是唯一允许删 events 的地方');
+  assert.equal(src.indexOf('DELETE FROM events', at + 1), -1, '删 events 只许有一处');
+  assert.ok(src.indexOf('INSERT INTO events_archive') < at, '先插入归档表、插入成功才删原表（顺序不许反）');
   assert.match(src, /保留策略沿用审计账本/, '保留策略要写明出处（不自己发明一个天数）');
 });

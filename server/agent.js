@@ -53,11 +53,15 @@ const toolsFace = new Map();
 let actSeq = 0;
 const ACT_MAX = 300;
 function emitEv(conversationId, emit, ev) {
-  try { if (emit) emit(ev); } catch { /* 外部 emit 失败不影响执行 */ }
-  if (!conversationId) return;
+  if (!conversationId) { try { if (emit) emit(ev); } catch { /* 外部 emit 失败不影响执行 */ } return; }
   // 注意：事件账本（append-only）**不在这里落**——它挂在 index.js 的 `send` 上（对外事件契约的唯一出口）。
   // 第一版就挂在本函数，结果账本里没有 run_start/done/run_end（那些是本文件外面直接发的），
   // 而那正是投影最需要的事件；端到端取证当场发现。**凡是"所有事件都经过"的判断，必须用真流量核对。**
+  //
+  // 2026-09-16 修（子代理对账时发现"账本 seq 全是 0"）：环里给事件编的 `seq` 必须**随事件一起交出去**，
+  // 否则 index.js 的 `send` 拿不到序号 ⇒ 既不写 SSE 的 `id:` 行（断线续订失效），账本 `events.seq` 也恒为 0。
+  // 契约里本来就写着"载荷带 seq 时写 id:"，这里补上实现的一半。顺序：先入环拿到 seq，再对外发。
+  let seq = 0;
   try {
     const key = String(conversationId);
     let rec = activity.get(key);
@@ -69,6 +73,8 @@ function emitEv(conversationId, emit, ev) {
       if (last && last.type === 'think' && item.at - last.at < 3000 && last.text.length < 1800) {
         last.text += String(ev.text || '');
         last.seq = item.seq; last.at = item.at;
+        seq = last.seq;
+        try { if (emit) emit({ ...ev, seq }); } catch { /* 同上 */ }
         return;
       }
       item.text = String(ev.text || '').slice(0, 2000);
@@ -76,7 +82,9 @@ function emitEv(conversationId, emit, ev) {
     if (ev.type === 'tool_start' || ev.type === 'tool_done') item.tool = ev.tool;
     rec.items.push(item);
     if (rec.items.length > ACT_MAX) rec.items.splice(0, rec.items.length - ACT_MAX);
-  } catch { /* 环写入失败忽略 */ }
+    seq = item.seq;
+  } catch { /* 环写入失败忽略（seq 保持 0，事件照发） */ }
+  try { if (emit) emit(seq ? { ...ev, seq } : ev); } catch { /* 外部 emit 失败不影响执行 */ }
 }
 export function clearActivity(conversationId) {
   if (!conversationId) return;
@@ -545,6 +553,13 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 事后查不出"这次冷启动是谁打破了前缀"；落库之后那变成一条 SQL（见方案 §4-M1 判据）。
     // 放在调用前算：refreshSys() 之后、发请求之前，指纹 = 真实发出的那串字节。
     const sysHash = prefixHash((msgs[0] && msgs[0].content) || '');
+    // 2026-09-16（确定性投影对账时提出）：把**这一轮真实发出的前缀面指纹**也入事件账本。
+    // 为什么需要：账本此前只能投影出"被调用过的工具"，而 `usage_stats.prefix_tools_hash` 记的是
+    // "整份工具定义面"——两者不是一个源，对账只能判包含关系，无法回答"当时那条面到底是什么"。
+    // 只在每段第一轮发一次（面的指纹在段内恒定；每轮重复入账只是噪音）。
+    if (round === 0) {
+      emitEv(ctx.conversationId, emit, { type: 'prefix_face', toolsHash, sysHash, nTools: defs.length, light: !!ctx.__light, preset: ctx.preset || null, permission: ctx.permission || null });
+    }
     {
       const core = msgs.filter((m) => m && m.role !== 'system');
       const d = diffCore(prevCore, core);
@@ -626,8 +641,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     const calls = res.toolCalls || [];
     if (!calls.length) {
       // 目标完成度判断：模型选择直接回答 = 认为任务已完成
-      let final = res.content || '';
-      // C4 输出自动续段（2026-09）：单轮输出触到模型 max_tokens 上限(finish_reason=length)时自动续写拼接，
+      let final = res.content || '';      // C4 输出自动续段（2026-09）：单轮输出触到模型 max_tokens 上限(finish_reason=length)时自动续写拼接，
       // 不再要求用户手动说"继续"。续写上下文=已输出片段+增量指令；只续不重；达上限自动停下并注明。
       // E3 修正：次数/长度上限从硬编码改为可调常量（防长输出任务被 4 次×24000 硬上限无谓截断——
       // 现代模型本可完整输出，截断只会让用户反复说"继续"，徒增轮次与往返成本）
@@ -733,14 +747,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       }
       return { content: final, toolLog, usage: res.usage, finishReason: res.finishReason || '', streamed: roundLive, streamedText: roundStreamed, spentYuan: spentNow(), usageTotals: runTotals() }; // P20：正文已真流 → index 只补发"没流出去的那段"（RA-37 G1）
     }
-    // 长任务现场：每轮工具执行后落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）
-    if (ctx.__runId) {
-      const counts = {};
-      for (const t of toolLog) counts[t.name] = (counts[t.name] || 0) + 1;
-      const last = toolLog[toolLog.length - 1];
-      const step = last ? last.name + (last.status === 'fail' ? '(失败)' : '') + ' → ' + String(last.result || '').replace(/\s+/g, ' ').slice(0, 100) : '';
-      await checkpoint(ctx.__runId, { rounds: callHistory.length, lastStep: step, toolCounts: counts }).catch(() => {});
-    }
+    // 长任务现场：**每轮工具执行之后**落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）。
+    // 2026-09-16 修：原先这段写在工具执行**之前**（与其注释相反），于是写下去的永远是上一轮的旧值——
+    // 单轮/两轮任务落进去是 0（实测 agent_runs 107 行全是 rounds=0、tool_counts='{}'，而 `resumeHint()`
+    // 正是靠它报"上次任务现场"）。挪到本 chunks 执行完之后，并在终结路径补一次，保证最后一次也落。
     // 循环处理（护栏现值每轮生效；soft 提示→仍无效则挂起 paused，现场保留）
     const sig = calls.map((c) => {
       let argsStr = '';
@@ -827,6 +837,20 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       if (added > 0) {
         console.log('[skill] 追加 ' + added + ' 条技能到历史之后（in-history 追加，不破坏前缀）conv=' + (ctx.conversationId || '-'));
       }
+    }
+    // 长任务现场：**每轮工具执行之后**落盘心跳/步数/计数（断点恢复用；runId 由调用方注入）。
+    // 2026-09-16 修：这段原先写在工具执行**之前**（与它自己的注释相反），于是落下去的永远是上一轮的旧值——
+    // 单轮/两轮任务写进去就是 0（实测 agent_runs 107 行全是 rounds=0、tool_counts='{}'，而 `resumeHint()`
+    // 正是靠它报"上次任务现场"）。现在放在本轮工具执行完、进入下一轮之前。
+    if (ctx.__runId) {
+      const counts = {};
+      for (const t of toolLog) counts[t.name] = (counts[t.name] || 0) + 1;
+      const last = toolLog[toolLog.length - 1];
+      const step = last ? last.name + (last.status === 'fail' ? '(失败)' : '') + ' → ' + String(last.result || '').replace(/\s+/g, ' ').slice(0, 100) : '';
+      // 失败**必须出声**：过去这里是 `.catch(() => {})`，于是"现场永远落不下去"没有任何人知道
+      //（本仓库同类教训第二次：留痕静默 catch 导致账本断了 40 分钟）。它不影响主流程，但必须留痕。
+      await checkpoint(ctx.__runId, { rounds: callHistory.length, lastStep: step, toolCounts: counts })
+        .catch((e) => console.warn('[runtrack] 现场落盘失败（断点恢复会缺这轮；不影响执行）：' + ((e && e.message) || e)));
     }
     // 进展判据（2026-09-15）：替代"轮次/时间"作为人在场时的主判据。
     // 只看"这一轮有没有产生新的、可验证的东西"——改了东西 / 新调用 / 转成功 / 结果变了，四者之一即算进展。

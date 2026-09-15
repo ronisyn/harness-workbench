@@ -254,6 +254,17 @@ const SCHEMA = [
     created_at DATETIME DEFAULT NOW(),
     INDEX idx_events_conv (conversation_id, id)
   )`,
+  // ---- 2026-09-15 RA-47：事件账本归档（保留口径=审计账本 90 天；与 events 同列 + archived_at） ----
+  `CREATE TABLE IF NOT EXISTS events_archive (
+    id BIGINT NOT NULL PRIMARY KEY,
+    conversation_id INT NULL,
+    seq INT NOT NULL DEFAULT 0,
+    type VARCHAR(32) NOT NULL,
+    payload JSON,
+    created_at DATETIME DEFAULT NOW(),
+    archived_at DATETIME DEFAULT NOW(),
+    INDEX idx_events_arch_time (created_at)
+  )`,
   `CREATE TABLE IF NOT EXISTS price_table (
     id INT AUTO_INCREMENT PRIMARY KEY,
     provider_id INT,

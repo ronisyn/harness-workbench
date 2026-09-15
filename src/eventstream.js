@@ -158,6 +158,11 @@ export function applyEvent(view, ev) {
       // 但不改变重建出的答案/状态——记进 retries 供界面与复盘看，避免落进 unknownTypes（那会掩盖真实漂移）。
       v.retries = [...(v.retries || []), ev.retry];
       return v;
+    case 'prefix_face':
+      // 2026-09-16：这一轮真实发出的前缀面指纹（工具面 + 系统提示）。同样不改变答案/状态，但它是
+      // "确定性投影"能对账的前提（账本里唯一能回答"当时那条面是什么"的一手数据）。
+      v.face = { toolsHash: ev.toolsHash || null, sysHash: ev.sysHash || null, nTools: ev.nTools ?? null, light: !!ev.light };
+      return v;
     default:
       v.unknownTypes = [...view.unknownTypes, String(ev.type)];
       return v;
