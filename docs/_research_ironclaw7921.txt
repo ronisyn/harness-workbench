@@ -1,0 +1,345 @@
+﻿
+perf(llm): OpenAI-family backends send no prompt_cache_key — measured ~82%→29% cache-hit collapse past ~200 calls · Issue #7921 · nearai/ironclaw · GitHub 
+Skip to content 
+Navigation Menu Sign in Appearance settings Platform AI CODE CREATION GitHub Copilot Write better code with AI GitHub Copilot app Direct agents from issue to merge MCP Registry Integrate external tools DEVELOPER WORKFLOWS Actions Automate any workflow Codespaces Instant dev environments Issues Plan and track work Code Review Manage code changes Code Quality Enforce quality at merge APPLICATION SECURITY GitHub Advanced Security Find and fix vulnerabilities Code security Secure your code as you build Secret protection Stop leaks before they start EXPLORE Why GitHub Documentation Blog Changelog Marketplace View all features Solutions BY COMPANY SIZE Enterprises Small and medium teams Startups Nonprofits BY USE CASE App Modernization DevSecOps DevOps CI/CD View all use cases BY INDUSTRY Healthcare Financial services Manufacturing Government View all industries View all solutions Resources EXPLORE BY TOPIC AI Software Development DevOps Security View all topics EXPLORE BY TYPE Customer stories Events & webinars Ebooks & reports Business insights GitHub Skills SUPPORT & SERVICES Documentation Customer support Community forum Trust center Partners View all resources Open Source COMMUNITY GitHub Sponsors Fund open source developers PROGRAMS Security Lab Maintainer Community GitHub Stars Archive Program REPOSITORIES Topics Trending Collections Enterprise ENTERPRISE SOLUTIONS Enterprise platform AI-powered developer platform AVAILABLE ADD-ONS GitHub Advanced Security Enterprise-grade security features Copilot for Business Enterprise-grade AI features Premium Support Enterprise-grade 24/7 support Pricing Search / Sign in Sign up Appearance settings 
+You signed in with another tab or window. Reload to refresh your session. 
+ You signed out in another tab or window. Reload to refresh your session. 
+ You switched accounts on another tab or window. Reload to refresh your session. 
+Dismiss alert 
+{{ message }} 
+Uh oh!
+There was an error while loading. Please reload this page . 
+nearai
+/ 
+ironclaw 
+Public 
+Notifications
+ You must be signed in to change notification settings 
+Fork
+ 1.5k 
+Star
+ 12.6k 
+Code 
+Issues 
+ 1.4k 
+Pull requests 
+ 174 
+Security and quality 
+ 0 
+Insights 
+Additional navigation options 
+Code
+Issues
+Pull requests
+Security and quality
+Insights
+perf(llm): OpenAI-family backends send no prompt_cache_key — measured ~82%→29% cache-hit collapse past ~200 calls   #7921 New issue Copy link New issue Copy link Open Open perf(llm): OpenAI-family backends send no prompt_cache_key — measured ~82%→29% cache-hit collapse past ~200 calls #7921 Copy link Assignees Labels p2 Vanta recognized label for security vulnerabilities Vanta recognized label for security vulnerabilities Description henrypark133 opened on Aug 27, 2026 Issue body actions Summary 
+ IronClaw implements explicit prompt-caching hints (Anthropic cache_control 
+breakpoints) on the two Anthropic transports only. Every OpenAI-family backend 
+— OpenAiCodex (direct Responses API), the Codex-ChatGPT registry variant, 
+and the OpenAI-compatible Chat Completions paths ( Registry(OpenAiCompletions) , 
+ DeepSeek , OpenRouter , NearAi , GitHub Copilot) — never sends a stable 
+cache-routing key on any request. Confirmed by exhaustive search: 
+ rg -n "prompt_cache_key" crates # zero hits, repo-wide
+Meanwhile OpenAI's own Codex CLI sends a stable prompt_cache_key (defaulted 
+to the session id) on every Responses API request specifically to keep 
+provider-side KV-cache routing sticky across a long-running session. IronClaw 
+has the equivalent request shape ( OpenAiCodexProvider and 
+ CodexChatGptProvider both build raw Responses API JSON bodies by hand) but 
+never sets the field. 
+ Separately — and this is the more important half of this issue — IronClaw's 
+own telemetry already proves the cost of cache misses, and a chunk of that 
+cost is not fixable by a cache key alone: progressive tool disclosure 
+rebuilds the advertised tool array mid-run, which changes the request prefix 
+regardless of what routing key is attached. Both problems are described below 
+with exact call sites. 
+ Evidence (measured) 
+ crates/loop/ironclaw_loop_host/src/model_gateway/prompt_cache_activity.rs:1-9 
+(module doc comment, quoted verbatim): 
+//! Prompt-cache continuity telemetry for the Reborn model gateways.
+//!
+//! Benchmarks showed the provider KV cache hit rate collapsing from ~82% to
+//! 29% past ~200 model calls per run (~3.5x input cost). This module tracks
+//! per-run cache-read continuity across calls, detects each break as it
+//! happens, and attributes it to cheap request-shape signals (tool surface or
+//! system prompt changed). The gateway only constructs a
+//! [`PromptCacheCallScope`] per request and records completed calls; all
+//! thresholds, signatures, eviction, and logging live here.
+What this module actually does, verified by reading the whole file: 
+system_prompt_cache_signature() ( prompt_cache_activity.rs:227-237 ) hashes the 
+first system message's content. 
+ tool_definitions_cache_signature() ( prompt_cache_activity.rs:215-223 ) hashes the 
+ordered list of advertised provider tool names. 
+ PromptCacheActivityLog::observe_model_call() ( prompt_cache_activity.rs:104-184 ) 
+compares each call's cache_read_input_tokens against the previous call in the 
+same TurnRunId scope; a break is declared when the read drops both >5% 
+relative and >10K tokens absolute ( is_prompt_cache_break , 
+ prompt_cache_activity.rs:34-43 ), and attributes the break to 
+ tool_definitions_changed / system_prompt_changed (lines 125-127) via a 
+ debug! log line (never info! / warn! , per this repo's REPL-logging rule). 
+ This module is telemetry-only. It records and classifies; it never 
+constructs, mutates, or forwards anything on the outbound request. There is 
+no remediation path today — nothing consumes a Break observation to change 
+request shape or attach a cache key. 
+Provider-side caching hints that DO exist, and where, confirmed by reading each: 
+crates/domains/ironclaw_llm/src/anthropic_oauth.rs — apply_cache_breakpoints 
+emits Anthropic cache_control on system / last tool / last user block. 
+ crates/domains/ironclaw_llm/src/rig_adapter.rs — RigAdapter::with_cache_retention 
+( rig_adapter.rs:339-345 ) gates the same cache_control injection, restricted to 
+Anthropic models via supports_prompt_cache ( rig_adapter.rs:1011-1013 , doc: 
+"Per Anthropic docs, only Claude 3+ models support prompt caching"). 
+ crates/domains/ironclaw_llm/CONTRACT.md:345-346 states this explicitly: "Both 
+Anthropic transports emit explicit cache_control breakpoints when 
+ cache_retention (env: ANTHROPIC_CACHE_RETENTION ) is not none ( Cache: place explicit Anthropic cache_control breakpoints (rig adapter + OAuth transport)  #6984 )." 
+ Cache: place explicit Anthropic cache_control breakpoints (rig adapter + OAuth transport)  #6984 (closed) is the PR/issue that landed this — Anthropic-only by design, 
+not an oversight. 
+ CacheRetention enum ( crates/domains/ironclaw_llm/src/config.rs:33-41 ): None / 
+ Short (5 min TTL) / Long (1 hr TTL) — this vocabulary is itself 
+Anthropic-cache-control-shaped (TTL retention classes), not a generic 
+cache-key concept, and is not reused for any OpenAI-family backend. 
+RigAdapter::new(...) construction call sites in 
+ crates/domains/ironclaw_llm/src/lib.rs — only one of six calls attaches cache 
+behavior: 
+Call site 
+ Backend 
+ .with_cache_retention(...) attached? 
+lib.rs:447 ( create_openai_compat_from_registry ) 
+ Registry(OpenAiCompletions) 
+ No 
+lib.rs:567-569 ( create_anthropic_from_registry ) 
+ Registry(Anthropic) 
+ Yes 
+lib.rs:620 
+ (Anthropic OAuth-adjacent rig path) 
+ No cache_retention arg present at this call 
+lib.rs:684 ( create_deepseek_from_registry ) 
+ Registry(DeepSeek) 
+ No 
+lib.rs:780 ( create_openrouter_from_registry ) 
+ Registry(OpenRouter) 
+ No 
+lib.rs:849 
+ (further rig-backed protocol) 
+ No 
+Current state per backend 
+Backend ( LlmBackendKind / registry protocol) 
+ API family 
+ Caching hint sent today 
+ Gap 
+Registry(Anthropic) direct key 
+ Anthropic Messages 
+ cache_control via RigAdapter::with_cache_retention ( lib.rs:567-569 ) 
+ None — covered by #6984 
+Anthropic OAuth 
+ Anthropic Messages 
+ cache_control via apply_cache_breakpoints ( anthropic_oauth.rs ) 
+ None — covered by #6984 
+OpenAiCodex ( openai_codex_provider.rs ) 
+ OpenAI Responses API ( {api_base_url}/responses ) 
+ None. build_request_body ( openai_codex_provider.rs:131-186 ) sets model / store / stream / input / text / instructions / tools / tool_choice / parallel_tool_calls ; no prompt_cache_key field anywhere in the file 
+ Full gap — this is exactly the field Codex CLI sends on this same API shape 
+Codex-ChatGPT registry variant ( codex_chatgpt.rs , is_codex_chatgpt config flag) 
+ OpenAI Responses API ( POST /responses , codex_chatgpt.rs:566 ) 
+ None. build_request_body ( codex_chatgpt.rs:361-… ) — no prompt_cache_key 
+ Full gap, second Responses-API implementation with the same shape 
+Registry(OpenAiCompletions) (via rig::providers::openai + RigAdapter ) 
+ OpenAI Chat Completions 
+ None. RigAdapter::new ( lib.rs:447 ) built without .with_cache_retention ; cache_control is Anthropic-gated ( rig_adapter.rs:1011-1013 ) so it would be dropped even if called 
+ Gap confirmed for cache_control; whether OpenAI's Chat Completions API accepts an equivalent explicit cache-key parameter is not verified in this pass — flagging explicitly rather than asserting 
+Registry(DeepSeek) / Registry(OpenRouter) (via RigAdapter ) 
+ OpenAI-compatible Chat Completions 
+ None ( lib.rs:684 , lib.rs:780 , no .with_cache_retention ) 
+ Same as above; whether these gateways honor an OpenAI-shaped cache key is unverified 
+GitHub Copilot ( github_copilot.rs ) 
+ OpenAI-compatible Chat Completions (via Copilot token exchange) 
+ None. cache_read_input_tokens / cache_creation_input_tokens hardcoded to 0 on the response side ( github_copilot.rs:294-295, 370-373 ); no cache field sent on the request 
+ Same as above 
+NearAi ( nearai_chat.rs ) 
+ OpenAI-compatible Chat Completions ( api_url("chat/completions") , header comment nearai_chat.rs:1-4 ) 
+ None. ChatCompletionRequest ( nearai_chat.rs:1159-1181 ) has no cache-related field 
+ Same as above 
+Bedrock 
+ AWS Converse API 
+ None — hardcodes cache_creation_input_tokens: 0 / cache_read_input_tokens: 0 ( bedrock.rs:157-159, 230-233 ) 
+ Already tracked separately in issue #1926 ("feat(llm): add prompt caching support for Bedrock Converse API") — out of scope here 
+GeminiOauth ( gemini_oauth.rs ) 
+ Gemini API 
+ Partial, different mechanism: an opt-in GEMINI_CACHED_CONTENT env var ( gemini_oauth.rs:1705-1708 ) sets the Gemini explicit cachedContent field verbatim to a pre-created cache resource name — manual, not an automatically-derived stable key 
+ Not OpenAI-family; noted for completeness, out of scope here 
+Why the key alone is not enough 
+ A prompt_cache_key only helps provider-side cache routing (which backend 
+instance serves the request). It does nothing if the request prefix itself 
+changes turn-to-turn — the KV cache is still invalidated at the first changed 
+token. IronClaw has at least one concrete, currently-active source of 
+prefix instability, independent of any cache-key work: 
+ Progressive tool disclosure rewrites the advertised tool array mid-run. 
+ToolDisclosureCapabilityPort::tool_definitions() 
+( crates/loop/ironclaw_loop_host/src/tool_disclosure_port.rs:327-357 ) returns 
+ state.active.definitions.clone() — the current turn's active/promoted 
+tool set, not a fixed set for the run. 
+ That active set is recomputed by rebuild_turn_state() 
+( tool_disclosure_port.rs:815-886 ). The rebuild condition 
+( tool_disclosure_port.rs:839-846 ) fires whenever state.turn_id changes, 
+the surface version changes, or state.definitions_fingerprint != fingerprint 
+— and fingerprint is computed from the authorized definitions on every 
+call ( tool_disclosure_port.rs:830 ). When a deferred tool is promoted (via 
+ promote_target , tool_disclosure_port.rs:910-937 , which mutates the shared 
+ promoted_by_scope map), the next rebuild_turn_state call recomputes 
+ active = select_active_set_for_mode(&catalog, &promoted, …) 
+( tool_disclosure_port.rs:864-865 ) with the newly-promoted tool included — 
+changing the tools array the model gateway sends on the very next request. 
+ prompt_cache_activity.rs 's own break-attribution logic 
+( tool_definitions_changed , lines 125-127) exists specifically because this 
+happens in production today. 
+ This exact mechanism is already tracked as its own open issue: Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 
+("Cache: keep the advertised tool array byte-identical — defer_loading/ 
+tool_reference instead of mid-run promotion"), which proposes moving 
+promotion into the transcript (append-only) instead of the tools array. This 
+issue does not duplicate Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 — it is scoped to the routing-key gap; 
+ Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 is scoped to prefix stability . Both must land for OpenAI-family 
+requests to get durable cache hits: a stable key with an unstable prefix 
+still misses; a stable prefix with no key still risks routing to a 
+cold provider instance under load-balanced backends. 
+ Two more prefix-stability issues exist in the tracker and are explicitly 
+ not re-litigated here: Cache: regression test pinning byte-identical prompt prefix across turns  #6987 ("regression test pinning byte-identical 
+prompt prefix across turns") and Live Workspace Prompt Inputs Invalidate KV Cache Reuse Across Conversation Turns  #4241 ("Live Workspace Prompt Inputs 
+Invalidate KV Cache Reuse Across Conversation Turns", re: AGENTS.md / 
+ SOUL.md /etc. re-read into the system prompt each turn). Cache: stop mutating the prompt prefix (nudges before identity, timestamp in system block, per-run memory retrieval)  #6985 ("stop 
+mutating the prompt prefix: nudges, timestamp, per-run memory retrieval") 
+is closed — not re-verified as still-fixed in this pass. 
+Proposed change 
+OpenAiCodexProvider::build_request_body 
+( crates/domains/ironclaw_llm/src/openai_codex_provider.rs:131-186 ): add a 
+ body["prompt_cache_key"] field, populated from a stable per-conversation 
+identifier threaded in from the caller (see feat: Sandbox jobs  #4 below). This is the 
+zero-ambiguity case — it is the same Responses API shape Codex CLI targets, 
+confirmed working there (see Prior art). 
+ CodexChatGptProvider::build_request_body 
+( crates/domains/ironclaw_llm/src/codex_chatgpt.rs:361-… , POST /responses 
+at codex_chatgpt.rs:566 ): same field, same source key. Two call sites, 
+same fix shape — do not fork one and skip the other. 
+ RigAdapter ( crates/domains/ironclaw_llm/src/rig_adapter.rs ): determine 
+whether rig-core 's OpenAI CompletionModel exposes a pass-through for an 
+OpenAI-compatible cache-routing parameter (unverified — see table above). 
+If it does, thread it the same way cache_retention is threaded today 
+( rig_adapter.rs:339-345 ) but keyed off backend protocol rather than 
+Anthropic-only supports_prompt_cache . If rig-core has no such 
+pass-through, this becomes a follow-up scoped to a rig-core version bump 
+or a raw-body escape hatch — do not guess at rig-core's API surface without 
+reading its source in that follow-up. 
+ Key derivation and invalidation — mirror Codex CLI's model 
+( prompt_cache_key_override.unwrap_or_else(|| responses_metadata.session_id.clone()) , 
+see Prior art below): default the key to a stable identifier already carried 
+through the turn/run path — TurnRunId (already the scope key 
+ prompt_cache_activity.rs tracks continuity against, prompt_cache_activity.rs:97-98 ) 
+is the natural candidate, or the owning thread id if cache continuity should 
+survive across runs within one thread. Whichever is chosen, state it 
+explicitly in the implementation PR: the key must not change within the 
+scope it is stable across , and must change (or be scoped separately) 
+across genuinely distinct conversations/tenants — a shared key across 
+unrelated threads/tenants would leak routing correlation, not content, but 
+should still be scoped per the same identity boundaries AGENTS.md 
+documents elsewhere (turn/thread/tenant identity must not be re-derived 
+from display strings). 
+ Do not treat this as sufficient on its own. Land this together with, or 
+sequenced explicitly after, progress on Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 (tool-array stability) — 
+otherwise the key is attached to a prefix that still rotates on tool 
+promotion, and the telemetry in prompt_cache_activity.rs will keep 
+reporting tool_definitions_changed breaks regardless of this change. 
+Prior art 
+ OpenAI's Codex CLI ( /home/ubuntu/Code/_audit_codex , codex-rs/core/src/client.rs ): 
+prompt_cache_key_override: Option<String> field on the client state 
+( client.rs:258 ), settable via with_prompt_cache_key_override 
+( client.rs:477-482 ) — this is the explicit override path (e.g. for 
+cross-session pinning); absent an override it falls through to the default. 
+ fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String 
+( client.rs:485-488 ):
+ fn prompt_cache_key ( & self , responses_metadata : & CodexResponsesMetadata ) -> String { 
+ self . prompt_cache_key_override 
+ . clone ( ) 
+ . unwrap_or_else ( || responses_metadata . session_id . clone ( ) ) 
+ } 
+The default is the session id — stable for the life of one Codex session, 
+and naturally different (invalidating routing affinity, by design) across 
+sessions. 
+ The computed key is threaded into every request-shaped body built off 
+ build_responses_request — both the live turn path ( client.rs:922,937 , 
+inside fn build_responses_request , client.rs:845 ) and the compaction 
+path ( client.rs:596-624 , compact_conversation_history ) — so cache 
+routing survives compaction, not just ordinary turns. 
+ It rides on the same ResponsesApiRequest struct as model / instructions / 
+ tools / input , i.e. it is a first-class field of the wire request, not a 
+header or side channel. 
+Test strategy 
+ Per .claude/rules/testing.md , this is production-wired request-shape 
+behavior crossing the model-gateway seam, so it needs an integration-tier 
+test in tests/integration/ , not a crate-local unit test of the provider 
+struct in isolation — a unit test on OpenAiCodexProvider::build_request_body 
+alone would prove the field is set but not that the model gateway actually 
+supplies a stable value across turns, which is the behavior that matters. 
+Presence + stability assertion (integration tier, driven through the 
+harness at the model-gateway seam, mirroring the pattern Cache: regression test pinning byte-identical prompt prefix across turns  #6987 specifies 
+for system_prompt_cache_signature / tool_definitions_cache_signature ): 
+run a multi-turn scripted loop against a recording/fake OpenAiCodexProvider 
+(or equivalent OpenAI-family fake) that captures the outbound request body; 
+assert prompt_cache_key is present on every call and identical across 
+all turns of the same run/thread scope. 
+ Regression test that a tool-disclosure change does or does not rotate 
+it : within the same scripted run, trigger a deferred-tool promotion 
+(the same scenario Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 's acceptance criterion describes) and assert 
+ prompt_cache_key stays unchanged across that promotion (the key is 
+run/thread-scoped, not tool-surface-scoped) while separately asserting 
+(or, until Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 lands, documenting as an expected-and-tracked-elsewhere 
+failure) that the tools array itself does change — so the two signals 
+(key stability vs. prefix stability) are asserted independently and this 
+test cannot pass by accident if someone makes the key derive from the tool 
+surface. 
+ Crate-tier tests remain appropriate as a fast local check on 
+ build_request_body 's pure JSON-shape output (field present, correct 
+source value plumbed through), but they are the fallback, not the 
+substitute, per the rule above. 
+Risks / rollback 
+Low blast radius for step 1/2 (Codex providers): additive JSON field on 
+an existing hand-built body; a no-op if the provider ignores unknown fields, 
+and reversible by dropping the field. 
+ Unverified surface for step 3 ( rig-core OpenAI path): do not guess at 
+ rig-core 's parameter support; if it lacks a pass-through, land only the 
+Codex-provider fix and file the rig-core gap as a separate, explicitly 
+scoped follow-up rather than stubbing something unverified. 
+ Key derivation choice affects blast radius of a wrong choice: picking a 
+key that is too narrow (e.g. per-request) wastes the feature; too broad 
+(e.g. shared across tenants) risks routing-correlation leakage across 
+unrelated conversations. Recommend TurnRunId -scoped as the smallest change 
+consistent with what prompt_cache_activity.rs already tracks continuity 
+against — but this is a recommendation, not asserted as the only safe 
+choice; the implementer should confirm against the identity rules in 
+ AGENTS.md before landing. 
+ Rollback: revert the field addition; no persisted state, no schema, no 
+migration involved. 
+Out of scope 
+Bedrock prompt caching — tracked in feat(llm): add prompt caching support for Bedrock Converse API  #1926 . 
+ Tool-array prefix stability (defer_loading/tool_reference) — tracked in 
+ Cache: keep the advertised tool array byte-identical — defer_loading/tool_reference instead of mid-run promotion  #6986 . 
+ Byte-identical-prefix regression test infrastructure — tracked in Cache: regression test pinning byte-identical prompt prefix across turns  #6987 . 
+ Live workspace prompt inputs (AGENTS.md/SOUL.md/etc. re-read per turn) — 
+tracked in Live Workspace Prompt Inputs Invalidate KV Cache Reuse Across Conversation Turns  #4241 . 
+ Gemini's cachedContent explicit-caching mechanism — different API shape, 
+already has a (manual, opt-in) path; not addressed here. 
+ Whether rig-core 's OpenAI/DeepSeek/OpenRouter CompletionModel accepts an 
+OpenAI-compatible cache-routing parameter — explicitly unverified in this 
+issue; needs its own investigation before implementation on that path. 
+ Reactions are currently unavailable Activity Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment Metadata Metadata Assignees henrypark133 Labels p2 Vanta recognized label for security vulnerabilities Vanta recognized label for security vulnerabilities Type No type Projects No projects Milestone No milestone Relationships None yet Development No branches or pull requests Issue actions Open in GitHub Copilot app 
+Footer 
+© 2026 GitHub, Inc.
+Footer navigation 
+Terms 
+Privacy 
+Security 
+Status 
+Community 
+Docs 
+Contact 
+Manage cookies
+Do not share my personal information
+You can’t perform that action at this time.
+

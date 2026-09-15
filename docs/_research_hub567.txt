@@ -1,0 +1,322 @@
+﻿
+feat: Auto Cache Warming for Anthropic Provider · Issue #567 · ding113/claude-code-hub · GitHub 
+Skip to content 
+Navigation Menu Sign in Appearance settings Platform AI CODE CREATION GitHub Copilot Write better code with AI GitHub Copilot app Direct agents from issue to merge MCP Registry Integrate external tools DEVELOPER WORKFLOWS Actions Automate any workflow Codespaces Instant dev environments Issues Plan and track work Code Review Manage code changes Code Quality Enforce quality at merge APPLICATION SECURITY GitHub Advanced Security Find and fix vulnerabilities Code security Secure your code as you build Secret protection Stop leaks before they start EXPLORE Why GitHub Documentation Blog Changelog Marketplace View all features Solutions BY COMPANY SIZE Enterprises Small and medium teams Startups Nonprofits BY USE CASE App Modernization DevSecOps DevOps CI/CD View all use cases BY INDUSTRY Healthcare Financial services Manufacturing Government View all industries View all solutions Resources EXPLORE BY TOPIC AI Software Development DevOps Security View all topics EXPLORE BY TYPE Customer stories Events & webinars Ebooks & reports Business insights GitHub Skills SUPPORT & SERVICES Documentation Customer support Community forum Trust center Partners View all resources Open Source COMMUNITY GitHub Sponsors Fund open source developers PROGRAMS Security Lab Maintainer Community GitHub Stars Archive Program REPOSITORIES Topics Trending Collections Enterprise ENTERPRISE SOLUTIONS Enterprise platform AI-powered developer platform AVAILABLE ADD-ONS GitHub Advanced Security Enterprise-grade security features Copilot for Business Enterprise-grade AI features Premium Support Enterprise-grade 24/7 support Pricing Search / Sign in Sign up Appearance settings 
+You signed in with another tab or window. Reload to refresh your session. 
+ You signed out in another tab or window. Reload to refresh your session. 
+ You switched accounts on another tab or window. Reload to refresh your session. 
+Dismiss alert 
+{{ message }} 
+ding113
+/ 
+claude-code-hub 
+Public 
+Uh oh!
+There was an error while loading. Please reload this page . 
+Notifications
+ You must be signed in to change notification settings 
+Fork
+ 392 
+Star
+ 3.4k 
+Code 
+Issues 
+ 25 
+Pull requests 
+ 16 
+Discussions 
+Actions 
+Projects 
+Security and quality 
+ 0 
+Insights 
+Additional navigation options 
+Code
+Issues
+Pull requests
+Discussions
+Actions
+Projects
+Security and quality
+Insights
+feat: Auto Cache Warming for Anthropic Provider   #567 New issue Copy link New issue Copy link Closed as not planned Closed as not planned feat: Auto Cache Warming for Anthropic Provider #567 Copy link Labels area:Anthropic area:session enhancement New feature or request New feature or request Description Clouder0 opened on Jan 8, 2026 Issue body actions 一些初步的想法，后续有空可能开个 PR. 
+ 简单地说： 
+假设在缓存即将超时的时间点决策，是否预热缓存：当我们预测用户在下一个 5 分钟内发送消息的概率 >= threshold 时，预热缓存的 Profit Expectation > 0，就可以预热。 
+ 通过历史数据统计训练预测模型，区分“用户输入”发出的请求和其他请求，综合考虑一个用户多个 Session 的情况并 Fit Model. 可以采用一些简单的 Rule based 决策方式，也可以为每个用户 Online Training 一个简单的神经网络来适应用户的使用习惯(? 
+ 使用历史数据训练并回测，可以算出“假设有缓存保活功能，预计能节约多少 Cache Miss 带来的 Cost”，一个简单的 Model Evaluation. 目前我也不确定用户输入是否足够可预测以至于我们能够利用预测来优化缓存，但我相信可以。假如采用 Online Training，可以在“判断出用户难以预测”时放弃保活。 
+ 如何识别“用户输入”发出的请求呢？可以利用 Claude Code 的 Hooks 在用户 prompt 中插入 marker，转发上游时删除，不对 Claude Code 客户端做侵入式修改。对于 OpenCode 用户，我将在我的 Fork( https://github.com/clouder0/overcode ) 中实现相应的适配。 
+ 不影响不开启缓存保活功能的用户。 
+设计稿全文如下，由 AI 生成。 
+ Transparent Prompt Cache Warming (5-Minute TTL) 
+ Abstract 
+ Prompt caching can materially reduce cost and latency for large-context conversations, but the cache is only valuable while it remains alive. Providers typically use an idle time-to-live (TTL): if no qualifying request arrives within the TTL window, the cache expires and the next request must pay an expensive cache creation (write) again. 
+ This document proposes a transparent, server-side cache-warming feature for Claude Code Hub (CCH). When enabled, CCH will automatically send minimal “keep-alive” requests shortly before the cache would expire. These requests are designed to be extremely low output (near-zero) and primarily pay cache read/refresh pricing, while extending the cache TTL . 
+ Key constraints and decisions: 
+TTL is fixed to 5 minutes (no 1-hour TTL). 
+ CCH never re-creates caches on behalf of users. If a cache is likely expired, we skip warming. 
+ Warm requests reuse the same provider binding for the session. If warming fails, CCH stops warming that session. 
+ Warm requests are billed and rate-limited like normal requests . 
+ Users can opt-in/out via request markers (headers, private body fields, or Claude Code hooks) and/or per-key defaults. 
+ The warm decision is data-dependent and can be upgraded from heuristics to an ML predictor using cross-session user activity. 
+Background 
+ Prompt caching economics 
+ Anthropic prompt caching splits input tokens into: 
+Base input tokens : normal input pricing 
+ Cache write tokens : tokens that are written into the prompt cache (higher than base) 
+ Cache read/hit tokens : tokens served from cache (much cheaper than base) 
+Using the representative multipliers described by the project discussion: 
+5-minute cache write ≈ 1.25× base input price 
+ cache read/hit ≈ 0.1× base input price 
+Therefore, once a cache is created, keeping it alive by periodically refreshing can be cheaper than letting it expire and paying another cache write. 
+ TTL behavior 
+ Providers typically treat caching as an idle-time sliding window: 
+A request that hits the cache refreshes the TTL. 
+ If no request hits the cache within the TTL, the cached state expires. 
+In practice, CCH can exploit this by sending a minimal request that reuses the cached prefix, producing a cache hit and extending TTL. 
+ Problem Statement 
+ CCH supports long-context, multi-step workflows where sessions often: 
+perform bursts of interactive work, then 
+ experience brief idle periods (e.g., user reading, waiting for a long-running tool), then 
+ resume with more user input. 
+If the idle gap crosses the cache TTL boundary, the next user request pays a new cache write, increasing cost and sometimes latency. 
+ At the same time, not all sessions benefit: 
+Many sessions end permanently after the burst. 
+ Agent/subagent activity may generate requests that are not strongly correlated with future user returns. 
+This motivates a policy that decides: 
+whether warming is worth it for a session, and 
+ how long to keep warming before giving up. 
+Goals and Non-Goals 
+ Goals 
+Reduce user cost by preventing avoidable cache re-creation. 
+ Transparent behavior : no client-visible changes in normal operation. 
+ Safety-first : never cause unexpected large spend. 
+ Operable : observable, configurable, and easy to disable. 
+Non-Goals 
+Enabling 1-hour cache TTL. 
+ Guaranteeing cache survival under all conditions (e.g., queue delays, outages). 
+ Warming across providers or migrating caches between providers. 
+ Performing speculative cache creation. 
+Core Design: Refresh Only, Never Re-Create 
+ The fundamental risk of cache warming is accidentally converting a “refresh” into a “re-create.” 
+ To avoid this, CCH uses a strict rule: 
+If we are late (the cache is likely expired), we do not send a warm request. 
+ If a warm request does not produce cache read tokens , we treat it as a miss and stop warming the session. 
+This ensures warming cannot silently become “speculative cache creation.” 
+ Economic Rationale and Threshold 
+ Let: 
+T = number of cached prefix tokens relevant to the session 
+ W = cache-write price per token (5m) 
+ R = cache-read price per token 
+ O = small overhead cost for the warm request (tiny base input + minimal output) 
+ p = probability the user will send another qualifying request within the next TTL window 
+If the cache expires, the next qualifying request pays roughly (W * T) again. 
+If we warm once, we pay roughly (R * T + O) now and potentially avoid a future write. 
+ A single warm is economically rational when: 
+ p * (W - R) * T > R * T + O 
+ If overhead is small and using the discussion’s multipliers ( W=1.25 , R=0.1 in relative units): 
+threshold p > R / (W - R) = 0.1 / 1.15 ≈ 8.7% 
+Interpretation: 
+If there is at least ~9% chance the user returns within the next 5 minutes, a refresh is expected-value positive. 
+ Small caches (small T ) raise the importance of O ; we should not warm tiny caches. 
+CCH will use this logic as a guiding principle and implement conservative guardrails. 
+ System Integration in CCH 
+ CCH already has the instrumentation needed to implement this feature: 
+Session identity and binding ( SessionManager ), including provider stickiness ( session:{id}:provider ). 
+ Temporary request snapshots stored for session viewing and debugging ( storeSessionRequestBody , optional storeSessionMessages ). 
+ Usage parsing and persistence in the request log table ( message_request ), including:
+cacheReadInputTokens 
+ cacheCreationInputTokens 
+ cacheTtlApplied 
+Required existing toggle 
+ The warmer relies on the stored request snapshot. In CCH today, storing the full request body is gated by STORE_SESSION_MESSAGES=true . 
+ When cache warming is enabled, we require one of: 
+keep STORE_SESSION_MESSAGES=true (recommended for early iterations), or 
+ introduce a narrower “store last request body for warming” toggle (future refinement). 
+Design note: the stored request body is a short-lived (5-minute) Redis snapshot already used for session viewing/debugging. Warming deliberately reuses this existing retention model rather than introducing a new data store. 
+ Where decisions happen 
+ The natural hook point is after each real request completes, when we already have: 
+parsed usage metrics (including cache read/write tokens) 
+ session id 
+ provider id 
+ request timing 
+At this point, CCH can update per-session warm state and schedule (or cancel) a warm job. 
+ Scheduling Architecture 
+ Why a job queue 
+ A queue-based design is preferred over periodic scanning because: 
+it scales with the number of sessions without constant polling 
+ it naturally supports delayed execution (warm near TTL boundary) 
+ it provides deduplication and retry controls 
+CCH already uses Bull queues for other background tasks; the cache warmer can follow the same pattern. 
+ Job model 
+One warm job per session at a time. 
+ Jobs are scheduled for last_cache_access + (TTL - buffer) . 
+ Jobs use a deterministic jobId (e.g., cache-warm:{sessionId} ) to allow update/replace. 
+Cross-instance safety 
+ In multi-instance deployments, two protections are applied: 
+Bull’s job deduplication by jobId 
+ a short Redis lock around the warm execution path (best-effort) 
+Buffer and lateness 
+ Because 5 minutes is short and queue jitter exists, warming is scheduled with a safety buffer. 
+ Example: 
+TTL = 300s 
+ buffer = 30s 
+ schedule at ~270s after last cache access 
+If, at execution time, we detect that the warm is late beyond the effective TTL, we skip. 
+ Warm Request Construction 
+ Input reconstruction 
+ The warm request is constructed from the stored “last request body” for the session. This provides the highest probability of reproducing the cached prefix. 
+ In CCH today, ProxySessionGuard stores the request body before conversion/filters. This is desirable: the stored body reflects what the client asked for, including cached blocks. 
+ If Option C (Claude Code UserPromptSubmit hook) is used, CCH must strip the injected marker from the stored request before sending the warm request. This ensures warm requests are based on the same logical prompt content as the user’s original request. 
+ Output minimization 
+ To reduce output cost and user-visible impact, the warm request is modified to: 
+disable streaming 
+ set a minimal max_tokens value 
+ include a trivial user message that produces negligible output 
+The warm request must not match the existing ProxyWarmupGuard interception pattern (which is reserved for Anthropic’s own “Warmup” probes). CCH’s keepalive text must be distinct. 
+ Provider stickiness 
+ Warm jobs must not trigger provider failover. They should: 
+reuse the session’s bound provider 
+ abort warming for the session on first failure 
+Rationale: 
+prompt caches are not portable across providers 
+ switching providers would turn a refresh into a miss 
+Policy: When to Warm 
+ The policy is intentionally conservative. 
+ Eligibility 
+ A session is eligible for warming only if: 
+the user has enabled auto-warming (see Controls) 
+ the last qualifying request showed caching activity ( cache_read_input_tokens > 0 or cache_creation_input_tokens > 0 ) 
+ cached prefix tokens exceed a minimum threshold ( T >= MIN_CACHED_TOKENS ) 
+ the session is not already “abandoned” by policy (e.g., too long since last user action) 
+User/agent attribution 
+ To avoid warming sessions that are unlikely to be resumed by a human, we incorporate client-provided attribution. 
+ Clients can send an internal marker (not forwarded upstream) to indicate: 
+origin=user for true user-initiated requests 
+ origin=agent/subagent for autonomous activity 
+This enables a more accurate prediction of “user will return within 5 minutes.” 
+ “Data-dependent” decision without ML 
+ A first version can use heuristic hazard estimation based on: 
+time since last user-origin request 
+ time since last request of any kind 
+ user online signal (recent user-origin requests across sessions) 
+ warm attempt count since last user action 
+This approximates a survival/hazard model while keeping implementation simple. 
+ ML-based prediction (cross-session, per-user) 
+ Heuristics can be upgraded to a lightweight ML predictor that estimates: 
+p = P(next user-origin request occurs within the next 5 minutes) 
+The predictor should use both session-local and user-global signals. This is important because many users actively switch between multiple sessions; “user is online and working” can be inferred from activity in other sessions even when the target session is temporarily idle. 
+ Labeling: 
+A training example can be formed at each request completion time for each session. 
+ The label is whether a user-origin request arrives in that session within the next 5 minutes. 
+ Warm requests are excluded from labels (they are interventions, not user behavior). 
+Features (examples): 
+Session-local: time since last user-origin request, time since last any request, recent request burstiness, session turn count, last response output tokens (reading-time proxy), cache token magnitude estimate T . 
+ User-global (cross-session): any user-origin request in the last N seconds across any session, number of concurrently active sessions, session-switch rate, time-of-day/day-of-week patterns per user. 
+Models: 
+Start simple: logistic regression or gradient-boosted trees. 
+ Add per-user personalization cautiously:
+per-user calibration layer (e.g., an adjusted intercept) 
+ or online learning with bounded updates (e.g., exponentially-weighted moving averages of return rates) 
+Training and evaluation: 
+Train globally on historical data across all users to establish a strong baseline. 
+ Optionally adapt per user as more data arrives. 
+ Evaluate using time-based splits to avoid leakage. 
+Backtesting for ROI: 
+Use historical request logs and usage metrics to simulate the warmer policy. 
+ Compute (a) simulated warm spend and (b) estimated avoided cache writes. 
+ Report per-user/per-model savings distribution to tune thresholds and caps. 
+Safety integration: 
+The ML predictor only decides “is it worth scheduling the next warm.” 
+ Hard safety rules still apply: never warm when late, never switch providers, stop after the first warm failure/miss. 
+Stop conditions 
+ Warming stops for a session when: 
+the warm job is late (cache likely expired) 
+ the warm request produces no cache read tokens (cache miss) 
+ the warm request fails for any reason 
+ limits are hit (rate limiting, cost limits) and warming is blocked 
+ maximum warm attempts since last user action is exceeded 
+Controls and Configuration 
+ The feature should support multiple levels of control: 
+Global system toggle: enable/disable the background warmer subsystem 
+ Per-key default: enable warming for all sessions under that key 
+ Per-request override: opt in/out on individual requests 
+Request signaling 
+ CCH can support three mechanisms to communicate intent without leaking unsupported parameters to upstream providers. 
+ Option A: Request headers 
+Example headers: x-cch-auto-warm: 1 , x-cch-origin: user 
+Pros: explicit and clean. Cons: requires modifying the HTTP client. 
+ Option B: Private JSON fields in request body 
+Example fields (underscore-prefixed):
+_cch_auto_warm: true 
+ _cch_origin: "user" 
+CCH already filters underscore-prefixed fields before forwarding to providers, making this approach safe from upstream “unsupported parameter” errors. 
+ Option C: Claude Code UserPromptSubmit hook (no client networking changes) 
+ Claude Code provides a UserPromptSubmit hook that runs when a human user submits a prompt. The hook can add text to the model context for that turn. 
+ We can use this capability to inject a small, machine-readable marker that CCH will parse and remove before forwarding upstream. 
+Example injected marker (conceptual): CCH_META origin=user auto_warm=1 nonce=... 
+Why this works: 
+It reliably identifies true user-initiated prompts (hook only fires on user submission). 
+ It avoids modifying Claude Code’s HTTP transport or request schema. 
+Safety requirements (non-negotiable): 
+The marker must be strictly bounded in size and placed in a predictable location. 
+ CCH must strip it deterministically before provider forwarding so it cannot:
+change semantic meaning of prompts, 
+ change caching behavior unexpectedly, or 
+ leak internal metadata to the upstream model. 
+CCH must treat the marker as best-effort : if parsing/stripping fails, default to safe behavior (do not enable auto-warm). 
+This hook-based approach is intentionally designed as an integration convenience for Claude Code, while headers/body fields remain available for other clients. 
+ Accounting and Rate Limits 
+ Warm requests are treated like normal requests: 
+they count against rate limits 
+ they count toward user and key cost limits 
+ they appear in request logs 
+This ensures fairness and avoids a hidden cost channel. 
+ Observability 
+ To operate safely, CCH must be able to answer: 
+how many warm jobs were scheduled/executed 
+ how many produced cache hits vs misses 
+ how much cost was spent warming 
+ how much cache-write cost was avoided (estimated) 
+Implementation should include: 
+structured logs for scheduling and execution 
+ request log tagging so warm requests can be filtered (e.g., via specialSettings ) 
+Security and Privacy 
+ Because warm requests require reconstructing the cached prefix, CCH must have access to the original request body for a short period. 
+ CCH already stores session request bodies in Redis with a 5-minute TTL for debugging/session viewing. This design intentionally keeps the warm feature aligned with existing data retention: 
+storage is short-lived 
+ access is protected by existing admin/session permissions 
+ no provider credentials are stored in these snapshots 
+Rollout Plan 
+Implement feature behind a global toggle (default off). 
+ Add per-request markers and minimal policy guardrails. 
+ Enable for a limited subset (specific keys/users) and measure:
+hit rate 
+ warm cost 
+ estimated write avoidance 
+Tune thresholds ( MIN_CACHED_TOKENS , buffers, max warm attempts). 
+ Optionally add a lightweight prediction model later. 
+Alternatives Considered 
+Client-side keepalive only : simpler for the server, but less transparent and harder to enforce accounting and safety uniformly. 
+ Always warm : wastes cost on sessions that end permanently. 
+ Periodic scanning : simpler but inefficient and noisy at scale. 
+ 1-hour TTL : not available under current constraints. 
+Future Enhancements 
+Replace heuristics with a hazard/return model predicting P(user returns in next 5 minutes) and calibrate per user. 
+ Add continuous backtesting dashboards (warm spend vs avoided writes) by model/key/user. 
+ Improve “online” detection by aggregating user activity across sessions. 
+ UI reporting of warm effectiveness and estimated savings. 
+ Reactions are currently unavailable Activity Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment Metadata Metadata Assignees No one assigned Labels area:Anthropic area:session enhancement New feature or request New feature or request Projects Claude Code Hub Roadmap Status Done Show more project fields Milestone No milestone Relationships None yet Development No branches or pull requests Issue actions Open in GitHub Copilot app 
+Footer 
+© 2026 GitHub, Inc.
+Footer navigation 
+Terms 
+Privacy 
+Security 
+Status 
+Community 
+Docs 
+Contact 
+Manage cookies
+Do not share my personal information
+You can’t perform that action at this time.
+

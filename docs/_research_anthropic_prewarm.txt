@@ -1,0 +1,42 @@
+﻿three examples. This depicts the input tokens of 3 requests, each of which has different cache hits and cache misses. Each has a different calculated pricing, shown in the colored boxes, as a result.
+Pre-warming the cache  
+ Cache pre-warming lets you load your system prompt or tool definitions into the prompt cache before a user triggers a real request. This eliminates the cache-miss latency penalty on the first user interaction, reducing time-to-first-token (TTFT) for latency-sensitive applications. 
+ How it works  
+ Set max_tokens: 0 in your request. The API reads your prompt into the model and writes the cache at any cache_control breakpoint, then returns immediately without generating any output. The response has an empty content array, stop_reason: "max_tokens" , and a fully populated usage block. 
+ Place the cache_control breakpoint on the last block that is shared with the follow-up request (typically your system prompt or tool definitions), not on the placeholder user message. Otherwise the cache entry is keyed to the placeholder and the follow-up request won't hit it. Use the same thinking configuration and output_config.effort as your follow-up requests too: those values are rendered into the prompt (see What invalidates the cache ), so a pre-warm with a different configuration can write an entry your real traffic never hits. This means using an explicit cache breakpoint rather than automatic caching , since automatic caching places the breakpoint on the last block, which here is the placeholder. The placeholder user message can be any string with non-whitespace content (the examples here use "warmup" ); its content is read into the model but never answered. 
+  A pre-warm request incurs a cache write charge if the prefix is not already cached, the same as any other request. Check usage.cache_creation_input_tokens in the response to confirm a write occurred. Zero output tokens are billed. 
+ cURL CLI Python TypeScript C# Go Java PHP Ruby  client = anthropic.Anthropic() 
+# Fire this before users arrive to warm the shared system-prompt cache. 
+ prewarm = client.messages.create( 
+ model = "claude-opus-5" , 
+ max_tokens = 0 , 
+ system = [ 
+ { 
+ "type" : "text" , 
+ "text" : "You are an expert software engineer with deep knowledge of distributed systems..." , 
+ "cache_control" : { "type" : "ephemeral" }, 
+ } 
+ ], 
+ messages = [{ "role" : "user" , "content" : "warmup" }], 
+ ) 
+ print (prewarm.stop_reason) # "max_tokens" 
+ print (prewarm.content) # [] 
+ print (prewarm.usage) 
+ The API returns an empty content array: 
+ Output  { 
+ "id" : "msg_01XFDUDYJgAACzvnptvVoYEL" , 
+ "type" : "message" , 
+ "role" : "assistant" , 
+ "content" : [], 
+ "model" : "claude-opus-5" , 
+ "stop_reason" : "max_tokens" , 
+ "stop_sequence" : null , 
+ "usage" : { 
+ "input_tokens" : 8 , 
+ "cache_creation_input_tokens" : 5120 , 
+ "cache_read_input_tokens" : 0 , 
+ "cache_creation" : { 
+ "ephemeral_5m_input_tokens" : 5120 , 
+ "ephemeral_1h_input_tokens" : 0 
+ }, 
+ "iterat
