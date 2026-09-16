@@ -577,13 +577,19 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     if (convId) { conds.push('conversation_id=?'); p.push(convId); }
     if (shellId) { conds.push('shell_id=?'); p.push(shellId); }
     if (cat && AUDIT_CATS[cat]) { conds.push(auditCatConds(cat)); p.push(...AUDIT_CATS[cat]); }
-    const fetch = (tbl) => db.query(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM ${tbl} WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...p, n]);
+    const fetch = () => storage.audit.adminList({ conds, params: p, limit: n });
     let rows;
-    if (archived === 'all') {
-      const [cur, arc] = await Promise.all([fetch('audit_log'), fetch('audit_log_archive')]);
-      rows = [...cur.map((r) => ({ ...r, archived: 0 })), ...arc.map((r) => ({ ...r, archived: 1 }))].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, n);
+    if (archived === 'all' || archived === '1') {
+      // 归档表那半边**仍是 SQL**（`audit_log_archive` 只在 MySQL 介质里有；JSON 侧"归档"口径待拍板，
+      // 见收口表第十九节的第 5 项）——这里如实保留原实现，不假装支持。
+      const tbl = archived === '1' ? 'audit_log_archive' : null;
+      if (tbl) rows = (await db.query(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM ${tbl} WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...p, n])).map((r) => ({ ...r, archived: 1 }));
+      else {
+        const [cur, arc] = await Promise.all([fetch(), db.query(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log_archive WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...p, n])]);
+        rows = [...cur.map((r) => ({ ...r, archived: 0 })), ...arc.map((r) => ({ ...r, archived: 1 }))].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, n);
+      }
     } else {
-      rows = (await fetch(archived === '1' ? 'audit_log_archive' : 'audit_log')).map((r) => ({ ...r, archived: archived === '1' ? 1 : 0 }));
+      rows = (await fetch()).map((r) => ({ ...r, archived: 0 }));
     }
     res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })), categories: Object.keys(AUDIT_CATS) });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }

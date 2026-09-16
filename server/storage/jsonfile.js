@@ -910,6 +910,57 @@ function makeApi(holder, save, { persist }) {
         else rows = rows.slice(0, 200);
         return rows.map((r) => ({ id: r.id, action: r.action, detail: r.detail ?? null, shell_id: r.shellId ?? null, created_at: r.createdAt ?? null }));
       },
+      /**
+       * 审计管理视图（`GET /api/audit` 的活表分支）：与 mysql 侧同一条口径——**条件串由调用方按既有口径拼好**，
+       * 本实现只认那几种受限形式（`列=值` / `列 LIKE 值` / `created_at > NOW() - INTERVAL ? DAY` / 分类的
+       * `action IN (…)`），看不懂就**如实抛**（绝不"当没条件"把全表放出去）。
+       */
+      async adminList({ conds = ['1=1'], params = [], limit = 100 } = {}) {
+        const p = [...params];
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? n : 100;
+        let rows = rowsOf('audit');
+        for (const raw of conds) {
+          const c = String(raw).trim();
+          if (c === '1=1') continue;
+          let m;
+          if ((m = /^\(action LIKE \? OR detail LIKE \?\)$/i.exec(c))) {
+            const a = String(p.shift() || '').replace(/%/g, '');
+            const b = String(p.shift() || '').replace(/%/g, '');
+            rows = rows.filter((r) => String(r.action || '').includes(a) || String(r.detail || '').includes(b));
+            continue;
+          }
+          if ((m = /^created_at > NOW\(\) - INTERVAL \? DAY$/i.exec(c))) {
+            const days = Number(p.shift()) || 0;
+            const floor = Date.now() - days * 86400000;
+            rows = rows.filter((r) => new Date(r.createdAt || 0).getTime() > floor);
+            continue;
+          }
+          if ((m = /^action IN \(([?\s,]+)\)$/i.exec(c))) {
+            const k = (m[1].match(/\?/g) || []).length;
+            const want = new Set(Array.from({ length: k }, () => String(p.shift())));
+            rows = rows.filter((r) => want.has(String(r.action)));
+            continue;
+          }
+          if ((m = /^(\w+)=\?$/.exec(c))) {
+            // 列名 → 记录字段名（这份介质里存的是中性字段名；调用方给的是既有 SQL 的列名）
+            const COL2FIELD = { account_id: 'accountId', conversation_id: 'conversationId', shell_id: 'shellId', action: 'action' };
+            const field = COL2FIELD[m[1]];
+            if (!field) { const e = new Error('JSON 介质的审计管理视图不认识这一列：' + m[1]); e.code = 'STORAGE_UNSUPPORTED'; throw e; }
+            const val = p.shift();
+            rows = rows.filter((r) => (field === 'action' ? String(r.action) === String(val) : Number(r[field]) === Number(val)));
+            continue;
+          }
+          const e = new Error('JSON 介质的审计管理视图不认识这个条件：' + c);
+          e.code = 'STORAGE_UNSUPPORTED';
+          throw e;
+        }
+        rows = rows.slice().reverse().slice(0, lim);
+        return rows.map((r) => ({
+          id: r.id, account_id: r.accountId ?? null, action: r.action ?? null, detail: r.detail ?? null,
+          conversation_id: r.conversationId ?? null, shell_id: r.shellId ?? null, created_at: r.createdAt ?? null,
+        }));
+      },
     },
 
     // ── 外部投递记录（幂等键 + 死信落点）：语义与 mysql 实现逐条对齐 ──────────────────────────    // 为什么它必须在第二个实现里也有：带 `Idempotency-Key` 的 `POST /api/chat` 第一件事就是 `beginDelivery`，

@@ -271,6 +271,33 @@ function fakeMysql() {
       return [{ total: rows.reduce((a, r) => a + Number(r.cost || 0), 0), runs: uniq('agent_run_id'), convs: uniq('conversation_id') }];
     }
 
+    // `/api/audit` 活表分支（`audit.adminList`）：条件串由调用方拼（`1=1` 起头），按整段认
+    if (/^SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE (.+?) ORDER BY id DESC LIMIT \?$/i.test(q)) {
+      const where = /WHERE (.+?) ORDER BY id DESC LIMIT \?$/i.exec(q)[1];
+      const lim = Number(p.pop());
+      const conds = where.split(/\s+AND\s+/i).map((c) => c.trim()).filter((c) => c !== '1=1');
+      let rows = [...rowsOf(store, 'audit_log').values()];
+      for (const c of conds) {
+        let m2;
+        if ((m2 = /^\(action LIKE \? OR detail LIKE \?\)$/i.exec(c))) {
+          const a = String(p.shift() || '').replace(/%/g, ''); const b = String(p.shift() || '').replace(/%/g, '');
+          rows = rows.filter((r) => String(r.action || '').includes(a) || String(r.detail || '').includes(b));
+        } else if ((m2 = /^created_at > NOW\(\) - INTERVAL \? DAY$/i.exec(c))) {
+          const days = Number(p.shift()) || 0; const floor = Date.now() - days * 86400000;
+          rows = rows.filter((r) => new Date(r.created_at || 0).getTime() > floor);
+        } else if ((m2 = /^action IN \(([?\s,]+)\)$/i.exec(c))) {
+          const k = (m2[1].match(/\?/g) || []).length;
+          const want = new Set(Array.from({ length: k }, () => String(p.shift())));
+          rows = rows.filter((r) => want.has(String(r.action)));
+        } else if ((m2 = /^(\w+)=\?$/.exec(c))) {
+          const col = m2[1]; const val = p.shift();
+          rows = rows.filter((r) => Number(r[col]) === Number(val));
+        } else throw new Error('假 pool 不认识的审计条件：' + c);
+      }
+      return rows.sort((a, b) => Number(b.id) - Number(a.id)).slice(0, lim)
+        .map((r) => ({ id: r.id, account_id: r.account_id ?? null, action: r.action ?? null, detail: r.detail ?? null, conversation_id: r.conversation_id ?? null, shell_id: r.shell_id ?? null, created_at: r.created_at ?? null }));
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -741,6 +768,16 @@ function contractSuite(label, make, caps) {
     assert.deepEqual(Object.keys(trace[0]).sort(), ['action', 'created_at', 'detail', 'id', 'shell_id'], '列名与改造前那条 SQL 逐字一致（前端读它们）');
     assert.ok(trace.length <= 50, 'limit 生效');
     assert.deepEqual(await s.audit.traceByConversation({ conversationId: 999, limit: 5 }), [], '没这个会话＝空数组');
+    // 审计管理视图（`GET /api/audit` 活表分支）：条件串由调用方按既有口径拼，列名与改造前逐字一致
+    await s.audit.append({ accountId: 1, action: 'tool:db_query', detail: '{"sql":"SELECT 1"}', conversationId: 7, shellId: null });
+    const adm = await s.audit.adminList({ conds: ['1=1', 'conversation_id=?'], params: [7], limit: 10 });
+    assert.deepEqual(adm.map((r) => r.action), ['tool:db_query'], '按会话过滤：' + JSON.stringify(adm.map((r) => r.action)));
+    assert.deepEqual(Object.keys(adm[0]).sort(), ['account_id', 'action', 'conversation_id', 'created_at', 'detail', 'id', 'shell_id'], '列名与改造前那条 SQL 逐字一致');
+    assert.equal(adm.length <= 10, true, 'limit 生效');
+    const like = await s.audit.adminList({ conds: ['1=1', '(action LIKE ? OR detail LIKE ?)'], params: ['%prefix:exempt%', '%prefix:exempt%'] });
+    assert.equal(like.every((r) => r.action === 'prefix:exempt'), true, 'LIKE 条件按既有口径过滤');
+    // 看不懂的条件：两个实现都必须**如实抛**（JSON 侧带 STORAGE_UNSUPPORTED 码，MySQL 侧由介质自己报错）
+    await assert.rejects(() => s.audit.adminList({ conds: ['有些不认识的条件'] }), /不认识/, '看不懂的条件必须如实抛（绝不"当没条件"把整表放出去）');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {

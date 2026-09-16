@@ -100,7 +100,7 @@ export const CONTRACT = {
     // 只迁这一处读，是因为它在**每轮都在跑的路径**上 —— 写口迁了而它没迁，干净机器上"先读后写"仍然整段失败
     // （实测：`/api/chat` 的前缀账在 jsonfile 下被 catch 吞掉，介质里只有 `tool:*` 那一类审计）。
     // **其余读法（/api/audit 列表 + 归档 + 前缀账统计 + /trace）仍走 SQL**，如实登记在收口表。
-    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation'],
+    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation', 'adminList'],
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],

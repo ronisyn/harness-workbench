@@ -710,6 +710,17 @@ function makeApi(r) {
         return r.many('SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=? OR detail LIKE ? ORDER BY id DESC' + lim,
           [conversationId, '%conv=' + conversationId + '%']);
       },
+      /**
+       * **审计管理视图**（`GET /api/audit`，`archived=0` 那条活表分支）：条件串与列名逐字沿用改造前那条 SQL
+       * （`conds` 由调用方按既有口径拼好传进来：`1=1` 起头 + q/天数/会话/壳/分类）。返回**未脱敏**的行，
+       * 脱敏留给路由（它原来就在出口做 `redactSecrets`——那是展示层口径，不属介质）。
+       * 归档表那半边**不在本方法里**（`archived=1|all` 要两表合并，等 `events/audit` 归档口径拍板后一起做）。
+       */
+      async adminList({ conds = ['1=1'], params = [], limit = 100 } = {}) {
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? n : 100;
+        return r.many(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, lim]);
+      },
     },
 
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */
