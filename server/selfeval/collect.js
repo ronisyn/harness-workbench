@@ -22,8 +22,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
-import { db } from '../db.js';
-import { storage } from '../storage/index.js';   // 2026-09-18：读法逐步迁到存储接口（见 collectFailures）
+// 2026-09-18：本文件已**不再直连数据库**（最后一条 SQL 随第五十二轮迁完），`db` 的 import 随之删掉。
+import { storage } from '../storage/index.js';   // 唯一的读数出口（见 collectFailures 上方的说明）
 import {
   REAL_WHERE, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, ORPHAN_WHERE,
   classifyConversationIds, cohortOf,   // 2026-09-18：分档判据只有一份（与上面那些 SQL 片段同源）
@@ -120,15 +120,12 @@ export function sourceFingerprint(relPath, root = ROOT) {
   }
 }
 
-// ── ② 查库（每个读数一个函数，全部只读）──────────────────────────────────────────────────
-const sel = async (dbc, sql, params) => {
-  try { return await dbc.query(sql, params); } catch (e) { return [{ __err: String(e.message || e) }]; }
-};
+// ── ② 读数（每个读数一个函数，全部只读；**一律走存储接口**）─────────────────────────────────
+// 2026-09-18：本文件的最后一条直连 SQL 也迁完了 —— `sel(dbc, sql)` 这个原生查询包装已无使用者，
+// 随之删掉（"删除因为你这次改动而变得无用的函数"）。现在唯一的出口是 `viaInterface`：
+// 接口方法出错时**抛**，而本模块的报错口径只有一种（`[{__err}]` ＋ `failed()`），所以在这里适配一次。
 const failed = (rows) => Array.isArray(rows) && rows.length === 1 && rows[0] && rows[0].__err ? rows[0].__err : null;
 
-// 走**存储接口**的读法包装（2026-09-18）：接口方法出错时**抛**，而本模块的报错口径只有一种
-// （`[{__err}]` ＋ `failed()`），所以在这里适配一次 —— 报错形状与直连 SQL 那条路**完全一致**，
-// 上层的 `errors` 汇总、`looksLikeConnectionError` 的判定一个字都不用改。
 const viaInterface = async (p) => {
   try { return await p; } catch (e) { return [{ __err: String(e.message || e) }]; }
 };
