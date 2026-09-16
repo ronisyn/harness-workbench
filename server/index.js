@@ -1222,6 +1222,10 @@ app.post('/api/chat', requireAuth, async (req, res) => {
   res.on('close', onDisconnect);
   let agentRunId = null; // 长任务现场 id（Agent 路径登记，异常时也要标记）
   let skipStore = false; // stopped 时跳过落库/统计（但仍走统一清理）
+  // ⚠️ `light` 必须**在 try 之外**声明：它在 `catch` 的异常帧里也要用（`capabilitySummary({... __light: light})`）。
+  //    写成 try 体内的 `const light` 会让**异常路径本身**再抛 `ReferenceError: light is not defined`
+  //    ——错误帧发不出去、客户端只看到断流（2026-09-16 真机日志实测到：`at server/index.js:1514`）。
+  let light = false;
   try {
     // P1 统一工具通道（2026-09 批1）：删除 needsTools 双路径——所有对话统一走 runAgent 执行循环，
     // needsTools 仅降级为 schema 宽度选择：任务词命中 → 全量工具；纯问答 → LIGHT_TOOLSET 轻量 schema
@@ -1231,7 +1235,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     //   翻一次整段前缀作废（落库指纹当场抓到：同会话两轮出现两种 tools 指纹）。这与架构硬约束**真冲突**，
     //   现已按"单向粘滞"收口：**会话一旦用过全量面，此后固定全量面**（最多翻转一次，且只朝更宽的方向）。
     const faceFull = Number(convRow.faceFull || 0) === 1;
-    const light = !needsTools(content) && !faceFull;
+    light = !needsTools(content) && !faceFull;
     if (!light && !faceFull) {
       // 标记本会话已进入全量面（单向，不可回退）；写失败不影响本轮（下次再写）
       storage.conversations.update(conversationId, { faceFull: 1 })

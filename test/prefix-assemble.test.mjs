@@ -117,7 +117,10 @@ test('组装侧不变式②：账本接线在位 —— 落 prefix:assemble，�
   // `server/prefix-assemble.js`（三条入口同源），所以 index.js 里不再有 `laneSrc` 那一行；
   // 位置关系改看落账调用点。**lane 内容**由行为判据兜底（下面那两条），比"源码里出现过哪一行"更硬。
   const ledger = src.indexOf('await recordPrefixAssemble({');
-  const lightLine = src.indexOf('const light = !needsTools(content)');
+  // 锚点改成"赋值形状"而不是"`const` 声明"：`light` 现在**在 try 之外声明、在 try 内赋值**
+  // （异常帧也要用它 —— 写成 try 体内的 const 会让 catch 自己抛 ReferenceError，2026-09-16 真机日志实测）。
+  // 判据没变：落账必须发生在 light 定型之后。
+  const lightLine = src.search(/^\s*(?:const\s+)?light = !needsTools\(content\)/m);
   assert.ok(ledger > 0 && lightLine > 0 && ledger > lightLine, 'lane 必须在 light 定型之后才算（否则轻量面翻转会被误判成改写）');
 });
 
