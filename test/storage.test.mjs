@@ -1099,6 +1099,52 @@ test('[mysql] 归档机制：先搬后删、只删搬过的那批、统计形状
   assert.equal(calls2.some((c) => c === 'RUN'), false, '插入没成功 ⇒ DELETE 一个字都不许发');
 });
 
+test('[契约] 失败率三个读数：真实/探针分档、无码归显式档、时间窗（两个实现同跑）', async () => {
+  // 口径＝scripts/failure-report.mjs：真实会话＝conversation_id > 0；探针/孤儿（<=0 或 NULL）单独报数、
+  // 不混进分母。JSON 侧在夹具里直接种行（它是真实现，不是替身）；MySQL 侧喂**真实现** + 只认这三种形状的假库。
+  const { storage: js } = makeJsonFile();
+  const seed = (o) => js.toolCalls.append({ conversationId: 1, toolName: 'run_command', status: 'ok', ...o });
+  await seed({});
+  await seed({ status: 'fail', errorCode: 'E_TOOL_TIMEOUT' });
+  await seed({ status: 'fail', errorCode: 'E_TOOL_TIMEOUT' });
+  await seed({ status: 'fail', errorCode: null });
+  await seed({ conversationId: 0, status: 'fail', errorCode: 'E_PROBE' });      // 探针：不算真实
+  await seed({ conversationId: -1, status: 'ok' });                            // 探针：连成功也不算真实
+  const t = await js.toolCalls.failureTotals({ days: 7 });
+  assert.deepEqual(t, { calls: 4, fails: 3, probe_calls: 2, probe_fails: 1 }, '探针行不进 calls/fails，但单独报数');
+  assert.deepEqual(await js.toolCalls.failByCode({ days: 7 }),
+    [{ code: 'E_TOOL_TIMEOUT', n: 2, tools: 1 }, { code: '(无码/存量行)', n: 1, tools: 1 }], '无码归显式档、多的在前');
+  assert.deepEqual(await js.toolCalls.failByTool({ days: 7, limit: 20 }),
+    [{ tool: 'run_command', code: 'E_TOOL_TIMEOUT', n: 2 }, { tool: 'run_command', code: '(无码)', n: 1 }]);
+  // 时间窗：JSON 侧按进程时钟筛（行是刚种的，所以这里只验"别把 0 当上限"），真窗参数在 mysql 侧断言
+  const fake0 = { async query() { return []; }, async run() { return {}; } };
+
+  // MySQL 侧：假库只认这三种形状（形状改了当场红），键名必须与迁移前逐字一致（快照的形状不许改）
+  const seen = [];
+  const params = [];
+  const fake = {
+    async query(sql, p) {
+      seen.push(sql.replace(/\s+/g, ' ').trim().slice(0, 300));
+      params.push(p);
+      if (/SELECT COUNT\(\*\) calls/.test(sql)) return [{ calls: 4, fails: 3, probe_calls: 2, probe_fails: 1 }];
+      if (/GROUP BY code/.test(sql)) return [{ code: 'E_TOOL_TIMEOUT', n: 2, tools: 1 }];
+      if (/GROUP BY tool_name, code/.test(sql)) return [{ tool: 'run_command', code: 'E_TOOL_TIMEOUT', n: 2 }];
+      throw new Error('假库不认识的语句：' + sql);
+    },
+    async run() { return {}; },
+  };
+  const my = createMysqlStorage({ db: fake });
+  assert.deepEqual(await my.toolCalls.failureTotals({ days: 7 }), { calls: 4, fails: 3, probe_calls: 2, probe_fails: 1 });
+  assert.deepEqual(await my.toolCalls.failByCode({ days: 7 }), [{ code: 'E_TOOL_TIMEOUT', n: 2, tools: 1 }]);
+  assert.deepEqual(await my.toolCalls.failByTool({ days: 7 }), [{ tool: 'run_command', code: 'E_TOOL_TIMEOUT', n: 2 }]);
+  assert.equal(seen.length, 3, '各一次查询，不多不少');
+  assert.deepEqual(params[0], [7, 7, 7], '时间窗是**参数化**传下去的（三个窗口＝总数/探针数/探针失败数）');
+  assert.deepEqual(params[1], [7]);
+  assert.deepEqual(params[2], [7]);
+  assert.match(seen[0], /^SELECT COUNT\(\*\) calls/, '语句形状沿用迁移前那条（含两个探针子查询）');
+  assert.match(seen[2], /LIMIT 20$/, '按工具汇总那条带 LIMIT（上限不许无界）');
+});
+
 // ── 选择点与迁移示范（源码级：这两条才是"可替换"的机检）────────────────────────────────────
 test('单一选择点：全仓只有 env.js 声明、storage/index.js 选择（绕过它就等于没抽象）', () => {
   const walk = (dir) => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap((it) => {

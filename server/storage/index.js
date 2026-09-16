@@ -93,7 +93,7 @@ export const CONTRACT = {
     // —— 接口上不留"不带账号"的读法，就不会有人把 D3/OP-01 那条边界漏掉（上一轮的 `/api/deliveries` 就是这么漏的）。
     conversations: ['create', 'get', 'update', 'findOwned', 'listByAccount', 'updateOwned', 'touch', 'exists', 'remove'],
     messages: ['append', 'list', 'recent', 'count', 'history', 'guardAppend', 'countByTool', 'removeByConversation'],
-    toolCalls: ['append', 'list', 'recent', 'attachToMessage', 'removeByConversation', 'traceByConversation'],
+    toolCalls: ['append', 'list', 'recent', 'attachToMessage', 'removeByConversation', 'traceByConversation', 'failureTotals', 'failByCode', 'failByTool'],
     settings: ['get', 'set', 'all', 'getMany'],
     agentRuns: ['create', 'getLatest', 'update'],
     events: ['append', 'read', 'archiveBatch'],

@@ -360,6 +360,42 @@ function makeApi(r) {
         const res = await r.exec('DELETE FROM tool_calls WHERE conversation_id=?', [conversationId]);
         return Number((res && res.affectedRows) || 0);
       },
+      /**
+       * 失败率的**总数**（口径＝`scripts/failure-report.mjs`，2026-09-18 从 `selfeval/collect.js` 迁来）。
+       * 边界（"什么算真实会话"）留在介质里：`conversation_id > 0` ＝ 真实会话；探针/孤儿（<=0 或 NULL）
+       * 单独报数、**不混进分母**。两个实现必须给出同一条判据（契约用例同跑）。
+       * 键名与迁移前**逐字一致**（`calls/fails/probe_calls/probe_fails`）：快照是给人看/给 M3 判据读的，
+       * 换实现不该改报告的形状。
+       */
+      async failureTotals({ days = 7 } = {}) {
+        const d = Number(days) > 0 ? Number(days) : 7;
+        const row = await r.one(
+          `SELECT COUNT(*) calls, COALESCE(SUM(status='fail'),0) fails,
+                  (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND created_at > NOW() - INTERVAL ? DAY) probe_calls,
+                  (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND status='fail' AND created_at > NOW() - INTERVAL ? DAY) probe_fails
+             FROM tool_calls WHERE conversation_id > 0 AND created_at > NOW() - INTERVAL ? DAY`, [d, d, d]);
+        const g = (k) => Number((row && row[k]) || 0);
+        return { calls: g('calls'), fails: g('fails'), probe_calls: g('probe_calls'), probe_fails: g('probe_fails') };
+      },
+      /** 失败按 `error_code` 汇总（`{code, n, tools}`；无码/存量行归到一个显式档，不静默丢）。 */
+      async failByCode({ days = 7 } = {}) {
+        const d = Number(days) > 0 ? Number(days) : 7;
+        const rows = await r.many(
+          `SELECT COALESCE(error_code,'(无码/存量行)') code, COUNT(*) n, COUNT(DISTINCT tool_name) tools
+             FROM tool_calls WHERE status='fail' AND conversation_id > 0 AND created_at > NOW() - INTERVAL ? DAY
+            GROUP BY code ORDER BY n DESC`, [d]);
+        return rows.map((row) => ({ code: row.code, n: Number(row.n || 0), tools: Number(row.tools || 0) }));
+      },
+      /** 失败按"工具 × 错误码"汇总（前 N 条）。 */
+      async failByTool({ days = 7, limit = 20 } = {}) {
+        const d = Number(days) > 0 ? Number(days) : 7;
+        const n = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
+        const rows = await r.many(
+          `SELECT tool_name tool, COALESCE(error_code,'(无码)') code, COUNT(*) n
+             FROM tool_calls WHERE status='fail' AND conversation_id > 0 AND created_at > NOW() - INTERVAL ? DAY
+            GROUP BY tool_name, code ORDER BY n DESC LIMIT ${n}`, [d]);
+        return rows.map((row) => ({ tool: row.tool, code: row.code, n: Number(row.n || 0) }));
+      },
     },
 
     settings: {

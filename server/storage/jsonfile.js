@@ -562,6 +562,52 @@ function makeApi(holder, save, { persist }) {
         if (n) await commit();
         return n;
       },
+      /**
+       * 失败率那三个读数（2026-09-18 与 mysql 侧同批迁入）：判据逐条对齐 ——
+       * `conversationId > 0` ＝ 真实会话，探针/孤儿单独报数、不混进分母；时间窗按**进程本地时钟**减天数
+       * （与 `usage.roundRowsByAccount` 同一套算法），无码/存量行归到显式档。键名与迁移前逐字一致。
+       */
+      async failureTotals({ days = 7 } = {}) {
+        const floor = Date.now() - (Number(days) > 0 ? Number(days) : 7) * 86400000;
+        const rows = rowsOf('toolCalls').filter((r) => new Date(r.createdAt || 0).getTime() >= floor);
+        let calls = 0; let fails = 0; let probeCalls = 0; let probeFails = 0;
+        for (const r of rows) {
+          const real = Number(r.conversationId) > 0;
+          const bad = r.status === 'fail';
+          if (real) { calls++; if (bad) fails++; } else { probeCalls++; if (bad) probeFails++; }
+        }
+        return { calls, fails, probe_calls: probeCalls, probe_fails: probeFails };
+      },
+      /** 失败按错误码汇总（`{code, n, tools}`；无码归 '(无码/存量行)'，与 mysql 的 COALESCE 同义）。 */
+      async failByCode({ days = 7 } = {}) {
+        const floor = Date.now() - (Number(days) > 0 ? Number(days) : 7) * 86400000;
+        const by = new Map();
+        for (const r of rowsOf('toolCalls')) {
+          if (r.status !== 'fail' || !(Number(r.conversationId) > 0)) continue;
+          if (new Date(r.createdAt || 0).getTime() < floor) continue;
+          const code = r.errorCode === null || r.errorCode === undefined ? '(无码/存量行)' : r.errorCode;
+          const cur = by.get(code) || { code, n: 0, tools: new Set() };
+          cur.n += 1; cur.tools.add(r.toolName ?? null);
+          by.set(code, cur);
+        }
+        return [...by.values()].map((x) => ({ code: x.code, n: x.n, tools: x.tools.size })).sort((a, b) => b.n - a.n);
+      },
+      /** 失败按"工具 × 错误码"汇总（前 N 条；无码归 '(无码)'，与 mysql 侧同字面）。 */
+      async failByTool({ days = 7, limit = 20 } = {}) {
+        const floor = Date.now() - (Number(days) > 0 ? Number(days) : 7) * 86400000;
+        const n = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
+        const by = new Map();
+        for (const r of rowsOf('toolCalls')) {
+          if (r.status !== 'fail' || !(Number(r.conversationId) > 0)) continue;
+          if (new Date(r.createdAt || 0).getTime() < floor) continue;
+          const code = r.errorCode === null || r.errorCode === undefined ? '(无码)' : r.errorCode;
+          const k = String(r.toolName) + '\u0000' + code;
+          const cur = by.get(k) || { tool: r.toolName ?? null, code, n: 0 };
+          cur.n += 1;
+          by.set(k, cur);
+        }
+        return [...by.values()].sort((a, b) => b.n - a.n).slice(0, n);
+      },
     },
 
     settings: {

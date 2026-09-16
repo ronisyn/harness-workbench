@@ -37,6 +37,24 @@ function makeFakeDb(handler) {
       const r = handler(sql, params);
       return Array.isArray(r) ? r : [];
     },
+    // 存储接口那一半（2026-09-18）：`collectFailures` 已改走接口（`toolCalls.*`），所以这个假库
+    // 也要提供"介质方法"。**值仍从同一个 handler 来**（把迁移前那条 SQL 的形状原样喂给 handler），
+    // 所以快照里的数字一个字没变 —— 这本身就是"换实现不改调用方"的机检：同一批样本，
+    // 走接口与走 SQL 必须给出同一份快照（`test/selfeval.test.mjs` 的断言逐条比的就是这个）。
+    toolCalls: {
+      async failureTotals({ days = 7 } = {}) {
+        const r = handler('SELECT COUNT(*) calls FROM tool_calls WHERE conversation_id > 0 AND created_at > NOW() - INTERVAL ? DAY', [days, days, days]);
+        return (Array.isArray(r) && r[0]) || {};
+      },
+      async failByCode({ days = 7 } = {}) {
+        const r = handler('SELECT COALESCE(error_code,"") code, COUNT(*) n, COUNT(DISTINCT tool_name) tools FROM tool_calls WHERE status="fail" AND conversation_id > 0 GROUP BY code ORDER BY n DESC', [days]);
+        return Array.isArray(r) ? r : [];
+      },
+      async failByTool({ days = 7, limit = 20 } = {}) {
+        const r = handler('SELECT tool_name tool, COALESCE(error_code,"") code, COUNT(*) n FROM tool_calls WHERE status="fail" AND conversation_id > 0 GROUP BY tool_name, code ORDER BY n DESC LIMIT 20', [days, limit]);
+        return Array.isArray(r) ? r : [];
+      },
+    },
   };
 }
 

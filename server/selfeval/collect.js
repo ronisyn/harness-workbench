@@ -23,6 +23,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT } from '../config.js';
 import { db } from '../db.js';
+import { storage } from '../storage/index.js';   // 2026-09-18：读法逐步迁到存储接口（见 collectFailures）
 import {
   REAL_WHERE, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, ORPHAN_WHERE,
 } from '../cohort.js';
@@ -124,6 +125,13 @@ const sel = async (dbc, sql, params) => {
 };
 const failed = (rows) => Array.isArray(rows) && rows.length === 1 && rows[0] && rows[0].__err ? rows[0].__err : null;
 
+// 走**存储接口**的读法包装（2026-09-18）：接口方法出错时**抛**，而本模块的报错口径只有一种
+// （`[{__err}]` ＋ `failed()`），所以在这里适配一次 —— 报错形状与直连 SQL 那条路**完全一致**，
+// 上层的 `errors` 汇总、`looksLikeConnectionError` 的判定一个字都不用改。
+const viaInterface = async (p) => {
+  try { return await p; } catch (e) { return [{ __err: String(e.message || e) }]; }
+};
+
 /**
  * 采集错误里哪些是**连不上库**（㉔ 指标回归门禁必须分清"窗口里真没数据"与"库根本读不到"：
  * 前者是正常读数，后者是**盲改**）。判据取既有驱动/池子的报错原文，不新造错误码。
@@ -198,25 +206,21 @@ export async function collectLedger({ dbc = db, days = DEFAULT_DAYS } = {}) {
   };
 }
 
-/** 失败率（口径＝`scripts/failure-report.mjs`：真实会话 status='fail' 按 error_code 汇总） */
-export async function collectFailures({ dbc = db, days = DEFAULT_DAYS } = {}) {
+/** 失败率（口径＝`scripts/failure-report.mjs`：真实会话 status='fail' 按 error_code 汇总）
+ *  2026-09-18：三条读法**改走存储接口**（`toolCalls.failureTotals/failByCode/failByTool`）——
+ *  迁移前它们直连 SQL ⇒ 干净机器（jsonfile 介质）上"失败率"这一格整块是空的。
+ *  返回形状与迁移前**逐字一致**（键名 `calls/fails/probe_calls/probe_fails`、`{code,n,tools}`、`{tool,code,n}`）：
+ *  快照是给人看、也给 M3 判据读的，换介质不该改报告的形状。
+ *  `dbc` 这个注入缝仍在（默认真存储），失败时如实进 `errors`（不吞、也不假装是空数据）。
+ */
+export async function collectFailures({ dbc = storage, days = DEFAULT_DAYS } = {}) {
   const d = Math.max(1, Math.floor(Number(days) || DEFAULT_DAYS));
-  const REAL = 'conversation_id > 0';
-  const totals = await sel(dbc,
-    `SELECT COUNT(*) calls, COALESCE(SUM(status='fail'),0) fails,
-            (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND created_at > NOW() - INTERVAL ? DAY) probe_calls,
-            (SELECT COUNT(*) FROM tool_calls WHERE conversation_id<=0 AND status='fail' AND created_at > NOW() - INTERVAL ? DAY) probe_fails
-       FROM tool_calls WHERE ${REAL} AND created_at > NOW() - INTERVAL ? DAY`, [d, d, d]);
-  const byCode = await sel(dbc,
-    `SELECT COALESCE(error_code,'(无码/存量行)') code, COUNT(*) n, COUNT(DISTINCT tool_name) tools
-       FROM tool_calls WHERE status='fail' AND ${REAL} AND created_at > NOW() - INTERVAL ? DAY
-      GROUP BY code ORDER BY n DESC`, [d]);
-  const byTool = await sel(dbc,
-    `SELECT tool_name tool, COALESCE(error_code,'(无码)') code, COUNT(*) n
-       FROM tool_calls WHERE status='fail' AND ${REAL} AND created_at > NOW() - INTERVAL ? DAY
-      GROUP BY tool_name, code ORDER BY n DESC LIMIT 20`, [d]);
+  const totals = await viaInterface(dbc.toolCalls.failureTotals({ days: d }));
+  const byCode = await viaInterface(dbc.toolCalls.failByCode({ days: d }));
+  const byTool = await viaInterface(dbc.toolCalls.failByTool({ days: d, limit: 20 }));
+  const t = failed(totals) ? null : (Array.isArray(totals) ? (totals[0] || null) : (totals || null));
   return {
-    totals: failed(totals) ? null : (totals[0] || null),
+    totals: t && !t.__err ? t : null,
     byCode: failed(byCode) ? [] : byCode,
     byTool: failed(byTool) ? [] : byTool,
     errors: [failed(totals), failed(byCode), failed(byTool)].filter(Boolean),
