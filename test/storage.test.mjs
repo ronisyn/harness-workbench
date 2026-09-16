@@ -322,7 +322,7 @@ function fakeMysql() {
     }
 
     // 按天读数（仪表 30 天线）：`GROUP BY DATE(created_at)` 的形状，按整段认
-    if (/^SELECT DATE\(created_at\) d, COALESCE\(SUM\(cache_hit_tokens\),0\) hit, COALESCE\(SUM\(cache_miss_tokens\),0\) miss, COUNT\(\*\) n\s+FROM usage_stats u WHERE u\.account_id=\? AND u\.kind='round' AND u\.created_at >= DATE_SUB\(NOW\(\), INTERVAL \? DAY\)\s+GROUP BY DATE\(created_at\) ORDER BY d$/i.test(q)) {
+    if (/^SELECT DATE_FORMAT\(created_at, '%Y-%m-%d'\) d, COALESCE\(SUM\(cache_hit_tokens\),0\) hit, COALESCE\(SUM\(cache_miss_tokens\),0\) miss, COUNT\(\*\) n\s+FROM usage_stats u WHERE u\.account_id=\? AND u\.kind='round' AND u\.created_at >= DATE_SUB\(NOW\(\), INTERVAL \? DAY\)\s+GROUP BY DATE_FORMAT\(created_at, '%Y-%m-%d'\) ORDER BY d$/i.test(q)) {
       const acc = Number(p.shift());
       const byDay = new Map();
       for (const r of rowsOf(store, 'usage_stats').values()) {

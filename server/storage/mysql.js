@@ -678,9 +678,13 @@ function makeApi(r) {
        * （MySQL 是会话时区、JSON 是进程时区）——这一点沿用改造前的口径，不改判据。
        */
       async dailyByAccount({ accountId, days = 30 } = {}) {
-        return r.many(`SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
+        // `DATE_FORMAT(...)` 而不是 `DATE(...)`：后者的返回值经 mysql2 是 **Date 对象**，序列化出去是
+        //   "Mon Sep 14 2026 00:00:00 GMT+0800"，而调用方（仪表）按 `YYYY-MM-DD` 找"今天那一行" ⇒ 永远找不到
+        //   （实测：`daily` 里明明有今天的数据，而 `todayHit/todayMiss` 恒为 0）。接口的契约写的就是
+        //   "`d` 是 `YYYY-MM-DD`"，这里让 MySQL 侧真的按契约给 —— 两个介质形状一致，那条对账也才成立。
+        return r.many(`SELECT DATE_FORMAT(created_at, '%Y-%m-%d') d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
              FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
-             GROUP BY DATE(created_at) ORDER BY d`, [accountId, Number(days) || 30]);
+             GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d') ORDER BY d`, [accountId, Number(days) || 30]);
       },
     },
 
