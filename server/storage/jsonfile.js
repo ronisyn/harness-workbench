@@ -48,7 +48,11 @@ export const STORE_FORMAT_VERSION = 1;
 // 不是"缺一步"。这个常量只用来给**链校验**一个底盘：链里若有更早的步（夹具合成的 v0→v1），底盘以链为准。
 export const STORE_FORMAT_FIRST_VERSION = 1;
 /** 本实现**支持的表**；不在这张表里的实体一律显式抛错（"加实体"的落点见文件头注释）。 */
-const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions'];
+// `knowledge`（2026-09-17 加）：不在存储契约的"必需实体"里，加它只有一个原因 —— **第二个检索实现**
+// （`server/kbsearch/like.js`，`RW_KB_SEARCH=like`）不碰 SQL，它的记录只能从这套接口读。
+// 有它在表里，夹具/嵌入方才能把条目放进这份 JSON 文件并被 `storage.knowledge.all()` 读到；
+// 不在这张表里的话，`loadDoc` 会把 `tables.knowledge` 当成未知表丢掉（而"丢了却不报错"最坏）。
+const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions', 'knowledge'];
 
 // 默认落点：工作区下的 storage/（与 spill/、.rw-checkpoints/ 同属"运行期产物"，不进仓库）。
 // 要挪位置得在 server/env.js 加一个 RW_STORAGE_FILE（env.js 是环境事实的唯一出处，本轮由协调方维护，
@@ -670,6 +674,18 @@ function makeApi(holder, save, { persist }) {
         const rows = rowsOf('events')
           .filter((r) => Number(r.conversationId) === Number(conversationId) && Number(r.id) > Number(afterId));
         return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
+      },
+    },
+
+    /**
+     * 知识库：给"第二个检索实现"（`server/kbsearch/like.js`）取记录用，**本实现只读**（没有写动词）。
+     * 过滤口径与 mysql 实现**逐条对齐**：只按账号收口，可见范围/状态守卫由检索层判（不在这里发明第二份）。
+     * 排序 `id ASC` 同上（mysql 侧那条 ORDER BY 的理由）：给一个稳定顺序，真正的排序在 `like.js` 里。
+     */
+    knowledge: {
+      async all(accountId) {
+        const rows = rowsOf('knowledge').filter((r) => Number(r.accountId) === Number(accountId));
+        return snap(rows);
       },
     },
 

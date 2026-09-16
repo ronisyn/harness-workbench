@@ -195,14 +195,15 @@ test('③ 可见范围片段：像 SQL 片段就整体括起来（不与后面�
 
 test('④ 选择点：默认 fts；未知后端**如实抛错**，不静默回落', () => {
   assert.equal(String(RW_KB_SEARCH).length > 0, true);
-  assert.deepEqual([...BACKEND_NAMES], ['fts'], '"有哪些后端"只有一个出处（实现表）');
+  assert.deepEqual([...BACKEND_NAMES], ['fts', 'like'], '"有哪些后端"只有一个出处（实现表）');
   assert.equal(selectBackend().id, 'fts', '缺省＝RW_KB_SEARCH，而它的缺省是 fts');
+  assert.equal(selectBackend('like').id, 'like', 'like（纯 JS 子串匹配）必须能被选择点选中');
   assert.equal(KB_SEARCH_BACKEND.id, 'fts');
   assert.equal(KB_SEARCH_BACKEND_NAME, KB_SEARCH_BACKEND.id);
-  for (const bad of ['vector', 'FTS', 'fts ', '', 'like']) {
+  for (const bad of ['vector', 'FTS', 'fts ', '', 'Like', 'js']) {
     assert.throws(() => selectBackend(bad), /未知检索后端/, '未知名字必须如实抛错（静默回落到 fts 会让人以为换了后端）：' + JSON.stringify(bad));
   }
-  assert.throws(() => selectBackend('vector'), /RW_KB_SEARCH 可选：fts/, '错误信息要说清可选值，否则运维只能读代码');
+  assert.throws(() => selectBackend('vector'), /RW_KB_SEARCH 可选：fts \/ like/, '错误信息要说清可选值，否则运维只能读代码');
 });
 
 test('④ 后端不满足接口时在**装配期**就抛（缺动词/缺 id，不等到第一次检索）', () => {
@@ -364,6 +365,9 @@ test('⑧ RW_KB_SEARCH 指到不存在的后端时**进程起不来**（启动�
   });
   const good = await load('fts');
   assert.equal(good.ok, true, 'fts 必须能装载（这条同时是对照，证明不是"怎么都失败"）：' + good.stderr);
+  // like 也要能装载：它是"没有 MySQL 的机器"上唯一可用的检索后端（2026-09-17 补）
+  const likeOk = await load('like');
+  assert.equal(likeOk.ok, true, 'like 必须能装载（干净机器上就是靠它）：' + likeOk.stderr);
   const bad = await load('vector');
   assert.equal(bad.ok, false, '未知后端必须让进程起不来');
   assert.match(bad.stderr, /未知检索后端/, '错误要说明白：' + bad.stderr.slice(0, 300));

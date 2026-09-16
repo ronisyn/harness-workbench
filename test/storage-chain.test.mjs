@@ -162,12 +162,24 @@ test('[jsonfile] 登录 → 会话 → 一轮（含工具调用）→ 落消息 
     assert.ok(k in msgs.body.messages[0], '/messages 的对外字段 ' + k + ' 丢了');
   }
 
-  // ⑦ 工具调用账的**读口**也要能读（走 storage.toolCalls.recent）。
-  // 这里只断言"读得动"：本轮明明执行过 list_dir，账上却是空的（写口还没迁）——那是**已登记的遗留**，
-  // 由下面的「机制断言②」第 ③ 条按"只减不增"盯着，不在这一条里假装它已经好了。
+  // ⑦ 工具调用账：**写口也迁到接口之后**（2026-09-17），这一轮真执行过的 list_dir 必须在账上，
+  // 而且形状与 mysql 链路上**逐字段相同**（`args` 是对象——真库 8583 行 JSON_TYPE 全是 OBJECT，
+  // 见交付报告 ②；`result_summary` 是字符串——TEXT 列）。只断言"数组"是不够的：账上一条都没有时
+  // 它也满足"是个数组"，那正是"读侧迁了、写侧没迁"能瞒过去的原因。
   const ledger = await j('/api/conversations/' + cid + '/toolcalls', { headers: H(token) });
   assert.equal(ledger.status, 200, '工具调用账的读口必须读得动：' + JSON.stringify(ledger.body));
   assert.ok(Array.isArray(ledger.body.toolcalls), '/toolcalls 要回一个数组');
+  assert.equal(ledger.body.toolcalls.length, 1, '本轮真执行过一次工具 ⇒ 账上必须有且只有一行：' + JSON.stringify(ledger.body));
+  const row = ledger.body.toolcalls[0];
+  assert.equal(row.tool_name, 'list_dir', '账上那行要是本轮真执行的那个工具');
+  assert.equal(row.status, 'done', '执行成功 ⇒ status=done（失败会落 fail）');
+  assert.equal(typeof row.args, 'object', 'args 必须是**对象**（与 mysql 链路同形；写成 JSON 字符串就是换了实现换形状）');
+  // 参数值本身不做逐字断言：`tool_calls.args` 记的是**实际执行**的参数，而平台的 before 钩子会把相对路径
+  // 归一成工作区绝对路径（本仓既有口径，见 tools/index.js 的 argsChanged/"参数经平台归一"）。所以只钉形状与键名。
+  assert.equal(typeof row.args.path, 'string', 'args 里要能看见本轮那个 path 参数');
+  assert.equal(typeof row.result_summary, 'string', 'result_summary 是 TEXT 列 ⇒ 字符串（不是对象）');
+  assert.ok(row.message_id > 0, '这一行要认领到那条 assistant 消息（attachToMessage 的回填）');
+  assert.ok(typeof row.created_at === 'string' && row.created_at.length > 0, 'created_at 由介质给');
 });
 
 test('[jsonfile] 第二轮（同一会话）的上下文里必须出现第一轮那两条消息——历史真的从存储里读回来', async () => {
@@ -271,6 +283,7 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
     '设置批量读取': 'settings.getMany',
     '事件账本': 'events.append',
     '工具调用账（读）': 'toolCalls.recent',
+    '工具调用账（写）': 'toolCalls.append',   // 2026-09-17 从"登记缺口"变成"已迁移"：写口也走接口了
   };
   for (const [what, name] of Object.entries(REQUIRED)) {
     assert.ok(has(name), what + ' 没有经过存储接口（期望 ' + name + '）。实际记录：' + [...names].sort().join(', '));
@@ -289,16 +302,20 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
   assert.deepEqual(unpaired, [], '这些实体在介质里有行，接口上却没有对应的写调用（＝绕过接口写的）：' + unpaired.join(', '));
 
   // ③ 反向的缺口：**事实已经发生、账上却没有行**的那一类。这一轮真的执行过一次工具（事件账里有 tool_done），
-  //    但 `toolCalls` 表 0 行、`toolCalls.append` 一次都没被调用过 —— 写入口仍在 `server/tools/index.js:1859`
-  //    （`INSERT INTO tool_calls …` 直连 MySQL，见 proposals 的 C-61），所以没有 MySQL 时每次工具调用都会
-  //    打一条 `[tool-audit] 留痕失败（工具已执行，但账本缺行）`。
-  //    判据是**只减不增**：登记项之外不许再出现这种缺口；将来谁把这条也迁了，本用例照样绿。
-  const KNOWN_UNPAIRED = ['toolCalls'];
+  //    所以介质里必须有 toolCalls 行、接口上必须有 toolCalls.append。2026-09-17 之前这里登记着
+  //    `KNOWN_UNPAIRED = ['toolCalls']`（写入口在 `server/tools/index.js:1859` 直连 MySQL，见 proposals 的 C-61；
+  //    没有 MySQL 时每次工具调用都打一条 `[tool-audit] 留痕失败（工具已执行，但账本缺行）`）。
+  //    **补上了就必须从名单里删掉**（登记项的意义是"还差什么"，不是"允许差什么"）——
+  //    所以现在这条是**正面判据**：没有行、或没有接口调用，都判红。
   assert.ok(rows('events').some((e) => e.type === 'tool_done'), '这一轮的事件账里应当有 tool_done（前面用例已断言工具真执行成功）');
   const gaps = [];
-  if (!has('toolCalls.append')) gaps.push('toolCalls');
-  const unregistered = gaps.filter((t) => !KNOWN_UNPAIRED.includes(t));
-  assert.deepEqual(unregistered, [], '这些实体"事实已发生却没经过接口"，且不在登记项里：' + unregistered.join(', '));
+  if (!rows('toolCalls').length) gaps.push('toolCalls 介质里 0 行');
+  if (!has('toolCalls.append')) gaps.push('toolCalls.append 没被调用过');
+  assert.deepEqual(gaps, [], '这一轮工具真执行过，账上却没有行/没经过接口（不允许再出现这类缺口）：' + gaps.join('；'));
+  // 行数也要对得上：本轮只执行一次工具 ⇒ 恰好一行（多行＝重复记账，那同样是账本不可信）
+  assert.equal(rows('toolCalls').length, 1, '本轮执行过一次工具 ⇒ 介质里恰好一行：' + rows('toolCalls').length);
+  assert.equal(rows('toolCalls')[0].toolName, 'list_dir');
+  assert.equal(typeof rows('toolCalls')[0].args, 'object', '落在文件里的 args 也是对象（与 /toolcalls 读到的一致）');
 });
 
 test('[jsonfile] 重启进程后：同一个 token 仍认得出人、同一会话与消息读得回来（数据在文件里，不在内存里）', async () => {

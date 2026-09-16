@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractPdf, extractDocx, extractXlsx, extractPptx } from './extract.js';
 import { db, bumpPolicyRev } from '../db.js';
+import { storage } from '../storage/index.js';
 import { chatOnce, calcCost } from '../llm/gateway.js';
 import { feishuConfigured, readFeishuDoc, readFeishuSheet, readFeishuBitable } from './feishu.js';
 import { createApproval, cancelApproval } from '../approval.js';
@@ -106,6 +107,30 @@ export function resultBytesOf(result) {
   try { s = JSON.stringify(result) ?? ''; } catch { s = ''; } // 循环引用等异常值不阻断主流程
   return Buffer.byteLength(s, 'utf8');
 }
+
+/**
+ * 账本上那一份参数的**形状还原**（2026-09-17，G1 收口：工具调用账的写口迁到存储接口时定的口径）。
+ *
+ * 为什么需要这一步（口径决策，原文见交付报告 ②）：
+ *   · **截断是"记什么"**——2000 字符上限 + 脱敏属于**调用点**（本文件），不动；
+ *   · **编码/解析是"怎么存"**——属于**接口**（`server/storage/*`：`enc()` 写 JSON 列时 stringify、
+ *     `dec()`/`toRecord()` 读时 parse）。所以调用点交给接口的应当是"参数本身"，不是替它先编码好的字符串。
+ *   · 真库口径：`tool_calls.args` 是 **JSON 列**，实测 8583 行 `JSON_TYPE` 全是 OBJECT、经 `dec()` 全给对象
+ *     ⇒ 对外形状（`GET /api/conversations/:id/toolcalls` 与 `/export` 读到的 `args`）就是**对象**。
+ *     若把已经 stringify 过的字符串直接交给接口，`enc()` 会**再编码一次**（存成 JSON 字符串标量），
+ *     `/toolcalls` 的 args 就从对象变成字符串 —— 那是"换个存储实现就改对外形状"。
+ * 判据（与 `mysql.js` 的 `dec()` 同一条纪律）：**能解析就还原成对象；截断切坏了就如实留成字符串** ——
+ *   `JSON.parse` 只在"已知来自 JSON.stringify 的串"上用，且**失败必须兜住**（截断恰好切在结构中间
+ *   是最常见的形态，让它抛就等于整次留痕丢行）。宁可这一行记的是"截断后的片段"（改造前也是这个内容），
+ *   也不许把"工具执行成功"变成"账本缺行"。
+ */
+export function decodeArgsForLedger(s) {
+  if (typeof s !== 'string') return s;
+  try { return JSON.parse(s); } catch { return s; } // 截断切坏 ⇒ 原样留串（不抛）
+}
+
+// 审计账本（audit_log）在这台机器上不可用时，只出声一次（理由见留痕块；避免每次工具调用刷屏）
+let auditUnavailable = false;
 // 路径安全：write 级限定工作区（limitPath 时检查）
 export const WORKSPACE = RW_WORKSPACE;
 // 技能根目录（F15）：skills/<名称>/SKILL.md
@@ -1022,7 +1047,10 @@ const RAW_TOOLS = [
       // 这一段（以及全仓唯一那份"知识怎么搜"的口径）搬进 `server/kbsearch/`：接口 + 唯一选择点 + 实现（fts=MySQL
       // FULLTEXT+ngram）。本处只把**可见范围**（kbVisibleWhere 统一出口）与关键词交给它——可见性口径仍只有一份。
       // 返回值 `mode` 如实标明这次走的是 fts（真全文）还是 like（索引不可用时的兜底），不静默假装是全文检索。
-      const r = await searchKnowledge(a.q, { db, where: v.where, params: v.params, limit: 8, snippet: 1200 });
+      // 2026-09-17：第二个实现（`like`＝纯 JS 子串匹配，零 SQL）上线后，这里把**两样都传上** ——
+      // fts 要 `db`（自己去问介质），like 要 `storage`（记录已读出来，它只做匹配与排序）。各取所需，
+      // 缺了自己那一样的实现会如实抛错（不会静默返回空数组）。
+      const r = await searchKnowledge(a.q, { db, storage, accountId: ctx.accountId, where: v.where, params: v.params, limit: 8, snippet: 1200 });
       return { items: r.items, mode: r.mode, backend: r.backend };
     } },
   { name: 'kb_del', description: '删除一条知识/记忆（按 kb_search 得到的 id；仅当前会话可见范围）', 
@@ -1830,39 +1858,60 @@ export async function execTool(name, args, ctx) {
   }
   // 留痕（audit_log + tool_calls；用户"停止"中止的不留痕，避免孤儿 fail 行回填到后续消息）
   if (!eff.__signal || !eff.__signal.aborted) {
+    // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
+    const rArgs = JSON.stringify(args).slice(0, 2000);
+    const rResult = JSON.stringify(result).slice(0, 2000);
+    // RA-05b 原始体积遥测：**在 2000 字符截断之前**量，单位字节（与 spill 的 32768 字节判定同口径）。
+    // 算的是 `JSON.stringify(result)` 的 UTF-8 字节数——即真正进 LLM 上下文的那份文本的体积。
+    // result_summary 只存前 2000 字符（大结果不可回查分布），此列是 spill 阈值标定的唯一数据源。
+    // 存量行可用同一条算式从"未截断的 result_summary"精确重建；被截断的行只能得下界（见 scripts/backfill-result-bytes.mjs）。
+    const rBytes = resultBytesOf(result);
+    // 失败码落账（2026-09-15 统一失败分类）：账本里从此能回答"最常见的是哪种失败"，
+    // 也能看出"被拦截"与"执行后失败"的区别（此前两者都只是 status=fail）。
+    const errCode = (result && result.code) ? String(result.code) : null;
+    // ① 工具调用账走**存储接口**（2026-09-17 G1 收口）：此前这一条是直连 MySQL 的 `INSERT INTO tool_calls …`，
+    //    于是 `RW_STORAGE=jsonfile` 的机器上"读侧已迁、写侧没迁"——每次工具调用都打一条
+    //    `[tool-audit] 留痕失败（工具已执行，但账本缺行）`，`/api/conversations/:id/toolcalls` 恒为 `[]`。
+    //    形状口径见 decodeArgsForLedger：args 交**对象**（真库 JSON 列读回来就是对象），result_summary 交字符串（TEXT 列）。
+    // ② 顺序：**先账本、后审计**。原来是 audit 先写，那条直连 MySQL 的语句在没有 MySQL 的机器上先抛，
+    //    把后面的 tool_calls 一起吞掉（同一条 try）。工具账是"事实发生过"的账本，优先级高于审计动作账。
     try {
-      // P0 安全修复：留痕前脱敏——args/result 中任何密钥形态（ghp_/sk-/Bearer）一律 [REDACTED] 后才落库
-      const rArgs = JSON.stringify(args).slice(0, 2000);
-      const rResult = JSON.stringify(result).slice(0, 2000);
-      // OP-03 尾巴：`tool_calls.args` 记的是**实际执行**的参数（审计"动作"要看这个），
-      // 但参数被改写过时要额外落一条 `hook:rewrite`，把"模型请求的"与"实际执行的"都留下——
-      // 此前这两者的区别没有任何记录，事后无法回答"日志里的是改写前还是改写后"。
-      const rewrites = (hookStop && Array.isArray(hookStop.rewrites)) ? hookStop.rewrites : [];
-      const argsChanged = rewrites.length > 0 || JSON.stringify(argsAsked) !== JSON.stringify(args);
-      if (argsChanged) {
-        const detail = redactSecrets(JSON.stringify({ tool: name, rewrites: rewrites.map((w) => ({ by: w.by, asked: w.asked, used: w.used })), asked: argsAsked, used: args })).slice(0, 1500);
-        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, 'hook:rewrite', detail, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
-        if (result && typeof result === 'object' && !Array.isArray(result)) {
-          result.hookRewrite = rewrites.length ? ('参数经 hook 改写（' + rewrites.map((w) => w.by).join(',') + '）') : '参数经平台归一（相对路径/占位符）';
-        }
-      }
-      // RA-05b 原始体积遥测：**在 2000 字符截断之前**量，单位字节（与 spill 的 32768 字节判定同口径）。
-      // 算的是 `JSON.stringify(result)` 的 UTF-8 字节数——即真正进 LLM 上下文的那份文本的体积。
-      // result_summary 只存前 2000 字符（大结果不可回查分布），此列是 spill 阈值标定的唯一数据源。
-      // 存量行可用同一条算式从"未截断的 result_summary"精确重建；被截断的行只能得下界（见 scripts/backfill-result-bytes.mjs）。
-      const rBytes = resultBytesOf(result);
-      // 失败码落账（2026-09-15 统一失败分类）：账本里从此能回答"最常见的是哪种失败"，
-      // 也能看出"被拦截"与"执行后失败"的区别（此前两者都只是 status=fail）。
-      const errCode = (result && result.code) ? String(result.code) : null;
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0, code: errCode })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
-      await db.query('INSERT INTO tool_calls (conversation_id, message_id, tool_name, args, result_summary, result_bytes, duration_ms, status, shell_id, error_code) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        [ctx.conversationId, ctx.messageId || null, name, redactSecrets(rArgs), redactSecrets(rResult), rBytes, Date.now() - t0, result.error ? 'fail' : 'done', ctx.shellId ?? null, errCode]);
+      await storage.toolCalls.append({
+        conversationId: ctx.conversationId, messageId: ctx.messageId || null, toolName: name,
+        args: decodeArgsForLedger(redactSecrets(rArgs)), resultSummary: redactSecrets(rResult), resultBytes: rBytes,
+        durationMs: Date.now() - t0, status: result.error ? 'fail' : 'done',
+        shellId: ctx.shellId ?? null, errorCode: errCode,
+      });
     } catch (e) {
       // 留痕失败**必须出声**：这里过去是静默 `catch {}`，于是"每次工具调用都少两行账"能瞒过所有人
       // 直到有人去查库（2026-09-15 实测：账本断了 40 分钟才被端到端冒烟发现）。
       // 工具已经执行完了，不能因为留痕失败就改判成败；但日志与自检必须能看见。
       console.error('[tool-audit] 留痕失败（工具已执行，但账本缺行）tool=' + name + ' conv=' + (ctx.conversationId || '-') + '：' + ((e && e.stack) || (e && e.message) || e));
+    }
+    // ③ OP-03 尾巴：`tool_calls.args` 记的是**实际执行**的参数（审计"动作"要看这个），
+    // 但参数被改写过时要额外落一条 `hook:rewrite`，把"模型请求的"与"实际执行的"都留下——
+    // 此前这两者的区别没有任何记录，事后无法回答"日志里的是改写前还是改写后"。
+    const rewrites = (hookStop && Array.isArray(hookStop.rewrites)) ? hookStop.rewrites : [];
+    const argsChanged = rewrites.length > 0 || JSON.stringify(argsAsked) !== JSON.stringify(args);
+    if (argsChanged) {
+      const detail = redactSecrets(JSON.stringify({ tool: name, rewrites: rewrites.map((w) => ({ by: w.by, asked: w.asked, used: w.used })), asked: argsAsked, used: args })).slice(0, 1500);
+      db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
+        [ctx.accountId ?? null, 'hook:rewrite', detail, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        result.hookRewrite = rewrites.length ? ('参数经 hook 改写（' + rewrites.map((w) => w.by).join(',') + '）') : '参数经平台归一（相对路径/占位符）';
+      }
+    }
+    // ④ 审计动作账仍直连 MySQL（`audit_log` 不在存储接口的契约里 —— 它是全账号审计面，不是引擎必需实体）。
+    //    **降级口径如实**：没有 MySQL 的机器上这条必然失败，但它不再是"账本缺行"：工具账已经落在介质上了。
+    //    只出声一次，措辞说清"少了哪一半"，免得日志里那一行又被当成"留痕整体失败"。
+    //    RA-05b 原始体积遥测（`result_bytes`）在①里已经落上了，它原本就与这条 audit 行无关。
+    try {
+      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0, code: errCode })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
+    } catch (e) {
+      if (!auditUnavailable) {
+        auditUnavailable = true;
+        console.error('[tool-audit] audit_log 不可用（工具调用账不受影响：它已落在存储介质上）tool=' + name + ' conv=' + (ctx.conversationId || '-') + '：' + ((e && e.message) || e) + '（本条只出声一次）');
+      }
     }
   }
   return result;

@@ -41,6 +41,12 @@ const COLS = {
     reason: 'reason', rounds: 'rounds', lastStep: 'last_step', toolCounts: 'tool_counts',
   },
   events: { conversationId: 'conversation_id', seq: 'seq', type: 'type', payload: 'payload' },
+  // 知识库（2026-09-17 加，**只读**：给 `kbsearch/like.js` 取记录用）。
+  // 只映射检索层真正要用的列：`related_component` 是管理面的展示列，不在列里（同接口层的字段清单）。
+  knowledge: {
+    accountId: 'account_id', scope: 'scope', conversationId: 'conversation_id', shellId: 'shell_id',
+    kind: 'kind', title: 'title', body: 'body', status: 'status',
+  },
   deliveries: {
     accountId: 'account_id', conversationId: 'conversation_id', idemKey: 'idem_key', requestHash: 'request_hash',
     state: 'state', messageId: 'message_id', runId: 'run_id', response: 'response_json',
@@ -50,6 +56,7 @@ const COLS = {
 const TABLES = {
   conversations: 'conversations', messages: 'messages', toolCalls: 'tool_calls', settings: 'settings',
   agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries', accounts: 'accounts', sessions: 'sessions',
+  knowledge: 'knowledge',
 };
 /** JSON 列：写时 stringify、读时 parse（MySQL 的 JSON 列在新旧驱动下有时给对象、有时给字符串）。 */
 const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 'svalue']);
@@ -486,6 +493,20 @@ function makeApi(r) {
         },
       };
     })(),
+    /**
+     * 知识库：给"第二个检索实现"（`server/kbsearch/like.js`）取记录用，**本实现只读**（没有写动词）。
+     * 为什么把过滤下推到 SQL：`kb_search` 的可见范围与状态守卫由检索层判（`kbVisibleWhere`），
+     * 这里只按账号收口——**不替调用方发明可见性口径**（那是同一件事的第二份出处）。
+     * 排序 `id ASC` 是"确定性"而不是"排序口径"：`like.js` 自己会重排（命中次数 → id DESC），
+     * 而这里给一个稳定顺序，免得"同一次查询两次结果不同"这种事出现在账本/夹具里。
+     */
+    knowledge: {
+      async all(accountId) {
+        const rows = await r.many('SELECT * FROM knowledge WHERE account_id=? ORDER BY id ASC', [accountId]);
+        return rows.map((row) => toRecord('knowledge', row));
+      },
+    },
+
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */
     impl: IMPL,
   };

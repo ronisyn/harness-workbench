@@ -8,8 +8,12 @@
 // 分层照 DSH（先问规矩），与本仓另两个先例同形：
 //   · `server/storage/index.js` —— 接口 + `createStorage()` 唯一选择点 + 未知名字抛错；
 //   · `server/exec/index.js`    —— 实现表 + `assertBackend()` 装配期校验 + `selectBackend()` 唯一选择点。
-//   · 本目录：`fts.js` ＝**当前唯一实现**（MySQL 8 FULLTEXT + `WITH PARSER ngram`，中文必须用 ngram，
-//     见 `tmp/fts-probe.mjs` 实测：本机 8.0.46、ngram 插件 ACTIVE、ngram_token_size=2）。
+//   · 本目录：`fts.js` ＝MySQL 8 FULLTEXT + ngram（中文必须用 ngram，见 `tmp/fts-probe.mjs` 实测：
+//     本机 8.0.46、ngram 插件 ACTIVE、ngram_token_size=2）；
+//     `like.js` ＝**纯 JS 子串匹配**（在已读出的记录上匹配与排序，零 SQL、零索引）——
+//     2026-09-17 补（G1 收口）：原先只有 fts 一个实现，**没有 MySQL 的机器上整条检索不可用**
+//     （`kb_search` 与错题召回都拿不到结果）。它是 fts 的**并列实现**，不是 fts 的兜底：
+//     选哪个由部署方在 `RW_KB_SEARCH` 上决定，`fts.js` 的行为一个字节都不改。
 //     DSH 的介质是 SQLite FTS5（`dsh-session-query-sqlite`）；**照它的口径、用我们自己的介质**：
 //     同一件事（倒排索引 + 相关度排序），介质换成 MySQL 的 FULLTEXT。不是把 FTS5 搬过来。
 //
@@ -19,6 +23,11 @@
 //   · 选择点 `RW_KB_SEARCH`（server/env.js）指过去即生效——调用方（kb_search）**一行都不用改**。
 // **本仓现在不写向量实现**（v0.3 §0.6 明确不做的范围 + 蓝图 P12 的否决：语义检索远期，且 harness 自身
 // 不靠 RAG）。留的是**位置**，不是空壳文件：接缝就是这份接口 + 选择点。
+//
+// 两个实现的输入面**不完全一样**（如实写在这里，不假装一致）：fts 收 `opts.db`（自己去问介质），
+// like 收 `opts.storage`（记录已经读出来，它只做匹配与排序）。这不是接口不统一，是介质不同：
+// 一个会发 SQL、一个不碰 SQL。两个动词的名字、返回形状、`limit`/`snippet`/`includeHistorical` 的同名同义
+// 全部一致 —— 调用方（`kb_search`）两个都传，各取所需即可（`search()` 的注释里逐条写明）。
 //
 // 接口动词**只有两个**，都是"现在真正要用的"（不预造）：
 //   `search(q, opts)`    搜索 → `{ items, mode, backend }`。`mode` 是**如实**标记这次走的是哪条路：
@@ -38,12 +47,13 @@
 //   第 ③ 组 + 交付报告里的一次性库实测输出。
 import { RW_KB_SEARCH } from '../env.js';
 import * as fts from './fts.js';
+import * as like from './like.js';
 
 /** 已注册的实现名（`RW_KB_SEARCH` 的取值域）。 */
-export const BACKEND_NAMES = Object.freeze(['fts']);
+export const BACKEND_NAMES = Object.freeze(['fts', 'like']);
 
 /** 实现表 —— **唯一选择点**。不加"自动探测/回落"：选错就在启动时炸掉（CI 也能钉住）。 */
-const BACKENDS = { fts };
+const BACKENDS = { fts, like };
 
 /**
  * 一个检索后端必须提供的动词（装配期校验；少一个在**装配期**就抛，不等到第一次检索才发现）。
@@ -78,17 +88,26 @@ export const KB_SEARCH_BACKEND_NAME = KB_SEARCH_BACKEND.id;
 /**
  * 检索知识（调用方给的可见范围条件 + 关键词）→ `{ items, mode, backend, degraded, detail? }`。
  *
+ * 两个实现对输入面各有要求（"要什么"由实现自己说话，本层不替它猜）：`fts` 要 `db`，`like` 要 `storage`/`rows`。
+ * 缺了自己要的那样时它**如实抛错**（`fts` 的"需要 opts.db"、`like` 的"需要 opts.storage"），
+ * 不静默返回空数组 —— 调用方把两样都传上，选哪个后端都成立。
+ *
  * @param {string} q 关键词（空白分词；空查询**不落库**，直接如实返回空数组）
  * @param {object} opts
- *   · `db`        —— 必填。MySQL 句柄（`{ query(sql, params) }`）。收参数而不是本模块直接 import
+ *   · `db`        —— `fts` 要：MySQL 句柄（`{ query(sql, params) }`）。收参数而不是本模块直接 import
  *                    `server/db.js`：夹具要能在**不连库**的情况下钉住 SQL 含 `MATCH … AGAINST`、
  *                    以及"MATCH 报错 ⇒ 回落 LIKE 且 mode 如实变 like"这条判据。
+ *   · `storage`   —— `like` 要：`server/storage/index.js` 的接口对象（`storage.knowledge.all(accountId)`）。
+ *                    记录由它读出，`like` 只在内存里匹配与排序（它不碰 SQL）。
+ *   · `rows`      —— `like` 的夹具缝：直接给一批记录（给了就不走 storage）。
+ *   · `accountId` —— `like` 取记录用（`fts` 不需要：可见范围已经在 `where` 里）。
  *   · `where` / `params` —— 可见范围条件与参数（**由 `server/knowledge.js` 的 `kbVisibleWhere()` 产出**，
  *                    本层不另写一份可见性口径——同一事实两份必然长歪）。调用方传的 where 若像一句
- *                    SQL 片段，本层把它整体括起来，不会与后面的关键词条件粘连。
+ *                    SQL 片段，`fts` 把它整体括起来、`like` 按 `like.js` 的文法求值（看不懂就抛，不静默放行）。
  *   · `limit`     —— 返回几条（缺省 8＝kb_search 既有口径）。**不设分数阈值**：见文件头。
  *   · `snippet`   —— body 截断到几个字符（缺省 1200＝kb_search 既有口径；0/负数＝不截断）。
- *   · `includeScore` —— 是否在每条里带 `score`（默认带；LIKE 路径没有分数 ⇒ 不带）。
+ *   · `includeScore` —— 是否在每条里带 `score`（默认带；`fts` 的 LIKE 兜底与 `like` 都只有"命中次数"这类
+ *                    非介质分数，`like` 如实把它标成 `score`＝命中次数并在 detail 里说明）。
  */
 export async function searchKnowledge(q, opts = {}) {
   return KB_SEARCH_BACKEND.search(q, opts);

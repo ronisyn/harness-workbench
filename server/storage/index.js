@@ -94,6 +94,10 @@ export const CONTRACT = {
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],
+    // 知识库（2026-09-17 加）：**不**为写加，为"第二个检索实现"加 —— `server/kbsearch/like.js` 不碰 SQL，
+    // 它的记录必须从这套接口读出来（`fts.js` 那边自己去问 MySQL，用不到本方法）。
+    // 现在只有 `all(accountId)` 一个动词：调用方（检索后端）真正用到的只有它，别的等有第二个使用者再加。
+    knowledge: ['all'],
     // 非必需：本轮示范迁移的第七个实体（`jsonfile.js` 对它显式抛"不支持"）
     // `list` 另接受**可选**的 `accountId` 过滤（`{state?, limit?, accountId?}`）：路由按调用者账号收口时用它，
     // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
@@ -119,6 +123,12 @@ export const FIELDS = {
   // （`days` 是 TTL、不是记录字段：绝对到期时间由介质自己算 —— MySQL 用库的 NOW()、JSON 用进程时钟，
   //  这一点两边不同，已在 `jsonfile.js` 里写明；契约里放 TTL 而不是绝对时间，是为了别把时钟源也搬到应用层）。
   sessions: ['token', 'accountId', 'expiresAt'],
+  // knowledge 的方法收的是具名参数（`all(accountId)`），这里列的是**记录形状**（读回来的行按它映射）：
+  // 字段名与 `server/db.js` 的 `knowledge` 表一一对应；`relatedComponent` 不在列里——
+  // 检索层用不到它（它是管理面的展示列），按"只收现在真正要用的"那条纪律不加。
+  // `createdAt` 也不在列里：它是**所有实体共有的介质时间戳**（`toRecord()` 按 `created_at` 统一带出），
+  // 不是 knowledge 特有的字段 —— 写进这张表反而会造成"有的实体登记了、有的没登记"的错觉。
+  knowledge: ['accountId', 'scope', 'conversationId', 'shellId', 'kind', 'title', 'body', 'status'],
   // deliveries 的方法收的是具名参数（不是整条记录），这里列的是它的**记录形状**：
   // `finish(id, patch)` 的 patch 按它校验，`findByKey`/`list` 回来的记录也按它映射。
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
@@ -145,6 +155,8 @@ export const REQUIRED = {
   toolCalls: ['toolName'],
   agentRuns: ['conversationId'],
   events: ['conversationId', 'type'],
+  // knowledge：**本实现只读**（只有 `all`）⇒ 不登记必需字段。登记的语义是"写入时缺了就报错"，
+  // 而这里没有写入口；给一个不会被任何写入路径读到的清单，只会让下一个人以为"写知识要走接口"。
 };
 
 /**

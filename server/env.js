@@ -78,8 +78,10 @@ export const RW_STORAGE = process.env.RW_STORAGE || 'mysql';
 // 执行后端（v0.3 §4.2 三层分离的第三层 / §5 跨平台）：选择 server/exec/ 下的实现。
 export const RW_EXEC_BACKEND = process.env.RW_EXEC_BACKEND || 'local';
 // 知识检索后端（v0.3 §4.3「记忆」行「全文检索打底…**向量留接口位置后补**」）：选择 server/kbsearch/ 下的实现。
-// 当前唯一实现＝fts（MySQL FULLTEXT + ngram）。这一行就是"向量留位置"的入口：将来写好向量实现模块、
-// 在 server/kbsearch/index.js 的实现表加一行，然后把这台机器的 RW_KB_SEARCH 指过去即生效——调用方不改。
+// 当前两个实现：`fts`（MySQL FULLTEXT + ngram，缺省）/ `like`（纯 JS 子串匹配，零 SQL —— 没有 MySQL 的机器
+// 用它在**已读出的记录**上检索；它**不是** fts 的兜底，是并列的第二个实现：`mode` 如实报 like、degraded=true）。
+// 将来写好向量实现模块、在 server/kbsearch/index.js 的实现表加一行，然后把这台机器的 RW_KB_SEARCH 指过去
+// 即生效——调用方不改（`kb_search` 已把 `db` 与 `storage` 两样都传上，各实现取自己要的那一样）。
 export const RW_KB_SEARCH = process.env.RW_KB_SEARCH || 'fts';
 // 提醒投递通道（v0.3 §5「提醒由产品层配置的通道投递，引擎提供通道接口」）：选择 `server/reminders/` 下的实现。
 // **默认空串 = 没配通道**（如实语义：本仓现在只有飞书一条真实通道，没有"默认通道"这回事）；
