@@ -81,6 +81,63 @@ export function realConversationIds({ conversations = [], probeLedgerConvIds = [
   return conversations.map((c) => Number(c.id)).filter((id) => !probe.has(id));
 }
 
+/**
+ * 把"一批用量行涉及的会话"按**五档**归类（JS 复算，2026-09-18 为遥测采集加）。
+ *
+ * 为什么需要它：`collectUsage` 原来对每一档各发两条带**跨表子查询**的 SQL（五档＝十条），
+ * 迁到存储接口后改成"**一次读回窗口内的行 + 在 JS 里按本函数的判据分档**"（裁定 A 的同一手法）。
+ * 判据仍**只有一份**：本函数与上面那些 SQL 片段共用同一组常量（`PROBE_TITLE_RE` /
+ * 定时任务标题前缀 / `SAMPLE_TASK_PREFIX`），并由 `test/cohort-classify.test.mjs` 逐档锁边界。
+ *
+ * 语义（与 SQL 逐条对应，**顺序即正确性**）：
+ *   ① `cid` 为空 ⇒ 孤儿（无会话上下文的执行，如 headless/探针直调 runAgent）；
+ *   ② 命中探针命名族、**或**出现在 `prefix:` 账本里 ⇒ 探针（账本那一支同时覆盖**已删除**的探针会话）；
+ *   ③ 会话查不到（已删）且不是探针 ⇒ 孤儿；
+ *   ④ 其余 ⇒ 真实流量族，再按标题前缀分「定时任务」；样本（`task-<id>` 且任务名带 `RA35样本-`）另算一档
+ *      ——它同时满足"定时任务"（标题其实也是 `定时任务：…`），所以「人发起」必须**显式排掉样本**
+ *      （与 `HUMAN_WHERE` 的注释同一条理由：不排就会同时算进两档，加总自检当场报不一致）。
+ * @param {{conversations?:Array<any>, probeLedgerConvIds?:Array<any>,
+ *          scheduledTasks?:Array<{id:any,name?:string}>}} o
+ *   `conversations` 是**已知**的会话记录（含 title/externalId）；调用方必须先把"涉及到的会话 id"
+ *   都查过一遍（查不到的就是已删）——这是"两次读法"的第一读，`realConversationIds` 的同一条纪律。
+ * @returns {{label:(cid:any)=>string, labels:Map<number,string>, byId:Map<number,any>}}
+ *   档位取值：`human` | `scheduled` | `sample` | `probe` | `orphan`（"真实流量"＝前三档之和）
+ */
+export function classifyConversationIds({ conversations = [], probeLedgerConvIds = [], scheduledTasks = [] } = {}) {
+  const re = new RegExp(PROBE_TITLE_RE);
+  const byId = new Map();
+  for (const c of conversations) byId.set(Number(c.id), c);
+  const ledger = new Set(probeLedgerConvIds.filter((x) => x !== null && x !== undefined).map((x) => Number(x)));
+  const taskName = new Map(scheduledTasks.map((t) => [Number(t.id), String((t && t.name) || '')]));
+  const labels = new Map();
+  const label = (cid) => {
+    if (cid === null || cid === undefined) return 'orphan';              // ① 无主行
+    const id = Number(cid);
+    if (labels.has(id)) return labels.get(id);
+    const c = byId.get(id);
+    let out;
+    // ② 探针两支（与 `PROBE_WHERE` 逐字对应）：命名族命中；**或**"账本里出现过且会话已不在"
+    //    ——后者专捞**已删除**的探针会话。注意"现存的会话哪怕落过 prefix 账也不算探针"
+    //    （2026-09-15 实测踩过：改造后每个新会话都落 prefix:*，不限定"已删除"会把真实会话误杀）。
+    if ((c && re.test(String(c.title || ''))) || (!c && ledger.has(id))) out = 'probe';
+    else if (!c) out = 'orphan';                                                  // ③ 查不到＝已删 ⇒ 孤儿
+    else {
+      const m = /^task-(\d+)$/.exec(String(c.externalId || ''));
+      const sample = !!m && String(taskName.get(Number(m[1])) || '').startsWith(SAMPLE_TASK_PREFIX);
+      out = sample ? 'sample' : (String(c.title || '').startsWith('定时任务：') ? 'scheduled' : 'human');   // ④
+    }
+    labels.set(id, out);
+    return out;
+  };
+  return { label, labels, byId };
+}
+
+/** 档位 → `collectUsage` 的五档（"真实流量"＝人发起 ∪ 定时任务 ∪ 样本；SQL 侧的 `REAL_WHERE` 同义）。 */
+export function cohortOf(label) {
+  if (label === 'human' || label === 'scheduled' || label === 'sample') return 'real';
+  return label;   // 'probe' | 'orphan'
+}
+
 // 真实流量内部再分「人发起」与「定时任务」：定时任务是平台自己每天跑的（`定时任务：` 前缀），
 // 它不是"用户真实使用"，但也不是探针 —— 混在一起会让"真实流量"这个说法失真。分开展示、合并不隐藏。
 export const SCHEDULED_WHERE = (alias = '') => {

@@ -26,6 +26,7 @@ import { db } from '../db.js';
 import { storage } from '../storage/index.js';   // 2026-09-18：读法逐步迁到存储接口（见 collectFailures）
 import {
   REAL_WHERE, HUMAN_WHERE, SCHEDULED_WHERE, PROBE_WHERE, ORPHAN_WHERE,
+  classifyConversationIds, cohortOf,   // 2026-09-18：分档判据只有一份（与上面那些 SQL 片段同源）
 } from '../cohort.js';
 import { loadGoldenItems } from '../canary.js';   // 金标条目**从随包的那一份读**（身份口径不许另立一套）
 
@@ -142,46 +143,101 @@ export function looksLikeConnectionError(text) {
 }
 
 
-/** usage_stats 一档（真实/人发起/定时/探针/孤儿）× 一个时间窗的 C1/C2/C3 原始行 */
-export async function collectUsage({ dbc = db, days = DEFAULT_DAYS, cutoff = null } = {}) {
+/** usage_stats 五档（真实/人发起/定时/探针/孤儿）× 一个时间窗的 C1/C2/C3 原始行
+ *  2026-09-18：**改走存储接口**，并且从"每档两条带跨表子查询的 SQL"（共十条）改成
+ *  "**一次读回窗口内的逐轮行 + 在 JS 里按 `cohort.js` 的同一套判据分档**"（裁定 A 的同一手法）：
+ *    · 分档判据**只有一份**（`classifyConversationIds`，与那些 SQL 片段共用同一组常量，有夹具逐档锁边界）；
+ *    · 一次读而非十次：进度/成本都更好，也不会再出现"某档忘了带时间窗"这类各写一套的偏差；
+ *    · 归类需要的两类事实也走接口：`prefix:` 账本（`audit.conversationIdsByActionPrefix`）与
+ *      定时任务两列（`scheduledTasks.listIdName`）。
+ *  **两处如实说明**：① 逐轮行现在**整体**截断（`LIMIT`），`truncated` 的语义从"该档超限"变成
+ *  "窗口整体超限"——更保守（宁可标真截断，也不假装全量），而 `limit` 字段与形状不变；
+ *  ② 归类所需的那几条读法若失败，记在**新增**的 `errors.classify` 里（只增不改），
+ *  此时分档会退化（探针只按标题族判），快照读得出来，不会静默。
+ */
+export async function collectUsage({ dbc = storage, days = DEFAULT_DAYS, cutoff = null } = {}) {
   const d = Math.max(1, Math.floor(Number(days) || DEFAULT_DAYS));
   const out = { days: d, cutoff, cohorts: {}, errors: {} };
-  const COHORTS = [
-    ['real', REAL_WHERE], ['human', HUMAN_WHERE], ['scheduled', SCHEDULED_WHERE],
-    ['probe', PROBE_WHERE], ['orphan', ORPHAN_WHERE],
-  ];
-  for (const [key, mk] of COHORTS) {
-    const where = mk('u');
-    // ① 基础计数与累计（真库本地时间；时间窗用参数化的 INTERVAL ? DAY，不用字符串拼时间）
-    const base = await sel(dbc,
-      `SELECT COUNT(*) rounds, COUNT(DISTINCT u.conversation_id) convs,
-              COALESCE(SUM(u.cache_hit_tokens),0) hit, COALESCE(SUM(u.cache_miss_tokens),0) miss,
-              COALESCE(ROUND(SUM(u.cost),6),0) cost
-         FROM usage_stats u
-        WHERE u.kind='round' AND ${where} AND u.created_at > NOW() - INTERVAL ? DAY`, [d]);
-    if (failed(base)) { out.errors[key] = failed(base); continue; }
-    // ② 逐轮 miss 全量取回（够算中位/P95；n 超过上限时如实标 truncated，**不静默截断后当全量**）
-    const LIMIT = 20000;
-    const rows = await sel(dbc,
-      `SELECT COALESCE(u.cache_miss_tokens,0) m, COALESCE(u.cache_hit_tokens,0) h, COALESCE(u.cost,0) cost,
-              u.conversation_id cid, u.agent_run_id rid
-         FROM usage_stats u
-        WHERE u.kind='round' AND COALESCE(u.cache_miss_tokens,0) IS NOT NULL AND ${where}
-          AND u.created_at > NOW() - INTERVAL ? DAY
-        ORDER BY u.id LIMIT ?`, [d, LIMIT + 1]);
-    if (failed(rows)) { out.errors[key] = failed(rows); continue; }
-    const truncated = rows.length > LIMIT;
-    const slice = truncated ? rows.slice(0, LIMIT) : rows;
-    out.cohorts[key] = { base: base[0] || {}, rounds: slice, truncated, limit: LIMIT };
+  const KEYS = ['real', 'human', 'scheduled', 'probe', 'orphan'];
+  const LIMIT = 20000;   // 与迁移前同一个上限（不发明新数字）
+  // ① 窗口内的逐轮行（一次读回；判据不进介质）
+  const raw = await viaInterface(dbc.usage.roundRows({ days: d, limit: LIMIT + 1 }));
+  if (failed(raw)) { for (const k of KEYS) out.errors[k] = failed(raw); return out; }
+  const truncated = raw.length > LIMIT;
+  const slice = truncated ? raw.slice(0, LIMIT) : raw;
+  // ② 归类的事实：prefix 账本 + 定时任务两列
+  const ledger = await viaInterface(dbc.audit.conversationIdsByActionPrefix('prefix:'));
+  const tasks = await viaInterface(dbc.scheduledTasks.listIdName());
+  if (failed(ledger) || failed(tasks)) {
+    // 只增的错误键：分档会退化（"已删的探针会话"捞不回来 / 样本档认不出），如实报出来
+    out.errors.classify = [failed(ledger), failed(tasks)].filter(Boolean).join('；');
   }
-  // ③ 成本 top 会话（C3：成本高度集中，见 v0.3 §0.3 的"三个长会话占 93%"）
-  const top = await sel(dbc,
-    `SELECT u.conversation_id cid, c.title, COUNT(*) rounds, COALESCE(ROUND(SUM(u.cost),6),0) cost
-       FROM usage_stats u LEFT JOIN conversations c ON c.id = u.conversation_id
-      WHERE u.kind='round' AND ${REAL_WHERE('u')} AND u.created_at > NOW() - INTERVAL ? DAY
-      GROUP BY u.conversation_id, c.title ORDER BY cost DESC LIMIT 10`, [d]);
-  out.topConversations = failed(top) ? [] : top;
-  if (failed(top)) out.errors.topConversations = failed(top);
+  // ③ 会话事实：按账号批量取；**取不到的再按 id 单查** —— 渠道会话的 `account_id` 可能是 NULL，
+  //    按账号取根本取不到它们（少这一步会把它们误判成孤儿，那是实打实的错分）
+  const accounts = [...new Set(slice.map((r) => r.accountId).filter((a) => a !== null && a !== undefined))];
+  const known = [];
+  const accErr = [];
+  for (const a of accounts) {
+    const list = await viaInterface(dbc.conversations.listByAccount(a));
+    if (failed(list)) { accErr.push('account ' + a + ': ' + failed(list)); continue; }
+    known.push(...(Array.isArray(list) ? list : []));
+  }
+  const have = new Set(known.map((c) => Number(c.id)));
+  const missing = [...new Set(slice.map((r) => r.conversationId).filter((id) => id !== null && id !== undefined && !have.has(Number(id))))];
+  for (const id of missing) {
+    const c = await viaInterface(dbc.conversations.get(id));
+    if (!failed(c) && c) known.push(c);
+  }
+  if (accErr.length) out.errors.classify = [out.errors.classify, ...accErr].filter(Boolean).join('；');
+  const cls = classifyConversationIds({
+    conversations: known,
+    probeLedgerConvIds: failed(ledger) ? [] : ledger,
+    scheduledTasks: failed(tasks) ? [] : tasks,
+  });
+  // ④ 分档累加（形状与迁移前逐字一致：base 五个键、rounds 行 `{m,h,cost,cid,rid}`、limit/truncated）
+  //    ⚠️ 关键：`classifyConversationIds` 给的档位是**五个标签**（human/scheduled/sample/probe/orphan），
+  //    而快照的五档里 `real` 是**前三档的并集**（`cohortOf` 只是那条并集关系的表达）。所以这里按**标签**
+  //    分桶、再让 `real` 取并集 —— 若直接拿 `cohortOf(label)` 当桶键，human/scheduled 两桶会永远是空的
+  //    （真机对账当场抓到过：real=410 而 human=0/scheduled=0，直查却是 13/397）。
+  const REAL_FAMILY = new Set(['human', 'scheduled', 'sample']);
+  const labelOfRow = new Map(slice.map((r) => [r, cls.label(r.conversationId)]));
+  // `scheduled` 那一档＝**标题以"定时任务："开头的全部**（含样本）—— 迁移前那条 `SCHEDULED_WHERE`
+  // 只按标题前缀判，样本的标题其实也是"定时任务：RA35样本-…"，所以它同时落进这一档；
+  // 而「人发起」显式排掉样本（`HUMAN_WHERE` 的注释写了理由：不排就会同时算进两档）。
+  // 于是三档的关系是：real = human ∪ scheduled(含样本) —— 真机对账把那 37 轮样本差值抓出来过一次。
+  const rowsOf = (k) => {
+    if (k === 'real') return slice.filter((r) => REAL_FAMILY.has(labelOfRow.get(r)));
+    if (k === 'scheduled') return slice.filter((r) => ['scheduled', 'sample'].includes(labelOfRow.get(r)));
+    return slice.filter((r) => labelOfRow.get(r) === k);
+  };
+  for (const k of KEYS) {
+    const rows = rowsOf(k);
+    // `COUNT(DISTINCT conversation_id)` 在 SQL 里**忽略 NULL** ⇒ 这里也一样（无主行不算一个会话；
+    // 真机对账抓到过：孤儿档直查 convs=0，而 JS 把 null 数成了 0 号会话）
+    const convs = new Set(rows.map((r) => r.conversationId).filter((v) => v !== null && v !== undefined).map(Number));
+    const sum = (f) => rows.reduce((a, r) => a + Number(f(r) || 0), 0);
+    out.cohorts[k] = {
+      base: {
+        rounds: rows.length, convs: convs.size,
+        hit: sum((r) => r.cacheHit), miss: sum((r) => r.cacheMiss),
+        cost: Math.round(sum((r) => r.cost) * 1e6) / 1e6,
+      },
+      rounds: rows.map((r) => ({ m: r.cacheMiss, h: r.cacheHit, cost: r.cost, cid: r.conversationId, rid: r.agentRunId })),
+      truncated, limit: LIMIT,
+    };
+  }
+  // ⑤ 成本 top 会话（C3：成本高度集中；口径＝"真实流量"档按会话汇总，取前 10）
+  const byCid = new Map();
+  for (const r of rowsOf('real')) {
+    const cid = Number(r.conversationId);
+    const cur = byCid.get(cid) || { cid, rounds: 0, cost: 0 };
+    cur.rounds += 1; cur.cost += Number(r.cost || 0);
+    byCid.set(cid, cur);
+  }
+  out.topConversations = [...byCid.values()]
+    .map((x) => ({ cid: x.cid, title: (cls.byId.get(x.cid) || {}).title ?? null, rounds: x.rounds, cost: Math.round(x.cost * 1e6) / 1e6 }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 10);
   return out;
 }
 
@@ -284,17 +340,25 @@ export function goldenSetIdentities(shells) {
 }
 
 
-/** 进化集/审批台水位（㉓ 的载体；**空转**是《符合性核对》§1.4 的核心症状，必须能一眼看见） */
-export async function collectPipeline({ dbc = db } = {}) {
-  const one = async (sql, p = []) => {
-    const r = await sel(dbc, sql, p);
-    return failed(r) ? { __err: failed(r) } : (r[0] || {});
+/** 进化集/审批台水位（㉓ 的载体；**空转**是《符合性核对》§1.4 的核心症状，必须能一眼看见）
+ *  2026-09-18：四条读法**改走存储接口**（只读聚合实体：`evoGoals/evoGoalTasks/evoMemos.count`、
+ *  `extensionDemands.countByStatus`）——迁移前直连 SQL ⇒ 干净机器（jsonfile 介质）上这一档读不到数。
+ *  返回形状与迁移前**逐字一致**（`{n}` / `{__err}` / `[{status, n}]`）：快照读的就是这几个键。
+ */
+export async function collectPipeline({ dbc = storage } = {}) {
+  const cnt = async (p) => {
+    const r = await viaInterface(p);
+    if (failed(r)) return { __err: failed(r) };
+    const v = Array.isArray(r) ? r[0] : r;
+    if (v === null || v === undefined) return { n: 0 };
+    return { n: typeof v === 'object' ? Number(v.n || 0) : Number(v) };
   };
+  const demands = await viaInterface(dbc.extensionDemands.countByStatus());
   return {
-    evoGoals: await one('SELECT COUNT(*) n FROM evo_goals'),
-    evoGoalTasks: await one('SELECT COUNT(*) n FROM evo_goal_tasks'),
-    evoMemos: await one('SELECT COUNT(*) n FROM evo_memos'),
-    demandsByStatus: await sel(dbc, 'SELECT status, COUNT(*) n FROM extension_demands GROUP BY status ORDER BY n DESC'),
+    evoGoals: await cnt(dbc.evoGoals.count()),
+    evoGoalTasks: await cnt(dbc.evoGoalTasks.count()),
+    evoMemos: await cnt(dbc.evoMemos.count()),
+    demandsByStatus: failed(demands) ? [] : demands,
   };
 }
 

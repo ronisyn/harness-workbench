@@ -29,6 +29,9 @@ const COLS = {
     accountId: 'account_id', channel: 'channel', permission: 'permission', preset: 'preset', mode: 'mode',
     project: 'project', title: 'title', provider: 'provider', model: 'model', shellId: 'shell_id',
     faceFull: 'face_full',
+    // 2026-09-18 加：`external_id` 是渠道/任务会话的**外部身份**（`task-<id>`、渠道侧 id…），
+    // cohort 复算要靠它判"这个会话是不是定时任务会话"。它是会话的事实字段，不是新发明的口径。
+    externalId: 'external_id',
   },
   messages: {
     conversationId: 'conversation_id', role: 'role', content: 'content', reasoning: 'reasoning',
@@ -744,6 +747,27 @@ function makeApi(r) {
              FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
              GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d') ORDER BY d`, [accountId, Number(days) || 30]);
       },
+      /**
+       * **窗口内全部逐轮读数**（不加账号/会话过滤；2026-09-18 为遥测采集的 cohort 复算加）。
+       * 为什么要有它：`collectUsage` 原来按**五档 cohort 各查两次**（档位判据是跨表子查询），
+       * 迁到接口后改成"**一次读回窗口内的行 + 在 JS 里按 `cohort.js` 的判据分档**"（裁定 A 的同一手法）——
+       * 一次读、判据只有一份，比"五档各发一条带子查询的 SQL"又快又不容易长歪。
+       * 返回**中性字段名**（`accountId` 也在内：调用方要按账号取会话列表来做归类）。
+       * `limit` 上界由调用方给（夹具里钉住"真截断了要如实标 truncated"）。
+       */
+      async roundRows({ days = 7, limit = 20001 } = {}) {
+        const d = Number(days) > 0 ? Number(days) : 7;
+        const n = Number(limit) > 0 ? Math.min(200000, Math.floor(Number(limit))) : 20001;
+        const rows = await r.many(
+          `SELECT account_id, conversation_id, agent_run_id, COALESCE(cache_hit_tokens,0) hit, COALESCE(cache_miss_tokens,0) miss, COALESCE(cost,0) cost
+             FROM usage_stats WHERE kind='round' AND created_at > NOW() - INTERVAL ? DAY ORDER BY id LIMIT ${n}`, [d]);
+        return rows.map((row) => ({
+          accountId: row.account_id === null || row.account_id === undefined ? null : Number(row.account_id),
+          conversationId: row.conversation_id === null || row.conversation_id === undefined ? null : Number(row.conversation_id),
+          agentRunId: row.agent_run_id === null || row.agent_run_id === undefined ? null : Number(row.agent_run_id),
+          cacheHit: Number(row.hit || 0), cacheMiss: Number(row.miss || 0), cost: Number(row.cost || 0),
+        }));
+      },
     },
 
     /**
@@ -903,6 +927,40 @@ function makeApi(r) {
       async listWithEvalRef() {
         const rows = await r.many("SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''");
         return rows.map((row) => toRecord('shells', row));
+      },
+    },
+
+    /** 归类要用的定时任务两列（见契约里的说明：只给归类的全部所需，不多给）。 */
+    scheduledTasks: {
+      async listIdName() {
+        const rows = await r.many('SELECT id, name FROM scheduled_tasks ORDER BY id');
+        return rows.map((row) => ({ id: Number(row.id), name: row.name ?? null }));
+      },
+    },
+
+    /** 遥测水位（只读聚合）：语句与迁移前 `collectPipeline` 里那几条逐字一致。 */
+    evoGoals: {
+      async count() {
+        const row = await r.one('SELECT COUNT(*) n FROM evo_goals');
+        return Number((row && row.n) || 0);
+      },
+    },
+    evoGoalTasks: {
+      async count() {
+        const row = await r.one('SELECT COUNT(*) n FROM evo_goal_tasks');
+        return Number((row && row.n) || 0);
+      },
+    },
+    evoMemos: {
+      async count() {
+        const row = await r.one('SELECT COUNT(*) n FROM evo_memos');
+        return Number((row && row.n) || 0);
+      },
+    },
+    extensionDemands: {
+      async countByStatus() {
+        const rows = await r.many('SELECT status, COUNT(*) n FROM extension_demands GROUP BY status ORDER BY n DESC');
+        return rows.map((row) => ({ status: row.status ?? null, n: Number(row.n || 0) }));
       },
     },
 

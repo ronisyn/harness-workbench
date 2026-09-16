@@ -451,10 +451,17 @@ function contractSuite(label, make, caps) {
       assert.equal(typeof (b ? (s[a] || {})[b] : s[a]), 'function', `缺方法 ${p}（契约里有、实现里没有）`);
     }
     assert.equal(typeof s.impl, 'string', '两个实现都要自报实现名（排障第一眼）');
-    // 契约里每个实体都要有字段清单（写错字段名＝静默丢数据，见下面那条用例）；settings 是键值，不是记录
-    for (const entity of Object.keys(CONTRACT.entities)) {
+    // 契约里每个**可写**实体都要有字段清单（写错字段名＝静默丢数据，见下面那条用例）。
+    // 2026-09-18 收窄判据到"有写动词的实体"：`FIELDS` 的用途是**写入校验**（它自己的注释就写明
+    // "写入时按它校验，免得传了个拼错的字段→数据静默丢了"）；只有聚合读法的实体（`evoGoals.count`、
+    // `extensionDemands.countByStatus`…）**根本没有记录形状**，为它们编一份清单才是"不预造"的反面。
+    // 写实体的这道闸门一个字没松：只要它有一个写动词，就必须声明字段清单。settings 是键值，不是记录。
+    const WRITE_VERBS = new Set(['append', 'create', 'insert', 'update', 'updateOwned', 'remove', 'removeVisible',
+      'set', 'finish', 'claimRetry', 'touch', 'archiveBatch', 'attachToMessage', 'removeByConversation']);
+    for (const [entity, verbs] of Object.entries(CONTRACT.entities)) {
       if (entity === 'settings') continue;
-      assert.ok(FIELDS[entity] && FIELDS[entity].length, `契约声明了 ${entity} 却没有字段清单（校验会退化成"什么都不许写"）`);
+      if (!verbs.some((v) => WRITE_VERBS.has(v))) continue;
+      assert.ok(FIELDS[entity] && FIELDS[entity].length, `契约声明了可写实体 ${entity} 却没有字段清单（校验会退化成"什么都不许写"）`);
     }
   });
 

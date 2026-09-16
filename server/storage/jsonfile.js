@@ -350,6 +350,38 @@ function makeApi(holder, save, { persist }) {
       },
     },
 
+    /**
+     * 归类用的定时任务两列：**本介质里没有 scheduled_tasks 表** ⇒ 如实给空列表
+     * （一份 JSON 存储文件里没有定时任务；于是"定时任务会话"这一档在干净机器上恒为空——那是事实）。
+     */
+    scheduledTasks: {
+      async listIdName() {
+        return [];
+      },
+    },
+
+    /** 遥测水位：那四张表都不在 JSON 介质里 ⇒ 计数如实为 0 / 分组为空（"没有"是事实，不是"读不到"）。 */
+    evoGoals: {
+      async count() {
+        return 0;
+      },
+    },
+    evoGoalTasks: {
+      async count() {
+        return 0;
+      },
+    },
+    evoMemos: {
+      async count() {
+        return 0;
+      },
+    },
+    extensionDemands: {
+      async countByStatus() {
+        return [];
+      },
+    },
+
     impl: IMPL,
     /**
      * 介质自报能力（裁定 C）：本介质**没有** `events_archive` / `audit_log_archive` 两张归档表，
@@ -946,6 +978,20 @@ function makeApi(holder, save, { persist }) {
           byDay.set(d, cur);
         }
         return [...byDay.values()].sort((a, b) => (a.d < b.d ? -1 : 1));
+      },
+      /** 窗口内全部逐轮读数（中性字段名；与 mysql 侧同一条口径：`kind='round'` + 时间窗 + 按 id 升序）。 */
+      async roundRows({ days = 7, limit = 20001 } = {}) {
+        const floor = Date.now() - (Number(days) > 0 ? Number(days) : 7) * 86400000;
+        const n = Number(limit) > 0 ? Math.min(200000, Math.floor(Number(limit))) : 20001;
+        const rows = rowsOf('usage')
+          .filter((r) => r.kind === 'round' && new Date(r.createdAt || 0).getTime() >= floor)
+          .slice(0, n);
+        return rows.map((r) => ({
+          accountId: r.accountId === null || r.accountId === undefined ? null : Number(r.accountId),
+          conversationId: r.conversationId === null || r.conversationId === undefined ? null : Number(r.conversationId),
+          agentRunId: r.agentRunId === null || r.agentRunId === undefined ? null : Number(r.agentRunId),
+          cacheHit: Number(r.cacheHit || 0), cacheMiss: Number(r.cacheMiss || 0), cost: Number(r.cost || 0),
+        }));
       },
     },
 

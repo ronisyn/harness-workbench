@@ -66,12 +66,56 @@ function makeFakeDb(handler) {
         const row = (Array.isArray(r) && r[0]) || null;
         return row ? { createdAt: row.at ?? row.createdAt ?? null, detail: row.detail ?? null } : null;
       },
+      /** 分档要的"prefix 账本涉及过哪些会话"（夹具里空 ⇒ 探针只按标题族判，与迁移前那条 SQL 同义）。 */
+      async conversationIdsByActionPrefix() { return []; },
     },
     // 壳那条只读（2026-09-18）：值仍从同一个 handler 来，映射成契约里的中性字段名 `evalRef`
     shells: {
       async listWithEvalRef() {
         const r = handler("SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''", []);
         return (Array.isArray(r) ? r : []).map((s) => ({ id: s.id, skey: s.skey, name: s.name, evalRef: s.eval_ref ?? s.evalRef ?? null }));
+      },
+    },
+    // 用量读法那一半（2026-09-18）：`collectUsage` 改成"一次读回窗口内的行 + JS 分档"，
+    // 所以假库要提供 `usage.roundRows` 与会话事实（分档判据仍只有 `cohort.js` 一份）。
+    // **行是照着迁移前那套罐头值配的**，于是快照里的数（C1=0.9、中位 2000、P95 9000、探针 5 轮）
+    // 一个都没变 —— 这既是"换实现不改调用方"的机检，也顺手修掉了旧夹具的一处自相矛盾
+    // （旧夹具的 base 与逐轮明细是两套独立的罐头值：base 说 40 轮/缺 100000，明细却是 108000）。
+    usage: {
+      async roundRows({ days = 7, limit = 20001 } = {}) {
+        // 先拿迁移前那条 SQL 的形状问一次 handler：夹具用它模拟"库读不到"（C1c 就靠这条路径红），
+        // 返回值这里不用（下面的行是配好的），要的是**同样的失败路径**不被绕过。
+        handler("SELECT COALESCE(u.cache_miss_tokens,0) m FROM usage_stats u WHERE u.kind='round'", [days]);
+        const rows = [];
+        // 真实档 40 轮：36×2000 + 1×1000 + 3×9000 ⇒ Σmiss=100000（C1 = 900000/(900000+100000) = 0.9）、
+        // 中位 2000、P95 走最近秩 index 37 = 9000；Σhit=900000（22500/轮）、Σcost=12.5（0.3125/轮）
+        for (let i = 0; i < 40; i++) {
+          rows.push({ accountId: 7, conversationId: 184, agentRunId: i === 0 ? 7 : null, cacheHit: 22500, cacheMiss: i === 36 ? 1000 : (i >= 37 ? 9000 : 2000), cost: 0.3125 });
+        }
+        // 探针档 5 轮（Σhit=5000 / Σmiss=5000 / Σcost=0.2 —— 与迁移前罐头值逐项相同）
+        for (let i = 0; i < 5; i++) rows.push({ accountId: 7, conversationId: 900, agentRunId: null, cacheHit: 1000, cacheMiss: 1000, cost: 0.04 });
+        return rows.slice(0, limit);
+      },
+    },
+    // 分档要用会话事实（标题 / 外部身份）：夹具给两条（一条真实、一条探针族），其余 id 查不到＝孤儿
+    conversations: {
+      async listByAccount() {
+        return [{ id: 184, title: '真实长会话' }, { id: 900, title: '__probe__ 夹具探针会话' }];
+      },
+      async get() { return null; },
+    },
+    // 归类用的定时任务两列（夹具里没有定时任务 ⇒ 空；真实介质的读数在真机对账里比）
+    scheduledTasks: {
+      async listIdName() { return []; },
+    },
+    // 遥测水位四张表（2026-09-18）：值仍从同一个 handler 来
+    evoGoals: { async count() { const r = handler('SELECT COUNT(*) n FROM evo_goals'); return (Array.isArray(r) && r[0] && Number(r[0].n)) || 0; } },
+    evoGoalTasks: { async count() { const r = handler('SELECT COUNT(*) n FROM evo_goal_tasks'); return (Array.isArray(r) && r[0] && Number(r[0].n)) || 0; } },
+    evoMemos: { async count() { const r = handler('SELECT COUNT(*) n FROM evo_memos'); return (Array.isArray(r) && r[0] && Number(r[0].n)) || 0; } },
+    extensionDemands: {
+      async countByStatus() {
+        const r = handler('SELECT status, COUNT(*) n FROM extension_demands GROUP BY status ORDER BY n DESC');
+        return Array.isArray(r) ? r : [];
       },
     },
     toolCalls: {

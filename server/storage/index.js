@@ -100,7 +100,7 @@ export const CONTRACT = {
     // 用量记账（2026-09-17 加**写口**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时自落账并支持
     // 离线导出（默认开启）」。迁移前只有直连 SQL 一条路 ⇒ 干净机器上成本计量是空的（"省钱"这条主线在客户机
     // 上没有数）。本轮只迁**写口**：读法（C1–C5 报表 / 仪表 / 遥测 / 会话导出）仍走 SQL，如实登记。
-    usage: ['append', 'summaryByConversation', 'summaryByAccount', 'roundRowsByAccount', 'dailyByAccount'],
+    usage: ['append', 'summaryByConversation', 'summaryByAccount', 'roundRowsByAccount', 'dailyByAccount', 'roundRows'],
     // 审计账（2026-09-17 加**写口**＋**一处读**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时
     // 自落账并支持离线导出（默认开启）」。`lastDetail` 是**跨轮前缀账**的对照读法（每一轮都要读上一行）：
     // 只迁这一处读，是因为它在**每轮都在跑的路径**上 —— 写口迁了而它没迁，干净机器上"先读后写"仍然整段失败
@@ -131,6 +131,17 @@ export const CONTRACT = {
     // JSON 介质上返回**空列表**（那份文件里没有壳定义）——这是事实，不是"不支持"：
     // 干净机器上没有壳＝没有金标可跑，与 `capabilities()` 那类能力缺失不是一回事。
     shells: ['listWithEvalRef'],
+    // 归类要用的**定时任务两列**（2026-09-18，为 cohort 复算加）：JS 侧要把"哪些会话是定时任务会话"
+    // 算出来（`定时任务：` 标题 + `external_id` 里的任务 id 指向哪条任务、任务名叫什么）。
+    // 只给 `{id, name}` 两列：那是归类的**全部**所需，别的列等真有第二个消费者再加（YAGNI）。
+    scheduledTasks: ['listIdName'],
+    // 遥测水位（㉓ 的载体：进化集/备忘录/审批台）。**只读聚合**，一表一方法 ——
+    // 与"实体＝表"的既有约定一致；先把遥测这条链跑通，编辑面（`/api/evo/*`、`/api/extensions/*`）
+    // 的迁移不在本批范围内（登记为清单外）。
+    evoGoals: ['count'],
+    evoGoalTasks: ['count'],
+    evoMemos: ['count'],
+    extensionDemands: ['countByStatus'],
   },
 };
 
@@ -140,7 +151,7 @@ export const CONTRACT = {
  * 这也是两个实现的共同语言：`mysql.js` 自己把中性名映射到列名，`jsonfile.js` 直接按它存。
  */
 export const FIELDS = {
-  conversations: ['accountId', 'channel', 'permission', 'preset', 'mode', 'project', 'title', 'provider', 'model', 'shellId', 'faceFull'],
+  conversations: ['accountId', 'channel', 'permission', 'preset', 'mode', 'project', 'title', 'provider', 'model', 'shellId', 'faceFull', 'externalId'],
   messages: ['conversationId', 'role', 'content', 'reasoning', 'model', 'provider', 'tokensIn', 'tokensOut'],
   toolCalls: ['conversationId', 'messageId', 'toolName', 'args', 'resultSummary', 'resultBytes', 'durationMs', 'status', 'errorCode', 'shellId'],
   agentRuns: ['conversationId', 'accountId', 'goal', 'status', 'reason', 'rounds', 'lastStep', 'toolCounts'],
