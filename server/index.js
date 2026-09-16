@@ -3199,20 +3199,18 @@ async function main() {
     // 异步 fire-and-forget：不阻塞 listen；无变化时**零调用**（只读 settings 比对指纹）。
     setTimeout(() => { checkEpochAndWarm().catch((e) => console.warn('[epoch] 启动检查异常:', e.message)); }, 2000).unref?.();
   });
-  // P11 MCP 看门狗（2026-09 安全修复随行）：配置了 mcp_servers 时，任一 client 意外退出（进程重启/子进程死亡）
-  // 后 60s 内自动重连并同步工具（否则会话静默缺 mcp_* 工具直到手动 reload）
+  // P11 MCP 看门狗（2026-09 安全修复随行）：任一 MCP 客户端意外退出（进程重启/子进程死亡）后 60s 内自动重连
+  // 并同步工具（否则会话静默缺 mcp_* 工具直到手动 reload）。
+  // 2026-09-17 修：判据搬到 `server/connectors.js` 的 `reconnectMissingDeclared()` —— 旧实现只读
+  // `settings.mcp_servers` ⇒ **`kind=mcp` 的连接器挂了不会被拉回来**；那份判据与 `reloadDeclaredSources`
+  // 现在同源（同一份声明面、同一个客户端池）。端点仍是薄壳：这里只做定时与日志。
   const mcpWatchdog = setInterval(async () => {
     try {
-      const mcp = await import('./mcp.js');
-      const { syncMcpTools } = await import('./tools/index.js');
-      const cfg = await getSetting('mcp_servers', []);
-      if (!Array.isArray(cfg) || cfg.length === 0) return;
-      const connected = mcp.listMcpClients();
-      const missing = cfg.filter((s) => s && s.id && !connected.some((c) => c.id === s.id));
-      if (missing.length === 0) return;
-      const r = await mcp.connectConfiguredMcps(); // 已连接的自动跳过（connectMcp 幂等）
-      const n = syncMcpTools(mcp.listMcpClients());
-      console.log('[mcp] 看门狗重连 ' + missing.map((s) => s.id).join(',') + ' → ' + JSON.stringify(r) + ' 注册工具 ' + n);
+      const { reconnectMissingDeclared } = await import('./connectors.js');
+      const r = await reconnectMissingDeclared();
+      if (!r.missing.length) return;
+      console.log('[mcp] 看门狗重连 ' + r.missing.join(',') + ' → 实际回来 ' + JSON.stringify(r.reconnected)
+        + ' 注册工具 ' + r.registeredTools + (r.failures.length ? ' 失败：' + r.failures.join('；') : ''));
     } catch (e) { console.error('[mcp] 看门狗失败:', e.message); }
   }, 60000);
   if (mcpWatchdog.unref) mcpWatchdog.unref(); // 不阻塞进程退出

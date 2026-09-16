@@ -308,6 +308,58 @@ export async function connectConfiguredConnectors(dbc = db) {
 }
 
 /**
+ * 声明的 MCP 源 id：**两份声明合起来看**（`settings.mcp_servers` ∪ `settings.connectors` 里 kind=mcp 的）。
+ * 抽成纯函数，是为了让"看门狗该盯哪些源"这条判据能被夹具直接打（不必起进程、不必等 60 秒）。
+ * `connectorsOk=false`（声明非法）时**只认 mcp_servers**：声明写坏时那半边冻结，不该按坏声明去重连。
+ */
+export function declaredMcpIds(mcpRaw, connList, { connectorsOk = true } = {}) {
+  const mcpIds = Array.isArray(mcpRaw) ? mcpRaw.filter((s) => s && s.id).map((s) => String(s.id)) : [];
+  const connIds = (connectorsOk && Array.isArray(connList))
+    ? connList.filter((c) => c && c.kind === 'mcp' && c.id).map((c) => String(c.id))
+    : [];
+  return [...new Set([...mcpIds, ...connIds])];
+}
+
+/**
+ * **看门狗的一拍**：声明的 MCP 源里"不在池子里"的那些，按既有唯一实现重连并同步工具面。
+ *
+ * 为什么要有它（v0.3 §0.2 G2「装完就用、卸载即消失」的**另一半**：挂了要能自己回来）：
+ *   子进程意外退出时 `server/mcp.js` 的 `proc.on('exit')` 会把客户端从池里删掉（这一步是对的），
+ *   但此前**没有任何东西会把它拉回来** —— 会话从此静默缺 `mcp_*` 工具，直到有人手动 reload 或重启。
+ * 2026-09-17 修的两件事：① 旧看门狗只盯 `settings.mcp_servers` ⇒ **`kind=mcp` 的连接器挂了不会被拉回来**；
+ *   ② 两份声明其实共用同一个客户端池与同一张工具表，看门狗的判据必须与 `reloadDeclaredSources` 同源。
+ * 幂等与边界：**不在声明里的源一个都不撤**（撤源是 reload 的职责，看门狗只管"补回来"——否则一次误判就会
+ *   把好端端的工具面清掉）；`connectMcp` 对已连接的本就幂等；一处失败不影响另一处（MCP 与连接器各走各的）。
+ * @param {object} [dbc] 可注入的库（夹具用假库；真库会被读，单测不碰它——与其它 connect* 同一手法）
+ * @returns {Promise<{declared:string[], missing:string[], reconnected:string[], registeredTools:number|null,
+ *   failures:string[], notes:string[], mcp?:Array, connectors?:Array|null}>}
+ */
+export async function reconnectMissingDeclared(dbc = db) {
+  const connList = await readConnectorConfig(dbc);
+  const connectorsOk = validateConnectors(connList).length === 0;
+  const declared = declaredMcpIds(await readMcpConfig(dbc), connList, { connectorsOk });
+  const connected = new Set(listMcpClients().map((c) => String(c.id)));
+  const missing = declared.filter((id) => !connected.has(id));
+  if (!missing.length) return { declared, missing: [], reconnected: [], registeredTools: null, failures: [], notes: [] };
+  const notes = [];
+  if (!connectorsOk) notes.push('settings.connectors 声明非法 ⇒ 连接器那半边不参与重连（上一代工具面保持）');
+  // 两条路各走既有唯一实现（不新造连接/注册路径）：已连接的本就幂等跳过
+  const mcp = await connectConfiguredMcps(dbc);
+  let connectors = null;
+  if (connectorsOk) {
+    try { connectors = (await connectConfiguredConnectors(dbc)).results; } catch (e) { notes.push('连接器重连意外失败：' + ((e && e.message) || e)); }
+  }
+  const { syncMcpTools } = await import('./tools/index.js'); // 动态 import：避开 connectors → tools/index → … 的加载环
+  const registeredTools = syncMcpTools(listMcpClients());
+  const now = new Set(listMcpClients().map((c) => String(c.id)));
+  const failures = [
+    ...mcp.filter((r) => !r.ok).map((r) => 'mcp_servers ' + r.id + '：' + r.error),
+    ...((connectors || []).filter((r) => !r.ok).map((r) => 'connectors ' + r.id + '（' + r.kind + '）：' + r.error)),
+  ];
+  return { declared, missing, reconnected: missing.filter((id) => now.has(id)), registeredTools, failures, notes, mcp, connectors };
+}
+
+/**
  * **热加载**（2026-09-17，闭 §4.2 那条"连接器声明改完必须重启"的缺口）：
  * 重新读**两份声明** → 撤掉不在声明里的源 → 装载新增/变更的源，**同一进程内生效、不重启**。
  *

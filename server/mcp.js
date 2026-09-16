@@ -68,7 +68,14 @@ export async function connectMcp(id, command, args = [], env = {}) {
   const cl = { proc, reqId: 0, pending: new Map(), buf: '', tools: [] };
   clients.set(id, cl);
   proc.stderr.on('data', (d) => { /* MCP server stderr 记录（调试用）。外部进程的 stderr 可能把我们给它的密钥回显出来 ⇒ 出口统一过凭据脱敏 */ console.log('[mcp:' + id + ']', redactSecretValues(String(d).slice(0, 300))); });
-  proc.on('exit', (code) => { console.log('[mcp:' + id + '] 退出 code=' + code); clients.delete(id); });
+  // ⚠️ 2026-09-17 修（看门狗重连时**实测**踩到）：`exit` 事件是**异步**到的 —— 断开一个旧进程后立刻重连，
+  //   旧进程的 exit 可能在新客户端已经装进 `clients` **之后**才到达，于是这句无条件的 delete 会把
+  //   **刚连上的那个**摘掉（症状：看门狗报"重连成功、工具 2 个"，而池子是空的、工具面注册 0 个）。
+  //   判据必须是"当前这一格还是不是我"（同一个 id 先后两代客户端，只有本人能摘自己）。
+  proc.on('exit', (code) => {
+    console.log('[mcp:' + id + '] 退出 code=' + code);
+    if (clients.get(id) === cl) clients.delete(id);
+  });
   // 2026-09-16 修（真崩溃 bug，子代理实测发现）：**spawn 失败是 `'error'` 事件，没有监听器就抛成
   // unhandled 'error' 并带走整个进程** —— `connectConfiguredMcps` 的 try/catch 抓不到它（那时 promise
   // 还没 reject）。触发条件很日常：command 配错、PATH 变化、工具没装（实测 `spawn npx` 在只有 `npx.cmd`
