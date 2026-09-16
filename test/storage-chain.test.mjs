@@ -1,13 +1,18 @@
 // test/storage-chain.test.mjs —— G1 出口的机检（v0.3 §0.2 G1 / §0.4 M1 / §4.1「存储走接口」）
 //
-// 判据（两部分，缺一不可）：
+// 判据（三部分，缺一不可）：
 //   ① **端到端真跑**：`RW_STORAGE=jsonfile` + **MySQL 不可达**（DB_PORT 指向没人监听的端口）起**真服务**，
 //      走真 HTTP：登录 → 建会话 → 发一轮（离线壳，不真调模型）→ 落消息 → 读回历史 → 一次工具调用。
 //      为什么这条能证明"调用点真的迁到了接口"：MySQL 不可达的情况下，数据**只可能**落到那份 JSON 文件里
 //      （`rw-store.json` 里出现账号/会话/消息 ⇒ 这些写入必然经过存储接口，别无第二条路）。
-//   ② **机制断言（源码级）**：这条链上不许再有直连 SQL 的写入/读取——`server/auth.js` / `server/index.js`
+//   ② **机制断言（运行时·记账假实现）**：`test/storage-recorder-shell.mjs` 预载后把接口对象逐方法包一层，
+//      每一次调用记一行再原样转发。判据是"**链上的每一段都留下了经过接口的痕迹**"——
+//      "跑得通"本身证明不了这句（一半留在原地也照样跑得通：写走接口、读还在 SQL，或者反过来）。
+//   ③ **机制断言（源码级）**：这条链上不许再有直连 SQL 的写入/读取——`server/auth.js` / `server/index.js`
 //      里 `db.query('… messages/conversations/accounts/sessions/settings …')` 一律判红。
-//      为什么源码级这一半也要有：① 只证明"今天这条路跑得通"，② 拦住"下次顺手加回一条 SQL"。
+//      为什么源码级这一半也要有：① 只证明"今天这条路跑得通"，③ 拦住"下次顺手加回一条 SQL"。
+//   ④ **重启后读回**：杀掉进程、换端口重起，复用**重启前那个 token** 读同一会话同一批消息。
+//      没有这一条，前面几条全在同一个进程里跑完——"落在 JSON 文件而不是内存里"这句话没被区分开。
 //
 // 纪律：不连真库、不真调模型（`test/offline-model-shell.mjs` 预载：官方 test-hook 换掉模型实现 +
 //       fetch 闸门拦截一切非本机请求）；一次性目录（os.tmpdir 下），跑完删掉。
@@ -23,12 +28,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const SHELL = pathToFileURL(path.join(ROOT, 'test', 'offline-model-shell.mjs')).href;
+// 记账假存储：与离线壳同一用法（`--import` 预载），只多观测、不改语义（见 test/storage-recorder-shell.mjs）
+const RECORDER = pathToFileURL(path.join(ROOT, 'test', 'storage-recorder-shell.mjs')).href;
 
 const ADMIN = { user: 'gw-fixture-admin', pass: 'gw-fixture-pass' };
 let WS = null;         // 一次性工作区
 let child = null;      // 真服务子进程
 let BASE = null;
 let SHELL_LOG = null;  // 离线壳的观测文件（每次模型调用收到的上下文）
+let CALL_LOG = null;   // 记账假存储的日志（每次接口调用一行）
+let TOKEN = null;      // 链上签发的 token（重启那条用例要复用它，才能证明会话落在介质里）
 
 /** 取一个空闲端口：先 listen(0) 问系统要一个，再关掉（同仓既有夹具同款做法）。 */
 const freePort = () => new Promise((resolve, reject) => {
@@ -45,19 +54,23 @@ const j = async (p, opts = {}) => {
 };
 const H = (t) => ({ 'Content-Type': 'application/json', ...(t ? { Authorization: 'Bearer ' + t } : {}) });
 
-before(async () => {
-  WS = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-gw-chain-'));
-  SHELL_LOG = path.join(WS, 'offline-shell-calls.jsonl');
+/**
+ * 起一个真服务子进程，等它**真的在听**再返回（就绪判据＝启动日志那一行，不是 sleep 猜的时长）。
+ * 抽成函数是因为"重启后读回"那条用例要重起一次，且**换一个端口**——就绪判据必须两份完全一样。
+ * 环境里那三样就是"干净机器"的定义：换实现（jsonfile）、MySQL 指向没人监听的端口、数据只落一次性目录。
+ */
+async function startServer() {
   const port = await freePort();
-  BASE = 'http://127.0.0.1:' + port;
-  child = spawn(process.execPath, ['--import', SHELL, path.join('server', 'index.js')], {
+  const base = 'http://127.0.0.1:' + port;
+  const c = spawn(process.execPath, ['--import', SHELL, '--import', RECORDER, path.join('server', 'index.js')], {
     cwd: ROOT,
     env: {
       ...process.env,
-      RW_STORAGE: 'jsonfile',          // ← 本夹具的主角：换实现
-      DB_PORT: '1',                    // ← MySQL 指向没人监听的端口（"干净机器"的定义）
-      RW_WORKSPACE: WS,                // ← 数据只许落在这次性目录里
-      RW_OFFLINE_SHELL_LOG: SHELL_LOG, // ← 观测量：每轮真正送进模型的上下文
+      RW_STORAGE: 'jsonfile',           // ← 本夹具的主角：换实现
+      DB_PORT: '1',                     // ← MySQL 指向没人监听的端口（"干净机器"的定义）
+      RW_WORKSPACE: WS,                 // ← 数据只许落在这次性目录里
+      RW_OFFLINE_SHELL_LOG: SHELL_LOG,  // ← 观测量：每轮真正送进模型的上下文
+      RW_STORAGE_CALL_LOG: CALL_LOG,    // ← 观测量：每次经过存储接口的调用（记账假实现）
       PORT: String(port),
       RW_ADMIN_USER: ADMIN.user,
       RW_ADMIN_PASS: ADMIN.pass,
@@ -66,16 +79,34 @@ before(async () => {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
-  child.stdout.on('data', (d) => { out += String(d); });
-  child.stderr.on('data', (d) => { out += String(d); });
-  child.__log = () => out;
+  c.stdout.on('data', (d) => { out += String(d); });
+  c.stderr.on('data', (d) => { out += String(d); });
+  c.__log = () => out;
   // 等它真的在听（就绪判据＝启动日志那一行，不是 sleep 猜的时长）
   const t0 = Date.now();
   while (!/\[RW\] Roni Workbench 启动: http:\/\/localhost:\d+/.test(out)) {
-    if (child.exitCode !== null) throw new Error('服务子进程提前退出（code=' + child.exitCode + '）：\n' + out);
+    if (c.exitCode !== null) throw new Error('服务子进程提前退出（code=' + c.exitCode + '）：\n' + out);
     if (Date.now() - t0 > 60000) throw new Error('等服务启动超时（60s）：\n' + out);
     await new Promise((r) => setTimeout(r, 100));
   }
+  BASE = base;
+  return c;
+}
+
+/** 停掉当前服务并**等它真的退出**（不等就可能出现"两个进程同时写那一个 JSON 文件"的假象）。 */
+async function stopServer() {
+  const c = child;
+  if (!c || c.exitCode !== null) return;
+  const exited = new Promise((r) => c.once('exit', r));
+  try { c.kill(); } catch { /* ignore */ }
+  await Promise.race([exited, new Promise((r) => setTimeout(r, 10000))]);
+}
+
+before(async () => {
+  WS = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-gw-chain-'));
+  SHELL_LOG = path.join(WS, 'offline-shell-calls.jsonl');
+  CALL_LOG = path.join(WS, 'storage-calls.log');
+  child = await startServer();
 });
 
 after(() => {
@@ -93,6 +124,7 @@ test('[jsonfile] 登录 → 会话 → 一轮（含工具调用）→ 落消息 
   assert.equal(login.status, 200, '登录要成功（账号存在 jsonfile 存储里）：' + JSON.stringify(login.body));
   assert.ok(login.body.token, '登录要发 token');
   const token = login.body.token;
+  TOKEN = token;   // 重启那条用例要复用这一个 token（能复用 ⇒ sessions 真在介质里）
 
   // ② token 真的能换回身份
   const me = await j('/api/auth/me', { headers: H(token) });
@@ -129,6 +161,13 @@ test('[jsonfile] 登录 → 会话 → 一轮（含工具调用）→ 落消息 
   for (const k of ['reasoning', 'model', 'provider', 'created_at']) {
     assert.ok(k in msgs.body.messages[0], '/messages 的对外字段 ' + k + ' 丢了');
   }
+
+  // ⑦ 工具调用账的**读口**也要能读（走 storage.toolCalls.recent）。
+  // 这里只断言"读得动"：本轮明明执行过 list_dir，账上却是空的（写口还没迁）——那是**已登记的遗留**，
+  // 由下面的「机制断言②」第 ③ 条按"只减不增"盯着，不在这一条里假装它已经好了。
+  const ledger = await j('/api/conversations/' + cid + '/toolcalls', { headers: H(token) });
+  assert.equal(ledger.status, 200, '工具调用账的读口必须读得动：' + JSON.stringify(ledger.body));
+  assert.ok(Array.isArray(ledger.body.toolcalls), '/toolcalls 要回一个数组');
 });
 
 test('[jsonfile] 第二轮（同一会话）的上下文里必须出现第一轮那两条消息——历史真的从存储里读回来', async () => {
@@ -201,4 +240,93 @@ test('机制断言：这条链上不许再有直连 SQL（换了实现才可能�
   assert.match(idx, /storage\.messages\.(?:append|history|guardAppend|list)/, 'index.js 的消息读写必须走存储接口');
   assert.match(idx, /storage\.settings\.(?:get|all|getMany)/, 'index.js 的设置读取必须走存储接口');
   assert.match(idx, /storage\.conversations\.(?:get|getAs|findOwned|create|listByAccount)/, 'index.js 的会话读写必须走存储接口');
+});
+
+test('机制断言②：这条链的每一段都真的经过存储接口（记账假实现全程记录，不是读源码猜）', () => {
+  // 为什么"跑得通"不够：一半留在原地也照样跑得通（写走接口、读还在 SQL，或者反过来）——
+  // 上一轮的"半迁移"就是这么发生的。这里的观测点在**接口对象本身**：预载把每个方法包一层再转发，
+  // 于是"这段到底走没走接口"变成一条可数的事实。预载若失效，本用例会因缺少 `#recorder` 自述行而判红
+  // （不能让它变成恒绿的摆设）。
+  const raw = fs.readFileSync(CALL_LOG, 'utf8').trim().split('\n');
+  const headers = raw.filter((l) => l.startsWith('#recorder'));
+  assert.ok(headers.length >= 1, '记账假实现没生效（--import 预载失败？）——本用例会因此变成恒绿，必须判红');
+  assert.match(headers[0], /^#recorder 已包 \d+ 个接口方法（实现=jsonfile）$/, '记账壳自述行不对：' + headers[0]);
+  const calls = raw.filter((l) => !l.startsWith('#'));
+  const names = new Set(calls.map((l) => l.split(' ')[0]));
+  const has = (n) => names.has(n);
+
+  // ① 链上每一段都必须留下"经过接口"的痕迹：缺哪一段，就是哪一段还留在原地。
+  const REQUIRED = {
+    '登录读账号': 'accounts.findByUsername',
+    '登录签发会话': 'sessions.create',
+    '每次请求校验会话': 'sessions.findValid',
+    '建会话': 'conversations.create',
+    '会话列表（按账号读）': 'conversations.listByAccount',
+    '会话读回（含只读列子集）': 'conversations.getAs',
+    '落用户消息': 'messages.append',
+    '落助手消息（孤儿守卫那条）': 'messages.guardAppend',
+    '读回历史（上下文口径）': 'messages.history',
+    '读回历史（接口口径）': 'messages.list',
+    '设置读取': 'settings.get',
+    '设置批量读取': 'settings.getMany',
+    '事件账本': 'events.append',
+    '工具调用账（读）': 'toolCalls.recent',
+  };
+  for (const [what, name] of Object.entries(REQUIRED)) {
+    assert.ok(has(name), what + ' 没有经过存储接口（期望 ' + name + '）。实际记录：' + [...names].sort().join(', '));
+  }
+
+  // ② "介质里落了行"必须与"接口上发生了写"对得上：文件里有行、接口却没被调用过，只能是绕过接口写进去的。
+  const doc = JSON.parse(fs.readFileSync(path.join(WS, 'storage', 'rw-store.json'), 'utf8'));
+  const rows = (t) => Object.values(doc.tables[t] || {});
+  const WRITES = {
+    accounts: ['create'], sessions: ['create'], conversations: ['create'], messages: ['append', 'guardAppend'],
+    events: ['append'], settings: ['set'], agentRuns: ['create', 'update'], deliveries: ['insert'], toolCalls: ['append'],
+  };
+  const unpaired = Object.entries(WRITES)
+    .filter(([t, verbs]) => rows(t).length && !verbs.some((v) => has(t + '.' + v)))
+    .map(([t]) => t);
+  assert.deepEqual(unpaired, [], '这些实体在介质里有行，接口上却没有对应的写调用（＝绕过接口写的）：' + unpaired.join(', '));
+
+  // ③ 反向的缺口：**事实已经发生、账上却没有行**的那一类。这一轮真的执行过一次工具（事件账里有 tool_done），
+  //    但 `toolCalls` 表 0 行、`toolCalls.append` 一次都没被调用过 —— 写入口仍在 `server/tools/index.js:1859`
+  //    （`INSERT INTO tool_calls …` 直连 MySQL，见 proposals 的 C-61），所以没有 MySQL 时每次工具调用都会
+  //    打一条 `[tool-audit] 留痕失败（工具已执行，但账本缺行）`。
+  //    判据是**只减不增**：登记项之外不许再出现这种缺口；将来谁把这条也迁了，本用例照样绿。
+  const KNOWN_UNPAIRED = ['toolCalls'];
+  assert.ok(rows('events').some((e) => e.type === 'tool_done'), '这一轮的事件账里应当有 tool_done（前面用例已断言工具真执行成功）');
+  const gaps = [];
+  if (!has('toolCalls.append')) gaps.push('toolCalls');
+  const unregistered = gaps.filter((t) => !KNOWN_UNPAIRED.includes(t));
+  assert.deepEqual(unregistered, [], '这些实体"事实已发生却没经过接口"，且不在登记项里：' + unregistered.join(', '));
+});
+
+test('[jsonfile] 重启进程后：同一个 token 仍认得出人、同一会话与消息读得回来（数据在文件里，不在内存里）', async () => {
+  // 没有这一条，前面几条全在**同一个进程**里跑完 —— "落在 JSON 文件而不是内存"这句话根本没被区分开。
+  // 复用**重启前那个 token**：它还能用 ⇒ sessions 真在介质里；会话与消息一字不差 ⇒ 它们是读回来的。
+  assert.ok(TOKEN, '前一条用例要先跑过（本用例复用链上签发的 token）');
+  const before = await j('/api/conversations/1/messages', { headers: H(TOKEN) });
+  assert.equal(before.status, 200);
+
+  await stopServer();
+  child = await startServer();   // ← 换一个端口重起（就绪判据仍是启动日志那一行）
+
+  const me = await j('/api/auth/me', { headers: H(TOKEN) });
+  assert.equal(me.status, 200, '重启后旧 token 必须仍然有效（否则会话只在内存里）：' + JSON.stringify(me.body));
+  assert.equal(me.body.user.username, ADMIN.user);
+
+  const after = await j('/api/conversations/1/messages', { headers: H(TOKEN) });
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.body.messages, before.body.messages, '重启前后读到的同一会话消息必须逐字一致');
+
+  // 重启后再发一轮：送进模型的上下文里必须有**重启前**那两条（历史真的从介质读回来）
+  const chat = await j('/api/chat', { method: 'POST', headers: H(TOKEN), body: JSON.stringify({ conversationId: 1, content: '重启之后再看一次目录' }) });
+  assert.equal(chat.status, 200);
+  assert.match(String(chat.body), /"type":"run_end"[^\n]*"status":"saved"/, '重启后的这一轮也要正常落库收尾');
+  const calls = fs.readFileSync(SHELL_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const last = calls[calls.length - 1];
+  const flat = last.history.map((m) => m.role + ':' + m.content).join(' | ');
+  assert.match(flat, /user:列一下当前工作区根目录/, '重启前的用户消息必须出现在重启后的上下文里（历史来自介质，不是内存残留）：' + flat);
+  assert.match(flat, /assistant:（离线壳回复）/, '重启前的助手消息也要在');
+  assert.match(flat, /user:重启之后再看一次目录/, '本轮的用户消息也要在');
 });

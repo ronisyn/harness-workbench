@@ -136,10 +136,12 @@ export const api = {
 };
 
 // SSE 流式对话（带轨迹流式回调）：
-// onDelta / onThinking(round) / onThink(text) / onToolStart / onToolDone / onPlan / onApproval / onDone / onError；signal 可中止
+// onDelta / onThinking(round) / onThink(text) / onToolStart / onToolDone / onPlan / onProgress / onApproval / onDone / onError；signal 可中止
 // M1：onIntent / onRoute —— 意图识别与档案路由的灰字回显（系统行，不入历史；§6.1/6.2/§8）
+// 2026-09-17：onProgress —— 进度帧 `{type:'progress', round, roundCap, plan}`（v0.3 §4.7「可观测…进度…逐步可见」）；
+//   另：`tool_done` 的 tool 上可能多一个**只增**字段 `spill`（真的发生了溢出时才有，见 src/Chat.jsx 的展示）。
 export async function streamChat({ conversationId, content, provider, model }, handlers, signal) {
-  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onApproval, onAsk, onIntent, onRoute, onDone, onError } = handlers || {};
+  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onProgress, onApproval, onAsk, onIntent, onRoute, onDone, onError } = handlers || {};
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -170,6 +172,7 @@ export async function streamChat({ conversationId, content, provider, model }, h
         else if (j.type === 'tool_start') onToolStart?.(j.tool);
         else if (j.type === 'tool_done') onToolDone?.(j.tool);
         else if (j.type === 'plan') onPlan?.(j.plan);
+        else if (j.type === 'progress') onProgress?.(j);
         else if (j.type === 'approval') onApproval?.(j);
         else if (j.type === 'ask') onAsk?.(j);
         else if (j.type === 'intent') onIntent?.(j);

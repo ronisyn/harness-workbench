@@ -339,8 +339,14 @@ export function assembleStatic(tools, manifest = activeManifest) {
   //    不一致当场抛错——"清单说一套、实现说另一套"正是这一条要治的病（做法与上面两条同款）。
   //    两条互补：validatePermissions 看"清单有没有为已装载的每一条声明"（对象级），
   //    implementationPermissionProblems 看"实现里有没有偷偷再写一份"（源码级，不会被夹具的克隆对象骗过）。
+  //    权限表**必须传 activePermissions**（＝当前生效那一张），不能吃 validatePermissions 的缺省值：
+  //    那个缺省是**模块导入期**的 TOOL_PERMISSIONS 常量，而热重载换的是 activePermissions
+  //    （reloadManifest 的同一句注释："不能退回模块常量"）。不传就会与上面"往条目上贴权限"的那一侧不同源：
+  //    热重载**新增**一条工具/一条权限声明时，条目贴的是新表、核对读的是旧表 ⇒ 报"清单漏声明 permission"
+  //    并整体回滚 ⇒ **热装载只能减、不能加**（2026-09-17 由 G2 出口读数实测撞出，见 test/g2-toolface-unload.test.mjs）。
+  //    判据一字未放宽：核对的两侧本来就该是同一份，改后只是让它与装载侧同源。
   const permProblems = [
-    ...validatePermissions(manifest, list),
+    ...validatePermissions(manifest, list, activePermissions),
     ...implementationPermissionProblems(null, manifest),
   ];
   if (permProblems.length) throw new Error('[registry] 工具装载失败（权限声明与实现不一致，v0.3 §7.1 ⑤）：\n  - ' + permProblems.join('\n  - '));

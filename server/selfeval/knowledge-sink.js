@@ -15,11 +15,12 @@
 //   哪些值得留下"最清楚、且不需要额外烧 token 去重读长历史的时刻。
 //   不在**会话中途**挂：中途产条目会把还没定论的东西当经验沉淀（v0.3 §0.4 风险①"自我表演"）；
 //   也不挂在"每轮"上：那等于给每一轮都加一次问询打断。
-//   ⚠️ **如实登记（本批未做的接线）**：收尾路径在 `server/index.js` 的 `/api/chat` 收尾段与
-//     `server/scheduler.js` 的自动归档那两条线上；**本批不动这两个文件**（并行改动期由别的代理在飞）。
-//     所以本批交付的是"引擎侧的产出接口 + 确认后的写点"，接线点写在这里，一行调用即可接上：
-//       · `/api/chat` 收尾处：`await proposeKnowledge({ conversationId, rows: await loadSessionRows(...), dbc: db, emit: (card) => sse('ask', card) })`
-//       · `scheduler.js` 自动归档处：同一句，`emit` 换成"落一条卡片按会话路由"（`server/cards.js`）那条路。
+//   ✅ **接线状态（2026-09-17 已接）**：两个接线点都接上了，用的就是下面那句 `sinkSessionKnowledge(...)`：
+//       · `/api/chat` 收尾处（成功分支，`run_end` 之后）：`await sinkSessionKnowledge({ conversationId, storage, dbc: db, emit: (card) => send(card) })`
+//       · `scheduler.js` 自动归档处（`summarizeConversation` 之后，与"摘要刚生成"同一时机）：同一句，不传 `emit`
+//         （那一端没有连着的客户端；卡片落在既有待答队列里，GUI 照常轮询得到）。
+//     两处都包在自己的 try/catch 里：**失败/无候选一律静默跳过**，不许打扰（更不许弄坏）已经跑完的收尾。
+//     （原文留痕：本模块此前如实登记"本批不动这两个文件"——那写的是当时的状态，接线由此行兑现。）
 //
 // ── 与既有知识写入的关系（口径只有一份，别抄第二遍）──────────────────────────────────────
 //   · 工具 `kb_add`（`server/tools/index.js`）：模型在会话里主动写入的通道 —— 保持原样，本文件**不改它**；
@@ -227,4 +228,75 @@ export function describeProposals(result) {
   return '待审条目 ' + result.pending.length + ' 条（' + result.pending.map((p) => p.kind + ':' + p.title).join('；')
     + '）· 卡片 ' + result.created.length + ' 张（人确认后才写库）'
     + (result.errors.length ? ' · ⚠️ ' + result.errors.join('；') : '');
+}
+
+// ── 接线用的两件（2026-09-17 新增；`proposeKnowledge` 与写库路径**一个字都没动**）────────────────────
+// 为什么把"取数"也放这里：两个接线点（/api/chat 收尾、scheduler 自动归档）需要的是**同一份**会话经历，
+// 各写一份就会长出第二套口径（哪几列算"经历"、状态词怎么对）。所以取数只有这一处，两边都调它。
+
+/**
+ * 会话经历 → 候选抽取认的三样（**只读**，全部走既有接口）。
+ *   · `messages`  —— 存储接口 `messages.history(id)`（上下文口径：升序、全量）；
+ *   · `toolCalls` —— 存储接口 `toolCalls.list(id)`，**只取工具名与成败**（不把结果正文读进来）；
+ *   · `summary`   —— `conv_summaries` 那一行（有则当候选①的依据，没有就 null）。
+ * ⚠️ 状态词的映射只在这一处：工具账本里落的是 `done|fail`（见 tools/index.js 落 tool_calls 那句），
+ *    而候选抽取认的是 `ok|fail`（见 `candidatesFromSession` 的 ②）。映射只做 `done ⇒ ok`，
+ *    其余状态**原样交出去**（不把 pruned/未知状态假扮成成功，它们因此不会被算进"失败后跑通"）。
+ * 任一来源取不到 ⇒ 那一项如实为空、原因进 `errors`（缺不是失败：候选抽取本来就允许抽不到）。
+ * @returns {Promise<{messages:Array, toolCalls:Array, summary:object|null, errors:string[]}>}
+ */
+export async function loadSessionForSink(conversationId, { storage = null, dbc = null } = {}) {
+  const err = (e) => String((e && e.message) || e);
+  const out = { messages: [], toolCalls: [], summary: null, errors: [] };
+  const cid = Number(conversationId);
+  if (!Number.isFinite(cid) || cid <= 0) { out.errors.push('会话 id 不合法：' + conversationId); return out; }
+  try {
+    if (storage && storage.messages && typeof storage.messages.history === 'function') {
+      out.messages = (await storage.messages.history(cid)) || [];
+    } else out.errors.push('没有可用的存储句柄（storage.messages.history）');
+  } catch (e) { out.errors.push('读会话消息失败：' + err(e)); }
+  try {
+    if (storage && storage.toolCalls && typeof storage.toolCalls.list === 'function') {
+      const rows = (await storage.toolCalls.list(cid)) || [];
+      out.toolCalls = rows.map((r) => ({
+        tool_name: (r && (r.toolName ?? r.tool_name)) ?? null,
+        status: r && r.status === 'done' ? 'ok' : String((r && r.status) == null ? '' : r.status),
+      }));
+    } else out.errors.push('没有可用的存储句柄（storage.toolCalls.list）');
+  } catch (e) { out.errors.push('读工具调用失败：' + err(e)); }
+  try {
+    if (dbc && typeof dbc.query === 'function') {
+      const r = await dbc.query('SELECT summary FROM conv_summaries WHERE conversation_id=?', [cid]);
+      out.summary = (Array.isArray(r) && r[0]) || null;
+    } else out.errors.push('没有可用的库句柄（读 conv_summaries）');
+  } catch (e) { out.errors.push('读会话摘要失败：' + err(e)); }
+  return out;
+}
+
+/**
+ * **接线点的那一句话**：会话收尾/复盘那一刻 → 取数 → `proposeKnowledge`（产出**待审卡片**，不写库）。
+ *
+ * 产出的卡片走**既有** asks 队列（`server/asks.js`），所以：有人答了卡之后才轮到 `writeKnowledge`，
+ * 本函数自己**没有任何 INSERT**（夹具对整份源码锁这一条）。
+ * 本函数**不抛错给收尾路径**：取数逐项 try（缺项进 `result.errors`，不中断），
+ * `proposeKnowledge` 内部对每个候选也各自 try。调用方只需包一层 try/catch 记一行日志即可。
+ *
+ * @param {object} o
+ *   · `conversationId` 必填；
+ *   · `storage` / `dbc` —— 取数用的两个句柄（前者读消息与工具调用，后者读摘要）；
+ *   · `emit` —— 卡片出口（GUI 的 `ask` 事件 / 渠道的 onCard；不传就只挂队列、不发帧）；
+ *   · `createAskFn` —— 夹具缝（默认＝`createAsk`）；
+ *   · `now` —— 记录时刻（不参与判据）。
+ * @returns {Promise<object>} `proposeKnowledge` 的返回值（`errors` 里已并入取数缺项）
+ */
+export async function sinkSessionKnowledge({
+  conversationId, storage = null, dbc = null, emit = null, createAskFn = createAsk, now = new Date(),
+} = {}) {
+  const data = await loadSessionForSink(conversationId, { storage, dbc });
+  const result = proposeKnowledge({
+    conversationId, messages: data.messages, toolCalls: data.toolCalls, summary: data.summary,
+    emit, createAskFn, now,
+  });
+  result.errors.push(...data.errors);
+  return result;
 }

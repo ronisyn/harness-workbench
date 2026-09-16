@@ -6,9 +6,9 @@ import fs from 'node:fs';
 import { config, ROOT } from './config.js';
 import { initSchema, db, bumpPolicyRev } from './db.js';
 import { ensureAdmin, login, logout, me, requireAuth } from './auth.js';
-import { activeProviders, allProviders, findProvider, syncChatModels } from './llm/providers.js';
+import { activeProviders, allProviders, findProvider, isManifestProvider, loadRegisteredProviders, syncChatModels } from './llm/providers.js';
 import { calcCost } from './llm/gateway.js';
-import { runAgent, activitySince, clearActivity } from './agent.js';
+import { runAgent, activitySince, activityWindow, streamGap, clearActivity } from './agent.js';
 import { SKILLS_ROOT, TOOLS, redactSecrets } from './tools/index.js';
 import { POLICY_SETTINGS_KEYS, policyWriteDetail } from './tools/hooks.js'; // C-29：人工改策略落同一条账（与模型路径同形状）
 import { persistEvent } from './eventlog.js'; // 事件账本（append-only）：唯一写入点挂在 send 上
@@ -660,6 +660,8 @@ app.get('/api/conversations/:id/activity', requireAuth, async (req, res) => {
 });
 
 // 已接入厂商 + 模型（设置页展示；connected=该厂商 key 是否已配置，前端据此区分"已接入"与"未配置 Key"）
+// source：这一行是**代码清单的内置厂商**（manifest）还是**部署方自注册的**（registered，客户网关/内网推理）——
+// 判据唯一＝"id 在不在代码清单里"（见 server/llm/providers.js 的"自注册厂商"节）。只增字段，不改既有字段。
 app.get('/api/providers', requireAuth, async (req, res) => {
   const providers = await db.query('SELECT id, provider_key, name, base_url, api_key_env, enabled FROM providers ORDER BY sort_order, id');
   const models = await db.query('SELECT id, provider_id, model_id, name, capabilities, enabled FROM models ORDER BY provider_id, model_id');
@@ -667,8 +669,68 @@ app.get('/api/providers', requireAuth, async (req, res) => {
   for (const m of models) (byProvider[m.provider_id] = byProvider[m.provider_id] || []).push(m);
   res.json({
     ok: true,
-    providers: providers.map((p) => ({ ...p, connected: Boolean(p.api_key_env && config.keys[p.api_key_env]), models: byProvider[p.id] || [] })),
+    providers: providers.map((p) => ({
+      ...p,
+      source: isManifestProvider(p.provider_key) ? 'manifest' : 'registered',
+      connected: Boolean(p.api_key_env && config.keys[p.api_key_env]),
+      models: byProvider[p.id] || [],
+    })),
   });
+});
+
+// ---------- 客户网关 / 内网推理：厂商自注册入口（v0.3 §4.3「可切云端/客户网关/内网推理」）----------
+// 为什么有它：改造前 providers **只能**来自代码清单 server/llm/providers.js（启动时同步进 providers 表）
+//   ⇒ 客户要接自己的网关/内网推理**必须改代码**。这里给出最小的注册入口，字段＝清单同形字段。
+//
+// **权威划分（与启动时的"清单同步"不打架，唯一判据＝"id 在不在代码清单里"）**：
+//   · 代码清单（server/llm/providers.js 的 PROVIDERS）＝**内置厂商**的唯一权威：它们的 id 被保留
+//     （本组 API 不许改写/删除）；启动时按 id **补齐缺行**（含默认模型），已有行一个字都不改。
+//   · `providers` 表＝**自注册厂商**的唯一权威：本组 API 只写这一层；provider_key 不在清单里的行
+//     在启动时载入内存注册表并参与路由（`llm/providers.js` 的 `loadRegisteredProviders`）。
+//   ⇒ 两处各管各的 id 空间，既不互相覆盖，也不会因为"库里多了一行"就把内置厂商挤掉。
+//
+// 凭证：只收 `keyEnv`（config.keys 的槽位名）——**不新增第二条凭证路径**、密钥不进请求体/DB/响应（§9）：
+//   部署方把密钥写进 `.env` 的 `<KEYENV 大写>_API_KEY`（或设置同名环境变量），既有读取点全是 `keys[keyEnv]`。
+// 校验：装配期校验＋明确报错（缺字段/非法 base/未知字段一律 400 并逐条列出，见 validateProvider）。
+// UI：本轮**不做**（只给 API，如实登记在 docs/模型接入与厂商自注册-v1.md 与交付报告里）。
+app.post('/api/providers', requireAuth, async (req, res) => {
+  try {
+    const { saveRegisteredProvider } = await import('./llm/providers.js');
+    const r = await saveRegisteredProvider(db, req.body || {}, config.keys, { mustNotExist: true });
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.error, ...(r.problems ? { problems: r.problems } : {}) });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'provider:register', r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models]).catch(() => {});
+    res.json({ ok: true, provider: r.entry, models: r.models, catalogError: r.catalogError, keyHint: '密钥写进 .env 的 ' + r.keyEnvVar + '（或设置同名环境变量）' });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 更新：id 以**路径**为准（body 里若带 id 必须一致——不一致就是两处说法，直接拒）
+app.put('/api/providers/:id', requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const body = req.body || {};
+    if (body.id !== undefined && String(body.id) !== id) {
+      return res.status(400).json({ ok: false, message: 'body.id 与路径不一致：' + JSON.stringify(body.id) + ' ≠ ' + id });
+    }
+    const { saveRegisteredProvider } = await import('./llm/providers.js');
+    const r = await saveRegisteredProvider(db, { ...body, id }, config.keys, { mustExist: true });
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.error, ...(r.problems ? { problems: r.problems } : {}) });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'provider:update', r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models]).catch(() => {});
+    res.json({ ok: true, provider: r.entry, models: r.models, catalogError: r.catalogError, keyHint: '密钥写进 .env 的 ' + r.keyEnvVar + '（或设置同名环境变量）' });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+// 注销：只对**自注册**厂商生效（内置 id 当场拒，见 providerRemovalProblem）；库行 + 该厂商的模型目录行一并清掉，
+// 但**不抹历史**（对话/账本里存的是 provider 字符串，那是账，不是配置）。
+app.delete('/api/providers/:id', requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const { removeRegisteredProvider } = await import('./llm/providers.js');
+    const r = await removeRegisteredProvider(db, id);
+    if (!r.ok) return res.status(400).json({ ok: false, message: r.error });
+    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
+      [req.user.id, 'provider:delete', id + ' models=' + r.models]).catch(() => {});
+    res.json({ ok: true, id, models: r.models });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
 // M2-① 模型广场：厂商 key 临时连通测试（不落库——§8 凭证不进 DB 明文；仅本次请求内存使用）
@@ -1460,6 +1522,18 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       });
       // 断线/旁观客户端走 /activity 轮询时，结论由环自己的 run_end（clearActivity 追加，见 agent.js）给出，
       // 不在这里重复往环里塞（环与 SSE 是两条投影，重复塞会让"同一事实两种投影"更乱）。
+      // ── 「受限自动沉淀」接线点之一（v0.3 §4.3 记忆行；接线原文见 server/selfeval/knowledge-sink.js 文件头）──
+      // 时机＝会话收尾：这一轮**已落库**、run_end 已发（"这段经历里哪些值得留下"此刻最清楚，也不必再烧 token
+      // 重读长历史）。产出的是**待审提案**（既有 asks 卡片，出口就是本文件的 `send`）——**不写库**；
+      // 写库的唯一入口是 knowledge-sink 的 `writeKnowledge`，它的前置是"有人答了这张卡"。
+      // 失败/无候选一律静默跳过：沉淀是顺手的事，它坏了不许打扰、更不许弄坏已经干完的这一轮（只记一行日志）。
+      try {
+        const { sinkSessionKnowledge } = await import('./selfeval/knowledge-sink.js');
+        const sink = await sinkSessionKnowledge({ conversationId, storage, dbc: db, now: new Date(), emit: (card) => send(card) });
+        if (sink.errors.length) console.warn('[knowledge-sink] conv#' + conversationId + ' 沉淀提案未完全成功（不影响本轮）：' + sink.errors.join('；'));
+      } catch (e) {
+        console.warn('[knowledge-sink] conv#' + conversationId + ' 沉淀提案失败（静默跳过，不影响本轮）：' + ((e && e.message) || e));
+      }
     } else {
       // 停止/断连/中断也留痕：避免"刷新后整条消失"，现场信息可读可恢复
       // 2026-09：占位消息带中断原因 + 已执行进度（run.checkpoint 落库），避免"中断=看起来啥也没干"
@@ -1606,7 +1680,20 @@ app.get('/api/conversations/:id/stream', requireAuth, async (req, res) => {
     } catch (e) { finish('error:' + String((e && e.message) || e).slice(0, 80)); }
   }, 500);
   // 先说明"从哪接"：客户端据此判断自己是不是接丢了（配合 /messages 兜底）
-  frame({ type: 'stream_hello', v: 1, conversationId: cid, after, ts: Date.now() });
+  // RA-37 G5 缺口标记（2026-09-17，v0.3 §4.7 可控制「断线重连不丢现场」的**如实那一半**）：
+  //   环只留最近 300 条、执行结束后 60s 回收（见 agent.js），所以"接不上"是真会发生的事。
+  //   此前续订帧只说"我从 after 接着发"，客户端**无从知道自己中间漏了一段** —— 会把断档读成"没有事件"。
+  //   现在把缺口如实说出来：`gap:true` + `earliestSeq`（最早还能给到的 seq，环已回收 ⇒ null）。
+  //   判定收在 agent.js 的 `streamGap`（纯函数、有夹具）：判据＝客户端要的**下一条**（after+1）仍早于
+  //   环内最早一条；`after<=0`（新订阅，"什么都没看过"）不算缺口。
+  //   刻意**不扩环**（300/60s 是既有边界，不是本批要改的数字）：如实告知缺口 + 回落 /messages 才是正解。
+  const win = activityWindow(cid);
+  frame({
+    type: 'stream_hello', v: 1, conversationId: cid, after, ts: Date.now(),
+    gap: streamGap({ after, earliest: win.earliest }),
+    earliestSeq: win.earliest,          // 最早还能给到的 seq（null＝环里一条都没有）
+    buffered: win.count,                // 环内现有条数（客户端据此判断"还能补多少"）
+  });
 });
 
 // ---------- RA-31 能力清单（2026-09-15）：这个会话里的 agent 能做什么、受什么约束、降级时什么样 ----------
@@ -1665,6 +1752,10 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     let cumulative = { rate: f(avg7), hit: 0, miss: 0, rounds: 0 };
     // C2 每轮新增（未命中 tokens）/ C3 单位成本 / C4 非预期失效 / C5 豁免失效
     let c2 = { median: null, p90: null, rounds: 0 };
+    // C1 会话整体命中率（比率 0–1）：与 `collect.js` 的 `ratio(hit, hit+miss)` 同口径、同一批行（近 7 天真实流量），
+    // 也就是本端点 cumulative.rate 除以 100 的那个数（这里不留 1 位小数的四舍五入，免得阈值判在圆整误差上）。
+    // 它只给下面的指标告警线用（`METRIC_DEFS.c1`），不出现在响应体的其它地方。
+    let c1 = null;
     let c3 = { perRun: null, perConv: null, total: 0, runs: 0, convs: 0 };
     let c4 = { count: 0, definition: '非预期整段前缀作废次数（不含首轮/切模型/折叠边界/长空闲/工具面变更）', lastAt: null, fromLedger: null };
     let c5 = { rounds: 0, exempt: 0, collapse: 0, total: 0, byReason: {}, reasons: [] };
@@ -1684,6 +1775,8 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
       };
       const h = pr.reduce((s, r) => s + Number(r.h), 0), m = pr.reduce((s, r) => s + Number(r.m), 0);
       cumulative = { rate: (h + m) > 0 ? f(100 * h / (h + m)) : null, hit: h, miss: m, rounds: pr.length };
+      // C1（同上面那两行的分子分母，**不重算口径**）：分母 0 ⇒ null（不写成 0%）
+      c1 = (h + m) > 0 ? h / (h + m) : null;
       // C2：每轮真正新增的 prompt tokens = 该轮未命中。**只报数不设线**（见下方 definition 的取舍说明）
       const misses = pr.map((r) => Number(r.m)).filter((x) => x > 0);
       c2 = { median: misses.length ? Math.round(q(misses, 0.5)) : null, p90: misses.length ? Math.round(q(misses, 0.9)) : null, rounds: misses.length };
@@ -1735,12 +1828,35 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
         sumCheck: sum(byReason), // 分因必须加总等于 exempt —— 对不上就是归因漏了一类（前端不显示，供对账）
       };
     } catch { /* 账本取不到不影响其它字段 */ }
+    // 指标越线标记（v0.3 §4.4.1 规则4 的**页面那一半**；接线点原文见 server/selfeval/alerts.js 文件头）：
+    //   · 线只可能来自设置键 `metric_alert_lines`（**缺省不设线 ⇒ 空数组 ⇒ 前端那段什么都不显示**，
+    //     与接线前逐字相同）；本端点不发明任何阈值、也不改上面任何一个既有字段。
+    //   · 读数用的就是本端点**已经查回来的那几列**（c1/c2/c3/c4/c5），不新采集、不重算口径。
+    //   · 越线只告警、不阻断（alerts.js 没有任何 throw/拒绝执行的分支）。
+    let metricAlerts = [];
+    let metricAlertsError = null;
+    try {
+      const { evaluateLines, loadMetricAlertLines } = await import('./selfeval/alerts.js');
+      metricAlerts = evaluateLines({
+        lines: await loadMetricAlertLines(), at: new Date().toISOString(),
+        metrics: {
+          c1, c2Median: c2.median, c2P95: c2.p90,      // 与 alerts.js 文件头写的那一行逐项对齐
+          c3PerRun: c3.perRun, c4Invalidate: c4.count, c5Exempt: c5.total,
+        },
+      });
+    } catch (e) {
+      // 线写坏了（不是合法 JSON / 未知指标 / 运算符不合法）**不许把整页打成 500**：
+      // 如实把原因放进响应体（页面显示"线配置有误"），而不是静默当成"没设线"——后者会让人以为监控开着。
+      metricAlertsError = String((e && e.message) || e).slice(0, 200);
+    }
     res.json({
       ok: true, target,
       todayHit: todayRow ? Number(todayRow.hit) : 0, todayMiss: todayRow ? Number(todayRow.miss) : 0,
       todayRate: f(todayRate), avg7: f(avg7),
       perRequest, cumulative,
       c2, c3, c4, c5,
+      metricAlerts,
+      ...(metricAlertsError ? { metricAlertsError } : {}),
       todayRounds: todayRow ? Number(todayRow.n) : 0, windowRounds: rows.slice(-7).reduce((s, r) => s + Number(r.n || 0), 0),
       daily: rows.slice(-30).map((r) => ({ d: String(r.d), hit: Number(r.hit), miss: Number(r.miss), rounds: Number(r.n || 0) })),
       definition: {
@@ -1752,6 +1868,8 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
           + '不在本端点内拍数字——这里给的是可对比的实测值，判定由报告会话做',
         c4: c4.definition + '。**目标 0 是 v0.3 定义的目标，本端点不设闸门**；每次失效必须能说出触发原因（lastDetail 即归因）',
         c5: c5.note,
+        metricAlerts: '指标告警线（设置键 metric_alert_lines；**缺省/为空 ⇒ 空数组**，页面不显示）。比较归 server/selfeval/alerts.js，'
+          + '读数就是本响应里的 c1/c2/c3/c4/c5；**越线只告警、不阻断**。线只可能来自设置键，本端点不写任何默认阈值',
         scope: 'C1/C2/C3 = 当前账号；C4/C5 = 全账号账本（含平台级预热/换纪元事件）。两段范围不同，跨段比较前先看这一行',
       },
       alert: target > 0 && avg7 != null && avg7 < target,
@@ -1918,15 +2036,21 @@ app.get('/api/mcp', requireAuth, async (req, res) => {
     res.json({ ok: true, configured: redactMcpServers(cfg), clients: mcp.listMcpClients() }); // env 密钥脱敏
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
+// 2026-09-17：本端点从"只管 mcp_servers"扩到**同时管两份声明**（settings.mcp_servers + settings.connectors）——
+// 连接器声明改完此前必须重启（`server/connectors.js` 交付说明里如实登记过的缺口）。热加载的唯一实现是
+// `connectors.reloadDeclaredSources()`（撤掉不在声明里的源 → 装载新增/变更的源，不重启）；本处理器只做鉴权与转呈，
+// 不在这里写第二份"谁该撤、谁该连"的判断（那会变成两处口径）。**权限面不变**：仍是本端点原有的 requireAuth。
+// 响应**只增字段**：`results`/`registeredTools` 逐字不变（前端 src/console/McpManager.jsx 在用），
+// 新增 connectors/connectorError/disconnected/sources/failures/notes（失败一条不吞，见该函数 ⑤）。
 app.post('/api/mcp/reload', requireAuth, async (req, res) => {
   try {
-    const mcp = await import('./mcp.js');
-    const { syncMcpTools } = await import('./tools/index.js');
-    // 断开全部 → 按配置重连
-    for (const c of mcp.listMcpClients()) { try { mcp.disconnectMcp(c.id); } catch { /* ignore */ } }
-    const r = await mcp.connectConfiguredMcps();
-    const n = syncMcpTools(mcp.listMcpClients());
-    res.json({ ok: true, results: r, registeredTools: n });
+    const { reloadDeclaredSources } = await import('./connectors.js');
+    const r = await reloadDeclaredSources();
+    res.json({
+      ok: r.ok, results: r.mcp, registeredTools: r.registeredTools,
+      connectors: r.connectors, connectorError: r.connectorError,
+      disconnected: r.disconnected, sources: r.sources, failures: r.failures, notes: r.notes,
+    });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 app.get('/api/file', requireAuth, async (req, res) => {

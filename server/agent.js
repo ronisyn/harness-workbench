@@ -116,12 +116,94 @@ export function activitySince(conversationId, after = 0, limit = 200) {
   return { items, seq: items.length ? items[items.length - 1].seq : (Number(after) || 0) };
 }
 
+/**
+ * 事件环**此刻还能给到哪**（只读快照）：`earliest`=环内最早一条的 seq（空环/已回收 ⇒ null）。
+ * 续订接口用它判缺口（见 `streamGap`）——环只留最近 300 条且执行结束后 60s 回收（见上），
+ * 客户端声明的起点早于 `earliest` 时，中间那段**已经收不回来了**。
+ */
+export function activityWindow(conversationId) {
+  const rec = activity.get(String(conversationId));
+  if (!rec || !rec.items.length) return { earliest: null, latest: null, count: 0 };
+  return { earliest: rec.items[0].seq, latest: rec.items[rec.items.length - 1].seq, count: rec.items.length };
+}
+
+/**
+ * 续订缺口判定（纯函数，export 供夹具直测）：**如实说"接不上"**，不假装接上了（v0.3 §4.7 可控制：断线重连不丢现场）。
+ * 判据就是那句原话——"请求的**起点**早于环内最早一条"。这里的"起点"＝客户端要的**下一条**（`after + 1`，
+ * 因为 `after` 是它已经看过的那一条的序号）：
+ *   · `after <= 0` ⇒ **不是缺口**：客户端说"我什么都没看过"（首订阅），它自己会去拉 /messages 全量；
+ *     把它报成缺口只会让每个新页面都收到一条无意义的告警。
+ *   · 环内一条都没有（已回收/从未有）⇒ `after > 0` 时**是缺口**（"你说的那个位置，我手里什么都没有"）。
+ *   · 其余 ⇒ `after + 1 < earliest` 即缺口。边界是**精确**的：环只从队头丢（丢掉的 seq 全 < earliest），
+ *     所以 `after + 1 === earliest` 意味着"客户端要的下一条正好还在"——那不算丢（多报一次缺口是假事实）。
+ * 判据在另一头刻意**保守**：seq 是跨会话共享的全局计数，`after` 有可能来自别的会话/别的段，所以
+ * "起点早于环内最早一条"未必真丢了事件——但客户端对这个标记的正确反应（回落 /messages 拿全量）在任何
+ * 情况下都安全。宁可多报一次缺口，也不谎称连续。
+ */
+export function streamGap({ after = 0, earliest = null } = {}) {
+  const a = Number(after) || 0;
+  if (!(a > 0)) return false;
+  if (earliest == null) return true;
+  return a + 1 < Number(earliest);
+}
+
+/** 计划进度（纯读，export 供夹具直测）：当前计划快照里"第一个还没完成的步骤"是第几步（1 基）；
+ *  没有计划、或计划已全部完成 ⇒ `current: null`（不造空计划、不把"做完"说成"第 0 步"）。 */
+export function planProgress(conversationId) {
+  const p = plans.get(String(conversationId || 'g'));
+  const steps = (p && Array.isArray(p.steps)) ? p.steps : [];
+  if (!steps.length) return null;
+  const done = steps.filter((s) => s && s.done).length;
+  const idx = steps.findIndex((s) => !(s && s.done));
+  return { total: steps.length, done, current: idx < 0 ? null : idx + 1 };
+}
+
 // 护栏配置（5 秒缓存）：settings 键 time_budget_min(分钟,0=不限)/round_cap(轮次,0=不限)/loop_guard(连续相同次数,0=关闭)/task_budget_yuan(成本知情阈值,0=关)
 let limitsCache = null;
 let limitsCacheAt = 0;
 
 // 工具结果入上下文前的处理：溢出（spill，步6）——超内联上限的结果全文落盘，上下文只留"预览 + 精确省略量 + 定位符"；
 // 存盘失败降级为内联截断且如实提示（工具本身仍算成功）。几何/阈值/取回见 tools/spill.js。
+
+// ── 溢出对客户端**可见**（v0.3 §2.5 清单第 4/5 条：'我们省略了什么'提示 + 溢出文件路径直接给出）──────────
+// 此前"发生了溢出"只落在**工具结果文本**里（模型看得见、人也看得见那串中文），事件流/前端却**没有这条事实**：
+// 客户端只知道"这个工具返回了一段文本"，无从判断它是不是被省略过的。这里把它抽成一个纯函数（export 供夹具直测），
+// 由既有的 `tool_done` 帧**只增**带出去（不新造事件类型、不改任何既有字段语义）。
+// 判据是**结构性**的、不需要新阈值：进上下文的文本 ≠ 工具原样结果 ⇔ `spillToolResult` 真的改写了它
+// （未超限时它原样返回 ⇒ 相等 ⇒ 没有这条事实，帧上不出现 `spill` 字段）。
+// 路径/省略量从 spill.js 写进文本的那段标记里读（格式见 docs/会话API契约-v1.md「溢出」一节）；
+// 读不出来（降级路径、格式漂移）只报"确实省略了"这一条事实，路径与省略量**如实为 null —— 不猜数字**。
+const SPILL_MARKER_RE = /…\[已省略\s*([\d,]+)\s*字节(?:（([\d,]+)\s*字符）)?；([\s\S]*?)\]…/;
+const SPILL_PATH_RE = /^(?:全文已存|全文即源文件)\s+(.+?)（/;
+
+/**
+ * 一次工具结果被溢出（省略）的事实；没有省略 ⇒ `null`（null 不是"失败"，是"这条事实不存在"）。
+ * @param {{tool?:string, callId?:string|null, raw?:string, content?:string}} o
+ *   `raw`＝工具原样结果（JSON 串），`content`＝真正进上下文的那一份（`spillToolResult` 的返回值）。
+ * @returns {null|{omitted:true, tool:string|null, callId:string|null, bytes:number, returnedBytes:number,
+ *                 omittedBytes:number|null, omittedChars:number|null, kind:'file'|'source'|'degraded'|'unknown',
+ *                 path:string|null}}
+ */
+export function spillFactOf({ tool = null, callId = null, raw, content } = {}) {
+  const before = String(raw ?? '');
+  const after = String(content ?? '');
+  if (after === before) return null;
+  const m = SPILL_MARKER_RE.exec(after);
+  const locator = m ? String(m[3] || '') : '';
+  const p = locator ? SPILL_PATH_RE.exec(locator) : null;
+  const num = (x) => (x == null ? null : Number(String(x).replace(/,/g, '')));
+  return {
+    omitted: true, tool: tool || null, callId: callId || null,
+    bytes: Buffer.byteLength(before, 'utf8'),          // 工具原样结果的体积（事实）
+    returnedBytes: Buffer.byteLength(after, 'utf8'),    // 这一份进上下文的体积（事实）
+    omittedBytes: m ? num(m[1]) : null,
+    omittedChars: m && m[2] != null ? num(m[2]) : null,
+    // 定位符三态（spill.js 的既有取值域，别处不另立一套）：溢出文件 / 源文件即全文 / 存盘失败降级（取不回）
+    kind: p ? (locator.startsWith('全文即源文件') ? 'source' : 'file')
+      : (after.includes('全文未能存盘') ? 'degraded' : 'unknown'),
+    path: p ? p[1].trim() : null,
+  };
+}
 
 // B6 假完成检测辅助：取最近一条用户消息文本（用于判断是否"任务语境"）
 function lastUserTextOf(msgs) {
@@ -551,6 +633,17 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     await pushSnapshot(round, lim);
     // 流式实时：模型思考/调用 LLM 中 → 通知前端"AI 处理中"（带累计费用，WS2 成本透出）
     emitEv(ctx.conversationId, emit, { type: 'agent_thinking', round: round + 1, costCum: Math.round(cumCost * 100) / 100 });
+    // 进度帧（v0.3 §4.7 四要素之一「可观测…**进度**…逐步可见」）：此前思考/工具/计划/成本都有，**没有进度**。
+    // 只发**已经算得出来的**那几个数，不给它们新造口径：
+    //   · `round`＝第几轮（与 thinking/agent_thinking 同一个循环序号，1 基）；
+    //   · `roundCap`＝**既有护栏配置** settings.round_cap（0=不限 ⇒ null）——不是本帧发明的上限；
+    //     它只在无人值守档真正拦人（fuseDecision，见 server/progress.js），所以字段名就叫 roundCap，不叫 total；
+    //   · `plan`＝当前计划快照走到第几步（来自 tools/index.js 的 plans，与 plan 事件同一份状态；无计划 ⇒ null）。
+    emitEv(ctx.conversationId, emit, {
+      type: 'progress', v: 1, round: round + 1,
+      roundCap: lim.roundCap > 0 ? lim.roundCap : null,
+      plan: planProgress(ctx.conversationId),
+    });
     // 段边界折叠（纪律1 允许的唯一改写）：整段替换一次，发生时记 collapseRound 供归因
     const collapsed = await maybeCollapseEarly(round, lim);
     if (collapsed) {
@@ -797,6 +890,10 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     msgs.push({ role: 'assistant', content: null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
     const maxPar = lim.maxParallelT > 0 ? lim.maxParallelT : 1; // 0=关闭并行（串行）
     const results = new Array(calls.length);
+    // 进上下文的文本（溢出后的那一份），由 execOne 在发 tool_done 之前算好、按模型顺序落到 msgs。
+    // 刻意**不放进 toolItem**：tool_done 帧已经带原始结果（`tool.result`），再挂一份只在上下文里用的大文本，
+    // 等于让每一帧多背一份同样的正文。
+    const ctxContents = new Array(calls.length);
     const execOne = async (call, idx) => {
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 参数解析失败用空 */ }
@@ -818,6 +915,19 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       // 失败码带上事件流（2026-09-15 统一失败分类）：前端/重建器据此区分"超时/未授权/参数错…"，
       // 不必再解析中文文案。result 本身已含 code，模型看到的那份无需额外处理。
       const toolItem = { name: call.function.name, args, result: resultText, status, code: result.code || null, durationMs: Date.now() - tStart, seq };
+      // 溢出（v0.3 §4.4「输出溢出（预览 + 路径 + 摘要）」）在**发 tool_done 之前**定型，理由有两条：
+      //   ① 客户端要能看见"这条结果被省略了"（§2.5 第 4/5 条）——帧发出后再往 `toolItem` 上挂字段是没人收得到的；
+      //   ② 事实必须与真正进上下文的那一份文本同源，所以这里就用同一个 `spillToolResult` 调一次、把结果留着给
+      //      下面的 `msgs.push` 用（调用它的参数与时机之外的一切都不变：同一个函数、同一个 cap、同一组 meta）。
+      // `spill` 字段**只在真的发生省略时出现**（`spillFactOf` 返回 null ⇒ 不上字段），既有字段一个都不改。
+      const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
+      const rawText = JSON.stringify(result);
+      const ctxContent = spillToolResult(rawText, msgCap, {
+        tool: call.function.name, args: toolItem.args, conversationId: ctx.conversationId, callId: call.id, redact: redactSecrets,
+      });
+      ctxContents[idx] = ctxContent;
+      const spill = spillFactOf({ tool: call.function.name, callId: call.id, raw: rawText, content: ctxContent });
+      if (spill) toolItem.spill = spill;
       results[idx] = toolItem;
       emitEv(ctx.conversationId, emit, { type: 'tool_done', tool: toolItem });
       return result;
@@ -835,12 +945,12 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const p = plans.get(String(ctx.conversationId || 'g'));
           if (p) emitEv(ctx.conversationId, emit, { type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
         }
-        const msgCap = call.function.name.startsWith('subagent') ? 12000 : 4000;
         msgs.push({
           role: 'tool', tool_call_id: call.id,
-          content: spillToolResult(JSON.stringify(rawResults[k]), msgCap, {
-            tool: call.function.name, args: toolItem.args, conversationId: ctx.conversationId, callId: call.id, redact: redactSecrets,
-          }),
+          // 溢出改写在上面的 execOne 里已经算过（同一函数、同一 cap、同一组 meta，结果与改前逐字节相同）；
+          // 这里只按模型顺序取用。刻意**不做**"取不到就再算一次"的兜底：再算一次会写出第二个溢出文件
+          // （那是真实的副作用），取不到就该是个显眼的坏值，而不是静默多落一份盘。
+          content: ctxContents[idx],
         });
       });
     }

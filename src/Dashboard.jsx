@@ -152,7 +152,7 @@ export default function Dashboard({ user, onGoChat, onGoConsole, onLogout }) {
             {/* 指标告警线（2026-09-16，v0.3 §4.4.1 规则4）：**缺省不设线 ⇒ 这段什么都不显示**（上面那两行逐字不变）。
                 线只来自设置键 metric_alert_lines（server/selfeval/alerts.js 负责比较），这里只做标记：
                 **只告警、不阻断**——页面照常用，越线只是"该有人看一眼了"。
-                服务端要带出 `metricAlerts` 才有内容（`/api/cache-hit/summary` 的接线见 alerts.js 文件头）。 */}
+                服务端现在会带出 `metricAlerts`（2026-09-17 接上，接线点在 /api/cache-hit/summary；见 alerts.js 文件头）。 */}
             {Array.isArray(hitSum.metricAlerts) && hitSum.metricAlerts.length > 0 && (
               <div style={{ marginTop: 2, color: '#cf1322' }}
                 title={hitSum.metricAlerts.map((a) => a.message).join('\n')}>

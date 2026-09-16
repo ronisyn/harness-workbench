@@ -152,6 +152,8 @@ body {
   text-overflow: ellipsis; font-style: italic; }
 .rw-trace-preview:empty { display: none; }
 .rw-trace-ms { color: var(--rw-muted); font-size: 11px; white-space: nowrap; }
+/* 溢出标记（2026-09-17，v0.3 §2.5 第 4/5 条）：只在服务端真的省略过内容时出现，悬停给出路径与省略量 */
+.rw-trace-spill { color: var(--rw-yellow); font-size: 11px; white-space: nowrap; cursor: help; }
 .rw-trace-open { border: 1px solid var(--rw-border); background: #fff; border-radius: 6px; font-size: 11px;
   cursor: pointer; padding: 0 6px; white-space: nowrap; }
 .rw-trace-open:hover { border-color: var(--rw-red); color: var(--rw-red); }

@@ -53,6 +53,7 @@ export function createRunView() {
     lastWait: null,
     warnings: [],             // fake_done_warn 等如实告知类
     rounds: 0,
+    progress: null,           // 最近一次 progress 帧 { round, roundCap, plan }（2026-09-17 新增；只增不改）
     usage: null,              // 最后一轮
     totals: null,             // 全量（RA-37 G4）
     spentYuan: null,
@@ -89,6 +90,12 @@ export function applyEvent(view, ev) {
       return v;
     case 'thinking':
       v.rounds = Number(ev.round) || view.rounds;
+      return v;
+    case 'progress':
+      // 2026-09-17（v0.3 §4.7「可观测（思考/工具/进度/计划/成本逐步可见）」的进度那一格）：
+      // 进度帧不改变答案/状态，只记下"走到第几轮、上限多少、计划第几步"——这三个数都是**服务端已经算出来的**，
+      // 重建器不自己推。`roundCap` 为 null ＝ 没设上限（不是 0 轮）；`plan` 为 null ＝ 本会话没有计划。
+      v.progress = { round: ev.round ?? null, roundCap: ev.roundCap ?? null, plan: ev.plan ?? null };
       return v;
     case 'tool_start':
       v.tools = [...view.tools.filter((t) => !(t.seq === ev.tool.seq && t.name === ev.tool.name)), { ...ev.tool, status: ev.tool.status || 'running' }];

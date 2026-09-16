@@ -3,8 +3,10 @@
 // 周字段非标准：0=周一（常规 cron 为 0=周日），内部以周一为一周起点；如"周一 05:00"="0 5 * * 0"（2026-09-06 注）
 // 调度器每分钟检查一次到期任务 → 创建/复用会话执行 runAgent → 记录结果
 import { db } from './db.js';
+import { storage } from './storage/index.js'; // v0.3 §4.1「存储走接口」：归档后的沉淀提案读会话经历走接口
 import { runAgent } from './agent.js';
 import { summarizeConversation } from './tools/index.js';
+import { sinkSessionKnowledge } from './selfeval/knowledge-sink.js';
 import { config } from './config.js';
 import { RW_WORKSPACE, RW_FS_ROOT } from './env.js';
 // 编排面（v0.3 §4.5）：定时档的**源**就在这个 cron 循环里——每轮扫描触发一次 `schedule`，
@@ -240,8 +242,17 @@ export function startScheduler() {
            AND NOT EXISTS (SELECT 1 FROM conv_summaries s WHERE s.conversation_id=c.id AND s.updated_at > c.updated_at)
          ORDER BY c.updated_at ASC LIMIT 3`);
       for (const c of cands) {
-        try { await summarizeConversation(c.id, { semantic: true, keys: config.keys }); }
-        catch (e) { console.error('[scheduler] 归档失败 conv#' + c.id + ':', e.message); }
+        try {
+          await summarizeConversation(c.id, { semantic: true, keys: config.keys });
+          // 「受限自动沉淀」接线点之二（v0.3 §4.3 记忆行；选点理由见 server/selfeval/knowledge-sink.js 文件头）：
+          // **摘要刚生成**就是"这段经历哪些值得留下"最清楚的时刻——与 /api/chat 收尾那条是同一个时机，
+          // 所以调的是同一个 `sinkSessionKnowledge`（产出**待审卡片**，不写库）。
+          // 这里不传 `emit`：那一端没有连着的客户端。卡片照常落在既有待答队列里（`GET /api/asks`），
+          // GUI 打开时照常看得到——不为"没有观众的帧"造一条假投递。
+          // 失败/无候选一律静默跳过（只记一行日志），不许把一次自动归档弄失败。
+          const sink = await sinkSessionKnowledge({ conversationId: c.id, storage, dbc: db });
+          if (sink.errors.length) console.warn('[knowledge-sink] 归档后沉淀提案未完全成功 conv#' + c.id + '：' + sink.errors.join('；'));
+        } catch (e) { console.error('[scheduler] 归档失败 conv#' + c.id + ':', e.message); }
       }
       if (cands.length) console.log('[scheduler] 自动归档', cands.length, '个空闲长会话');
     } catch (e) { /* 归档扫描容错 */ }

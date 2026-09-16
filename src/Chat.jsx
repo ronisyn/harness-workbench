@@ -129,6 +129,9 @@ function TraceCard({ items }) {
   const st = t.status === 'fail' ? '✕' : t.status === 'running' ? '●' : '✓';
   const lastDone = [...list].reverse().find((x) => x.status === 'done');
   const resText = (lastDone ? (typeof lastDone.result === 'string' ? lastDone.result : JSON.stringify(lastDone.result)) : '');
+  // 溢出事实（v0.3 §2.5 第 4/5 条「'我们省略了什么'提示 + 溢出文件路径直接给出」）：服务端在 `tool_done`
+  // 的 tool 上**只增**带一个 `spill` 字段（真的发生了省略时才有）。这里只做展示——"信息去哪了"要看得见。
+  const spill = [...list].reverse().map((x) => x.spill).find(Boolean) || null;
   const fileItem = [...list].reverse().find((x) => FILE_TOOLS.includes(x.name) && x.args && (typeof x.args === 'object') && (x.args.path || x.args.file || x.args.src) && x.status === 'done');
   const filePath = fileItem ? (fileItem.args.path || fileItem.args.file || fileItem.args.src) : null;
   const totalMs = list.reduce((s, x) => s + (x.duration_ms || 0), 0);
@@ -148,6 +151,7 @@ function TraceCard({ items }) {
         {list.length > 1 && <span className="rw-trace-count">×{list.length}</span>}
         <span className="rw-trace-preview">{humanTarget(t) || oneLine(resText).slice(0, 70) || (t.status === 'running' ? '运行中…' : t.status === 'fail' ? '失败' : '')}</span>
         <span className="rw-trace-ms">{totalMs / 1000 > 0 ? ((totalMs / 1000)).toFixed(1) + 's' : ''}</span>
+        {spill && <span className="rw-trace-spill" title={spillNote(spill)}>✂️ 省略{spill.omittedBytes != null ? ' ' + Number(spill.omittedBytes).toLocaleString('en-US') + 'B' : ''}</span>}
         {filePath && <button className="rw-trace-open" onClick={openFile} title="打开文件查看内容">📂 打开</button>}
         <span className="rw-trace-toggle">{open ? '▾' : '▸'}</span>
       </div>
@@ -172,6 +176,7 @@ function TraceCard({ items }) {
               <div key={xi} className={'rw-trace-step' + (x.status === 'fail' ? ' fail' : '')}>
                 <div className="rw-trace-step-head">{list.length > 1 ? '#' + (xi + 1) + ' ' : ''}{x.name} · {x.status === 'done' ? '✓' : x.status === 'running' ? '● 运行中' : '✕'} {x.duration_ms ? ((x.duration_ms / 1000).toFixed(1) + 's') : ''}</div>
                 {argsText ? <div className="rw-trace-line"><b>参数</b><pre>{argsText.slice(0, 500)}</pre></div> : null}
+                {x.spill ? <div className="rw-trace-line"><b>溢出</b><pre>{spillNote(x.spill)}</pre></div> : null}
                 {xres ? (isDiffLike(xres)
                   ? <div className="rw-trace-line"><b>结果（diff）</b><DiffBlock text={xres} /></div>
                   : <div className="rw-trace-line"><b>结果</b><pre>{xres.slice(0, 1000)}</pre></div>) : null}
@@ -637,6 +642,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
             // 任务清单进度实时更新
             patchLast((x) => ({ ...x, plan }));
           },
+          onProgress: (p) => {
+            // 进度帧（v0.3 §4.7「可观测…**进度**…逐步可见」）：第 N 轮 / 上限 M / 计划第几步。
+            // 三个数都来自服务端已经算出来的状态（本页不自己数轮次、不发明上限）。
+            patchLast((x) => ({ ...x, progress: p }));
+          },
           onApproval: (ap) => {
             // 审批请求：追加确认卡（guard 会话高风险工具）
             patchLast((x) => ({ ...x, approvals: [...(x.approvals || []), { id: ap.id, desc: ap.desc, decision: null }] }));
@@ -744,7 +754,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
         if (ended) { lastActRef.current = 0; setLive(null); if (!busyRef.current) loadMessages(cur); return; }
         if (busyRef.current) return; // 本页 SSE 直连渲染中，环仅作进度推进
         const last = items[items.length - 1];
-        setLive({ last: (last.type === 'tool_start' || last.type === 'tool_done') && last.tool ? last.tool.name : last.type, ts: Date.now() });
+        // 旁观条上的"当前"：进度帧转成人读的一句（否则会显示英文 type 名）
+        const label = last.type === 'progress'
+          ? ('第 ' + (last.round || '?') + ' 轮' + (last.plan && last.plan.current ? ' · 计划第 ' + last.plan.current + '/' + last.plan.total + ' 步' : ''))
+          : ((last.type === 'tool_start' || last.type === 'tool_done') && last.tool ? last.tool.name : last.type);
+        setLive({ last: label, ts: Date.now() });
       } catch { /* 轮询失败静默（断网/会话删除） */ }
     }, 2500);
     return () => clearInterval(t);
@@ -939,7 +953,7 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
                           </div>
                         ))}
                         {m.traces && m.traces.length > 0 && <TracePanel traces={m.traces} streaming={Boolean(m.streaming)} />}
-                        {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…</div>}
+                        {m.thinking && !m.content && <div className="rw-thinking">🤔 AI 思考中…{progressNote(m.progress)}</div>}
                         {m.error ? <div className="rw-err">⚠️ {m.error}</div> : null}
                         {!m.error && m.content && (m.streaming ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Md text={m.content} />)}
                         {!m.error && !m.content && !m.thinking && m.streaming && <span className="rw-caret">▋</span>}
@@ -1049,6 +1063,25 @@ const TRACE_LABEL = {
   ocr_image: '识别图片'
 };
 const humanTool = (name) => TRACE_LABEL[name] || String(name || '');
+
+/** 溢出事实（tool_done 的 `tool.spill`）→ 给人看的一句。**只用服务端给的数**：没读出省略量就不编一个，
+ *  路径没有就如实说"取不回/未读出"（`kind` 的取值域见 server/agent.js 的 `spillFactOf`）。 */
+const spillNote = (s) => {
+  if (!s) return '';
+  const n = s.omittedBytes != null ? (Number(s.omittedBytes).toLocaleString('en-US') + ' 字节') : '一部分内容';
+  if (s.path) return '本轮结果被省略 ' + n + '，全文在：' + s.path + (s.kind === 'source' ? '（源文件本身）' : '（可用 fetch_spill 按范围取回）');
+  if (s.kind === 'degraded') return '本轮结果被省略 ' + n + '，且全文未能存盘（取不回，已按内联截断降级）';
+  return '本轮结果被省略 ' + n + '（定位符未读出，原因见服务端 [spill] 日志）';
+};
+
+/** 进度帧 → 给人看的一句（第几轮 / 上限多少 / 计划第几步）。没设上限、没有计划就不显示那一段。 */
+const progressNote = (p) => {
+  if (!p) return '';
+  const parts = [];
+  if (p.round) parts.push('第 ' + p.round + ' 轮' + (p.roundCap ? ' / 上限 ' + p.roundCap : ''));
+  if (p.plan) parts.push(p.plan.current ? '计划第 ' + p.plan.current + '/' + p.plan.total + ' 步' : '计划 ' + p.plan.done + '/' + p.plan.total + ' 步已完成');
+  return parts.length ? '（' + parts.join(' · ') + '）' : '';
+};
 
 const humanTarget = (t) => {
   if (!t || !t.args || typeof t.args !== 'object') return '';

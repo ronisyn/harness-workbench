@@ -8,6 +8,11 @@
 //   ② HTTP API 连接器：对方没有 MCP 时，声明 `baseUrl` + 凭证引用 + 一组**允许的动作**（method/path/参数映射）
 //      → 动作经**既有** `registerDynamicTools` 注册进同一张工具表（来源 id 各自一条 `connector:<id>`）。
 //
+// ── 改完怎么生效（2026-09-17 补：此前"连接器声明改完必须重启"是如实登记过的缺口）────────────────
+// `POST /api/mcp/reload` 现在同时读**两份声明**（`settings.mcp_servers` + `settings.connectors`）。
+// 热加载的唯一实现是本文件末尾的 `reloadDeclaredSources()`：撤掉不在声明里的源 → 装载新增/变更的源，
+// 同一进程内生效、不重启；端点是薄壳，只做鉴权与转呈（三条纪律见该函数注释）。
+//
 // ── 声明面放哪（唯一出处）──────────────────────────────────────────────────────────────
 // 放 **`settings.connectors`**（JSON 数组）：与 `settings.mcp_servers` 同一张表、同一读取口径
 // （`SELECT svalue FROM settings WHERE skey=?`，见 credentials.js 的 `readMcpConfig`）、同一写入 API（`PUT /api/settings`）。
@@ -26,8 +31,8 @@
 //   · 装配期：记 `ok:false` 且不注册该连接器的工具（与 MCP 路"缺密钥就不连、也不假装连上"同一口径）；
 //   · 调用期：抛错（不发 `Authorization: Bearer undefined`、不塞空串）。
 import { db } from './db.js';
-import { CREDENTIAL_REF_RE, credentialsFile, describeSecret, getSecret, resolveEnv, redactSecretValues } from './credentials.js';
-import { connectMcp, listMcpClients } from './mcp.js';
+import { CREDENTIAL_REF_RE, credentialsFile, describeSecret, getSecret, readMcpConfig, resolveEnv, redactSecretValues } from './credentials.js';
+import { connectMcp, connectConfiguredMcps, disconnectMcp, listMcpClients } from './mcp.js';
 import { dynamicSourceIds, registerDynamicTools, unregisterDynamicTools } from './tools/registry.js';
 
 /** 声明取值域：kind 必须显式写（不猜——"猜一个"会让写错的 kind 静默落到某条路上跑起来）。 */
@@ -300,4 +305,85 @@ export async function connectConfiguredConnectors(dbc = db) {
     if (sid.startsWith('connector:') && !ids.has(sid)) unregisterDynamicTools(sid); // 声明里没有的＝已卸载
   }
   return { ok: results.every((r) => r.ok), results };
+}
+
+/**
+ * **热加载**（2026-09-17，闭 §4.2 那条"连接器声明改完必须重启"的缺口）：
+ * 重新读**两份声明** → 撤掉不在声明里的源 → 装载新增/变更的源，**同一进程内生效、不重启**。
+ *
+ * 声明面有两份，这一条同时管（此前 `POST /api/mcp/reload` 只覆盖 `settings.mcp_servers`，
+ * 连接器声明改完只能重启——那是连接器交付说明里如实登记过的缺口）：
+ *   · `settings.mcp_servers` → 既有 `connectConfiguredMcps`（MCP 客户端池）；
+ *   · `settings.connectors`  → 本模块的 `connectConfiguredConnectors`（MCP 路并进**同一个**客户端池；
+ *     HTTP 路把声明即 schema 的动作注册/替换进同一张工具表，来源 id＝`connector:<id>`）。
+ *
+ * 三条纪律（与 G2「卸载后立即消失」同一条，验收见 `test/connectors-reload.test.mjs`）：
+ *   ① **声明面是唯一出处**：不在本轮声明里的 `connector:*` 源一律撤掉（由 `connectConfiguredConnectors`
+ *      末尾那条扫描完成，本函数不重复写第二遍）；`kind=mcp` 的连接器同理——不在声明里就不重连，
+ *      它在上一次声明里注册的 `mcp_<id>_*` 工具随 `syncMcpTools(池子现状)` 一起从工具面消失。
+ *   ② **变更的源要真的换掉**：`connectMcp` 是幂等的"已连接即跳过"，所以同 id 改了 command/args
+ *      只有**先断开再按新声明连**才会生效 ⇒ 声明内的客户端也先断（与 reload 既有语义一致）。
+ *   ③ **失败如实报，且不留半态**：连接器声明非法时**整半边冻结**（不重连、不撤源、上一代工具面保持），
+ *      错误原文进 `connectorError`；mcp_servers 那半边照常生效（不让一处写坏的声明拖走另一处已好的功能）。
+ *
+ * 不做的事（照旧）：不新增权限面、不新增凭证路径、不碰 `settings` 的写入（读声明走既有两读函数）。
+ * @param {object} [dbc] 可注入的库（夹具用假库；真库会被连/被读，单测不能碰它——与两个 connect* 同一手法）
+ * @returns {Promise<{ok:boolean, disconnected:string[], mcp:Array, connectors:Array|null, connectorError:string|null,
+ *   registeredTools:number, sources:string[], failures:string[], notes:string[]}>}
+ */
+export async function reloadDeclaredSources(dbc = db) {
+  // ① 先读 + 先校验，**任何副作用之前**（读不进来/声明非法 ⇒ 什么都不动）
+  const connList = await readConnectorConfig(dbc);
+  const connProblems = validateConnectors(connList);
+  const connectorsOk = connProblems.length === 0;
+  const mcpRaw = await readMcpConfig(dbc);
+  const mcpIsList = Array.isArray(mcpRaw);
+  const mcpCfg = mcpIsList ? mcpRaw.filter((s) => s && s.id) : [];
+  const mcpIds = new Set(mcpCfg.map((s) => String(s.id)));
+  const connMcpIds = new Set(connectorsOk
+    ? connList.filter((c) => c && c.kind === 'mcp' && c.id).map((c) => String(c.id))
+    : []);
+  // 连接器声明非法 ⇒ 它那半边冻结：池里**不属于 mcp_servers 声明**的客户端按"仍在声明里"对待（不撤、不重连）
+  const frozen = new Set();
+  if (!connectorsOk) {
+    for (const c of listMcpClients()) if (!mcpIds.has(String(c.id))) frozen.add(String(c.id));
+  }
+  // ② 撤掉不在声明里的源 + 让"变更"生效：断开本轮声明覆盖到的客户端，以及池里已不在任何声明里的客户端
+  const disconnected = [];
+  for (const c of listMcpClients()) {
+    const id = String(c.id);
+    if (frozen.has(id)) continue;
+    try { disconnectMcp(c.id); disconnected.push(id); } catch { /* 进程已死/已摘除：不算失败 */ }
+  }
+  // ③ 按新声明装载：两份声明各走既有唯一实现（不新造连接/注册路径）
+  const mcp = await connectConfiguredMcps(dbc);
+  let connectors = null;
+  let connectorError = null;
+  if (connectorsOk) {
+    try {
+      connectors = (await connectConfiguredConnectors(dbc)).results;
+    } catch (e) {
+      // 走到这里已过校验 ⇒ 只可能是读库/注册期的意外；如实报，不让 MCP 那半边的结果被吞掉
+      connectorError = String((e && e.message) || e);
+    }
+  } else {
+    connectorError = '[connectors] 连接器声明非法（本轮不碰连接器那半边，上一代工具面保持）：\n  - ' + connProblems.join('\n  - ');
+  }
+  // ④ 同步工具面：池子现状＝本轮声明的结果 ⇒ 不在声明里的源随之撤掉（这一句是"卸载后立即消失"的收口）
+  const { syncMcpTools } = await import('./tools/index.js'); // 动态 import：避开 connectors → tools/index → … 的加载环
+  const registeredTools = syncMcpTools(listMcpClients());
+  // ⑤ 如实报：失败一条不吞，notes 里写明"为什么有一半没动"
+  const failures = [
+    ...mcp.filter((r) => !r.ok).map((r) => 'mcp_servers ' + r.id + '：' + r.error),
+    ...(connectors || []).filter((r) => !r.ok).map((r) => 'connectors ' + r.id + '（' + r.kind + '）：' + r.error),
+  ];
+  const notes = [];
+  if (!mcpIsList) notes.push('settings.mcp_servers 不是数组（按"没有声明"处理：不在声明里的源一律撤掉）');
+  if (!connectorsOk) notes.push('settings.connectors 声明非法 ⇒ 连接器那半边冻结（上一代工具面保持，未撤任何源）');
+  if (connectorError && connectorsOk) notes.push('连接器装配期意外失败：' + connectorError);
+  return {
+    ok: failures.length === 0 && !connectorError,
+    disconnected, mcp, connectors, connectorError, registeredTools,
+    sources: dynamicSourceIds(), failures, notes,
+  };
 }

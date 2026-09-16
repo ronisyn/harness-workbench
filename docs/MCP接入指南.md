@@ -43,12 +43,31 @@ RW 支持连接外部 MCP（Model Context Protocol）server，把外部工具（
 - MCP server 由**管理员配置**（settings），模型不能自行添加
 - MCP 工具走平台统一权限/纪律层（preset/启用集/审批/Access 规则仍生效）
 - token 只存服务器 settings 表，前端仅显示配置形态不暴露 token 明文
-- 断开：把数组里该 server 删掉 →「保存并连接」即断开
+- 断开：把数组里该 server 删掉 →「保存并连接」即断开（声明面是唯一出处：不在声明里的源一律撤掉——MCP server 与连接器同一条纪律）
 
 ## 管理 API
 
 - `GET /api/mcp` —— 查看已配置与连接状态
-- `POST /api/mcp/reload` —— 按配置重连全部
+- `POST /api/mcp/reload` —— **按声明重连**（2026-09-17 起同时管两份声明：`settings.mcp_servers` + `settings.connectors`）
+  - 鉴权：沿用该端点原有 `requireAuth`（**没有新增权限面**，也没有放宽）。
+  - 行为：重新读声明 → 撤掉不在声明里的源 → 装载新增/变更的源；**同一进程内生效，不重启**。
+    不在声明里的 `connector:*` 源一律撤掉；`kind=mcp` 的连接器不在声明里就不重连，其 `mcp_<id>_*` 工具随之从工具面消失。
+  - 失败如实报、不留半态：`settings.connectors` 声明非法时，**连接器那半边冻结**（上一代工具面保持、一个源都不撤），
+    错误原文在 `connectorError`、说明在 `notes`；`mcp_servers` 那半边照常生效。
+  - 响应字段：`ok` · `results`（mcp_servers 逐条）· `registeredTools` · `connectors`（连接器逐条，冻结时为 `null`）·
+    `connectorError` · `disconnected` · `sources`（当前动态来源 id）· `failures` · `notes`。
+    前三个是老字段，**逐字保留**（`src/console/McpManager.jsx` 在用）；其余为本次新增，只增不改。
+  - 唯一实现是 `server/connectors.js` 的 `reloadDeclaredSources()`（端点是薄壳，只做鉴权与转呈）；
+    验收见 `test/connectors-reload.test.mjs`（加/改/删 + 不在声明里即撤 + 非法声明冻结 + 鉴权不变）。
+
+### 连接器声明（`settings.connectors`）改完怎么生效
+
+连接器＝带凭证的执行后端（v0.3 §4.2），两条路：`kind:"mcp"`（复用同一客户端池与同一注册路径）与
+`kind:"http"`（`baseUrl` + 凭据引用 + 允许的动作，动作注册成 `conn_<id>_<动作>`）。声明形状与校验的唯一出处是
+`server/connectors.js` 的 `validateConnectors`（非法当场报，报错指到具体条目）。
+
+**改完调一次 `POST /api/mcp/reload` 即生效，不需要重启**：HTTP 路整源替换（动作增删改即时可见），
+MCP 路先断开再按新声明连（同 id 换了 `command`/`args` 也会生效）。
 
 ## 模型侧用法
 

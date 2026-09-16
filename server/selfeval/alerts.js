@@ -16,11 +16,16 @@
 //   · `scripts/ra35-report.mjs` 里的 99%/1k/5k —— 那是 RA-35 **判定报告**自带的判定线，属另一处既有口径，
 //     本模块**不复制**它，也不把它当默认值（"只报数不设线"是本仓对文档的登记偏离，见交付报告）。
 //
-// 设线怎么落到产品面（唯一未做的接线，如实登记）：
-//   · 引擎侧已就绪：本模块 + 设置键 `metric_alert_lines` + `propose.js` 的 R8 规则（待审提案）；
-//   · 页面标记要 `GET /api/cache-hit/summary` 多带一个字段（`server/index.js` 本批**未动**，由平台面接手）：
-//     在 C2 取到之后加一行即可 —— `metricAlerts: evaluateLines({ lines: await loadMetricAlertLines(), metrics: { c1: ..., c2Median: c2.median, c2P95: c2.p90, c3PerRun: c3.perRun, c4Invalidate: c4.count, c5Exempt: c5.total } })`
-//     （`src/Dashboard.jsx` 的越线标记已经写好，收到这个字段就会显示——缺省不显示，与现状逐字相同）。
+// 设线怎么落到产品面（**2026-09-17 已接，接线点如下**）：
+//   · 引擎侧：本模块 + 设置键 `metric_alert_lines` + `propose.js` 的 R8 规则（待审提案）；
+//   · 页面标记（`src/Dashboard.jsx`）：`GET /api/cache-hit/summary` 现在会带出 `metricAlerts` 字段 ——
+//     在 C2 取到之后加的那一行就是（读数全部取自该端点**已经查回来的** c1/c2/c3/c4/c5，不新采集、不重算口径）：
+//       `metricAlerts: evaluateLines({ lines: await loadMetricAlertLines(), metrics: { c1, c2Median: c2.median, c2P95: c2.p90, c3PerRun: c3.perRun, c4Invalidate: c4.count, c5Exempt: c5.total } })`
+//     缺省不设线 ⇒ 空数组 ⇒ 页面那段什么都不显示，行为与接线前逐字相同。
+//     线写坏了（不是合法 JSON/未知指标/运算符不合法）**不会把整页打成 500**：原因进同一个响应体的
+//     `metricAlertsError`，页面照常出数——"监控看着像开着"比"这一块显示不出来"更坏，所以不静默吞。
+//   · 原文留痕（历史登记，已由上面这条兑现）：接线前这里写的是「页面标记要 `GET /api/cache-hit/summary`
+//     多带一个字段（`server/index.js` 本批**未动**，由平台面接手）——在 C2 取到之后加一行即可」。
 
 /** 运算符：只收四个，语义就是它字面的意思（不引入"警告档/严重档"这类要拍脑袋的档位）。 */
 export const OPERATORS = Object.freeze(['<=', '<', '>=', '>']);
