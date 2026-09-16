@@ -530,10 +530,20 @@ const prioLine = (p) => {
   return parts.join(' · ');
 };
 
+/**
+ * 指纹的**落库标记**：写入时渲染进正文，写入前用它做 LIKE 查重 —— 两边必须是**同一个函数**产出的同一串。
+ * 2026-09-18 修（C-71）：原先渲染写的是裸指纹（`【指纹】<fp>`），而查重找的是另一份格式
+ * （`fprint:<fp>`，来自 `collect.js` 的 `fprintTag`）⇒ LIKE 永远匹配不上，同一批次重复落库
+ * （真机实测：同一批次连跑两次，`evo_goals` 从 4 行涨到 7 行，而两次的指纹逐字相同）。
+ * 现在标记只有这一个出处：渲染与查重都从这里取。
+ */
+export const FPRINT_LABEL = '【指纹】';
+export function fingerprintMark(fp) { return FPRINT_LABEL + String(fp); }
+
 /** `extension_demands.content`（TEXT，按 2000 字截断——口径同 index.js:2643 的 content.slice(0,2000)） */
 export function renderDemandContent(p) {
   return [
-    `【批次】${p.batchId}`, `【来源】${p.sourceCn}`, `【指纹】${p.fingerprint}`,
+    `【批次】${p.batchId}`, `【来源】${p.sourceCn}`, fingerprintMark(p.fingerprint),
     `【依据】${p.basis}`, `【建议改动】${p.action}`, `【涉及位置】${p.locator}`,
     `【预期收益】${p.expectedBenefit}`, `【风险】${p.risk}`, `【验证方式】${p.verification}`,
     `【优先级】${prioLine(p)}（v0.3 §0.4：①②③优先于"加新功能"；无加权公式）`,
@@ -546,7 +556,7 @@ export function renderGoal(p) {
   return {
     name: p.title.slice(0, 200),
     descr: [
-      `【批次】${p.batchId}`, `【来源】${p.sourceCn}`, `【指纹】${p.fingerprint}`,
+      `【批次】${p.batchId}`, `【来源】${p.sourceCn}`, fingerprintMark(p.fingerprint),
       `【依据】${p.basis}`, `【建议改动】${p.action}`, `【涉及位置】${p.locator}`,
       `【预期收益】${p.expectedBenefit}`, `【风险】${p.risk}`, `【验证方式】${p.verification}`,
       `【优先级】${prioLine(p)}`,

@@ -16,8 +16,7 @@
 //     顺带让人在审批台上也能看见"这两条是不是同一件事"。
 import { config } from '../config.js';
 import { db } from '../db.js';
-import { checkIronLaw, renderDemandContent, renderGoal, SOURCE_CN } from './propose.js';
-import { fprintTag } from './collect.js';
+import { checkIronLaw, renderDemandContent, renderGoal, SOURCE_CN, fingerprintMark } from './propose.js';
 
 /**
  * **唯一**允许本模块写入的表（v0.3 §0.4 铁律：产出物只落提案载体，不落代码、不落新表）。
@@ -45,10 +44,9 @@ export async function resolveAccountId({ dbc = db, accountId = null } = {}) {
   return id;
 }
 
-/** 幂等检查：同批次同一条提案是否已经落过（按指纹标记查） */
+/** 幂等检查：同批次同一条提案是否已经落过（按**与渲染同一个函数**产出的指纹标记查，见 C-71） */
 export async function findExisting({ dbc = db, proposal } = {}) {
-  const tag = fprintTag(proposal.fingerprint);
-  const like = `%${tag}%`;
+  const like = `%${fingerprintMark(proposal.fingerprint)}%`;
   const [demand] = await dbc.query('SELECT id, status FROM extension_demands WHERE content LIKE ? LIMIT 1', [like]);
   if (demand) return { table: 'extension_demands', id: demand.id, status: demand.status, fingerprint: proposal.fingerprint };
   const [goal] = await dbc.query('SELECT id, status FROM evo_goals WHERE descr LIKE ? LIMIT 1', [like]);

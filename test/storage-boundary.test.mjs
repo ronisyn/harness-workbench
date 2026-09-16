@@ -38,8 +38,8 @@ const REGISTERED = {
   '组①引擎与账本存量': [
     'server/agent.js', 'server/epoch.js', 'server/canary.js', 'server/cards.js', 'server/projection.js',
     'server/replay.js', 'server/runtrack.js', 'server/subagent.js', 'server/tools/index.js', 'server/lessonrecall.js',
-    // eventlog.js 的账本本体已走接口（`events.append/read`）；剩下的是**契约投影**那一条
-    // （`INSERT INTO contract_events`）——它属于"契约域整体未迁"，代码里就地写明了理由
+    // eventlog.js 的账本本体已走接口（`events.append/read`）；剩下的是**契约投影**那一条 INSERT
+    // （写契约事实的投影表）——它属于"契约域整体未迁"，代码里就地写明了理由
     'server/eventlog.js',
   ],
   '组②渠道适配器（渠道自己的会话/消息落库路径，随渠道批迁）': [

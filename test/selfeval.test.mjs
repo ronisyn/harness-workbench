@@ -565,6 +565,62 @@ test('C4d 业务反馈解析：逐条 + 来源，忽略注释行', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
+// 2026-09-18（C-71）：上面那条 C5 幂等用例**用罐头结果挡掉了 LIKE 查询**，所以"查重串与落库文本
+// 不是同一个格式"这个真缺陷它一条都抓不到（真机实测：同一批次连跑两次，evo_goals 4 行→7 行）。
+// 这一条改成**真存真查**：假库把真实渲染出来的文本存起来，LIKE 查询按子串匹配 —— 渲染与查重只要
+// 有一点不一致，第二次就会判成 created，用例当场红。判据是"往返一致"，不是"我给了你一行"。
+function storeDb() {
+  const demands = []; const goals = []; let seq = 100;
+  return {
+    demands, goals,
+    async query(sql, params = []) {
+      if (/SELECT id, status FROM extension_demands WHERE content LIKE/.test(sql)) {
+        const needle = String(params[0]).replace(/%/g, '');
+        const hit = demands.find((r) => String(r.content).includes(needle));
+        return hit ? [{ id: hit.id, status: hit.status }] : [];
+      }
+      if (/SELECT id, status FROM evo_goals WHERE descr LIKE/.test(sql)) {
+        const needle = String(params[0]).replace(/%/g, '');
+        const hit = goals.find((r) => String(r.descr).includes(needle));
+        return hit ? [{ id: hit.id, status: hit.status }] : [];
+      }
+      if (/INSERT INTO extension_demands/.test(sql)) { const id = ++seq; demands.push({ id, content: params[3], status: '待审' }); return { insertId: id }; }
+      if (/INSERT INTO evo_goals/.test(sql)) { const id = ++seq; goals.push({ id, descr: params[2], status: 'active' }); return { insertId: id }; }
+      return [];
+    },
+  };
+}
+
+test('C5b 幂等（往返一致）：真渲染 → 真查重，第二次必须是 skipped-duplicate', async () => {
+  const { renderGoal, renderDemandContent, fingerprintMark } = await import('../server/selfeval/propose.js');
+  const mk = (route, id) => ({
+    id, batchId: 'selfeval-2026-09-16-7d', fingerprint: 'abc123abc123abcd', source: 'selfeval', sourceCn: '自我体检',
+    title: '提案' + id, basis: 'v0.3 §0.4＋实测', action: '改一处', locator: 'server/x.js', expectedBenefit: '降成本',
+    risk: '误伤', verification: '复跑 selfeval-collect 对比',
+    priority: { criteria: {}, satisfied: [], unknown: [], needsHuman: true, note: '' },
+    kind: route === 'evo_goals' ? 'engine-improvement' : 'manual', route: { table: route }, manualApprovalRequired: true,
+  });
+  const p = mk('evo_goals', 2);
+  const D = storeDb();
+
+  // ① 渲染出来的文本必须**包含查重用的那一串**（同一个函数产出的同一个标记）
+  assert.ok(renderGoal(p).descr.includes(fingerprintMark(p.fingerprint)), 'evo_goals.descr 必须带上查重用的指纹标记');
+  assert.ok(renderDemandContent(p).includes(fingerprintMark(p.fingerprint)), 'extension_demands.content 同上');
+
+  // ② 第一次落库：created；第二次同一条：必须 skipped-duplicate，且**没有第二次 INSERT**
+  const r1 = await writeProposal(p, { dbc: D, accountId: 1 });
+  assert.equal(r1.action, 'created');
+  assert.equal(D.goals.length, 1);
+  const r2 = await writeProposal(p, { dbc: D, accountId: 1 });
+  assert.equal(r2.action, 'skipped-duplicate', '同批次同一条不许落第二次（幂等判据＝指纹往返一致）');
+  assert.equal(D.goals.length, 1, '库里必须只有一行');
+
+  // ③ 换批次/换指纹 ⇒ 是新的一条（别把幂等做成"永远跳过"）
+  const other = { ...p, batchId: 'selfeval-2026-09-17-7d', fingerprint: 'ffff0000ffff0000' };
+  assert.equal((await writeProposal(other, { dbc: D, accountId: 1 })).action, 'created');
+  assert.equal(D.goals.length, 2);
+});
+
 test('C5 幂等：同批次跑两次，只落一次（第二次走 skipped，不再 INSERT）', async () => {
   // 第一遍：两张表都查不到指纹 → 各自 INSERT 一次
   const seen = new Map();

@@ -87,12 +87,14 @@ export function batchIdOf(at, days = DEFAULT_DAYS) {
   return `selfeval-${bjDate(at)}-${days}d`;
 }
 
-/** 内容指纹：幂等判据（同批次重复跑不产生重复提案）。为了能在库表里按前缀查，用短哈希。 */
+/** 内容指纹：幂等判据（同批次重复跑不产生重复提案）。为了能在库表里按前缀查，用短哈希。
+ *  2026-09-18（C-71）：原先这里还有一个 `fprintTag(fp)`（产出 `fprint:<fp>`）供写入侧查重用，
+ *  而**渲染侧**写的是裸指纹 ⇒ 两份格式永远对不上，同一批次连跑两次就重复落库（真机实测：
+ *  `evo_goals` 4 行 → 7 行，两次的指纹逐字相同）。现在标记的唯一定义在
+ *  `server/selfeval/propose.js` 的 `fingerprintMark()`（渲染与查重共用同一个函数），这里只算指纹。 */
 export function fingerprint(...parts) {
   return crypto.createHash('sha1').update(parts.map((p) => String(p == null ? '' : p)).join('\u0000'), 'utf8').digest('hex').slice(0, 16);
 }
-/** 落进库文本里的指纹标记（`extension_demands.content` / `evo_goals.descr` 都靠它去重）。 */
-export function fprintTag(fp) { return `fprint:${fp}`; }
 
 // ── ① 外部对标源指纹（**不是抓取器**）──────────────────────────────────────────────────────
 // 诚实登记：本仓**没有**自动读 DS/CD 变化的机制，本轮也**不硬造**一个抓取器（那会造出"未经验证的
