@@ -249,6 +249,27 @@ export function dynamicEntries() {
 export function dynamicSourceIds() { return [...dynamicSources.keys()].sort(); }
 
 /**
+ * 一条工具是否**显式声明**了"可与同一步的兄弟调用并发"（v0.3 §7.1 ⑤ 并行声明化的判据出口）。
+ *
+ * 判据只有一个：`=== true`。
+ *   · 静态工具问清单（`TOOL_POLICY`，由 `tools/manifest.js` 逐条声明，缺字段在装配期就抛错）；
+ *   · 动态来源（MCP / 连接器）不在静态清单里，由**装载方在条目上**自己声明——与 permission/timeoutMs
+ *     对动态条目的口径一致；不声明即独占（DSH 的 `dsh-mcp-client` 同样没给 MCP 工具设
+ *     `isConcurrencySafe`，即"未声明=独占"，本仓照抄这个默认，不替外部工具猜它安全）。
+ *   · 认不出来的名字（幽灵/已卸载）也返回 false —— 照 DSH `dsh-tools` executionMode：
+ *     "an exact `true` is parallel; unknown, hidden, undeclared, invalid … ⇒ exclusive"。
+ * 消费者：`server/agent.js` 的工具轮（经 `server/toolbatch.js` 分批）。
+ */
+export function isParallelSafe(name) {
+  const p = TOOL_POLICY[name];
+  if (p) return p.parallelSafe === true;
+  for (const arr of dynamicSources.values()) {
+    for (const t of arr) if (t && t.name === name) return t.parallelSafe === true;
+  }
+  return false;
+}
+
+/**
  * 注册/替换一个动态来源（全有或全无）。
  * 校验不通过**不替换**上一代（保留现有工具面），并返回原因——与热重载失败即回滚同口径。
  * @returns {{ok: boolean, count?: number, error?: string}}

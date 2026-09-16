@@ -165,6 +165,22 @@ export function applyEvent(view, ev) {
       // 但不改变重建出的答案/状态——记进 retries 供界面与复盘看，避免落进 unknownTypes（那会掩盖真实漂移）。
       v.retries = [...(v.retries || []), ev.retry];
       return v;
+    case 'agent_thinking':
+      // 2026-09-17：这一帧本来就在流里（agent.js 每轮最先发，带累计费用），但重建器不认识它 ⇒ 拿真流量
+      // 过 verifyRebuild 时会报一条**假**的"未知事件类型"（把版本漂移的告警用坏）。它不改变答案/状态，
+      // 只记下"累计花费到多少"（成本可见那一格），照 llm_retry 的处置：认得、记账、不算未知。
+      v.costCum = Number(ev.costCum) || v.costCum || 0;
+      return v;
+    case 'stream_hello': {
+      // 2026-09-17：续订端点（GET /api/conversations/:id/stream）的**传输帧**，客户端拿它判断"我是不是接丢了"：
+      // `gap:true` ＝ 你要的下一条已经被环回收，必须回落 /messages 拉全量（环 300 条 / 结束后 60s 是既有边界）。
+      // 它不是 /api/chat 的事件，故只记不看（不进 tools/answer）。
+      v.hello = { after: ev.after ?? null, gap: ev.gap === true, earliestSeq: ev.earliestSeq ?? null, buffered: ev.buffered ?? null };
+      return v;
+    }
+    case 'stream_end':
+      v.streamEnded = { reason: ev.reason ?? null, after: ev.after ?? null };
+      return v;
     case 'prefix_face':
       // 2026-09-16：这一轮真实发出的前缀面指纹（工具面 + 系统提示）。同样不改变答案/状态，但它是
       // "确定性投影"能对账的前提（账本里唯一能回答"当时那条面是什么"的一手数据）。

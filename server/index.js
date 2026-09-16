@@ -1640,7 +1640,9 @@ app.get('/api/usage/stats', requireAuth, async (req, res) => {
 // 语义：先补发事件环里 seq > Last-Event-ID（标准头，回退 ?after=）的事件，然后跟播到本次执行结束；
 //   帧格式与 /api/chat 一致（`id: <seq>\ndata: <json>\n\n`），所以客户端可以放心用同一个 EventSource 解析器。
 // 边界：环只保留最近 300 条且执行结束后 60s 回收（见 agent.js），超出范围接不上时**如实说明**
-//   （发 `stream_gap` 让客户端回落 /messages 重新拉全量），不假装接上了。
+//   （`stream_hello` 带 `gap:true`，让客户端回落 /messages 重新拉全量），不假装接上了。
+//   ⚠️ 2026-09-17 更正：这里原写"发 `stream_gap`"，而**没有这个事件类型**——实际发的是开播帧
+//   `stream_hello` 上的 `gap` 字段（判据在 agent.js 的 `streamGap`，契约文档 docs/事件契约.md §4）。
 app.get('/api/conversations/:id/stream', requireAuth, async (req, res) => {
   const cid = Number(req.params.id);
   const own = await storage.conversations.findOwned(cid, req.user.id).catch(() => null);

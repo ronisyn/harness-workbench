@@ -25,7 +25,9 @@ import { db } from './db.js';
 import { storage } from './storage/index.js'; // v0.3 §4.1「存储走接口」：护栏/策略设置读走接口
 import { checkpoint } from './runtrack.js';
 import { LIMIT_DEFAULTS } from './settingsSchema.js';
-import { LIGHT_TOOLSET } from './tools/registry.js';
+import { LIGHT_TOOLSET, isParallelSafe } from './tools/registry.js';
+// §7.1 ⑤ 并行声明化的消费点：可并行的进有界池、独占的单独跑（规则与理由见该文件头部）
+import { planToolBatches } from './toolbatch.js';
 import { narrowEnabled } from './subtools.js';
 
 /**
@@ -362,6 +364,23 @@ const COMPLETION_HINT = [
   '- 若已完成：直接给出最终总结回答（本轮不要再调用工具）。',
   '- 若未完成或还需验证（如：写码后未测试、查询后未给结论、任务只做了一部分）：继续调用工具把任务做完，直到目标真正完成再总结。',
 ].join('\n');
+
+/**
+ * 执行**一步**里的全部工具调用：按清单声明的并行安全度分批（§7.1 ⑤），批内并发、批间顺序，
+ * 且**提交恒按模型顺序**（照 DSH `dsh-agent-loop` 的不变式："dispatch may overlap, while policy,
+ * results, and result context remain model-ordered"）。
+ *
+ * 为什么导出成独立函数：agent 的其余部分要跑整条循环才动得起来（模型/库/前缀全都要在位），
+ * 而"独占工具不许和兄弟调用同时在跑"这条规则本身是**可判定的纯调度**——夹具直打这里，
+ * 就能用"记录同时在跑几个"的方式证明它，而不是靠读源码里有没有调用。
+ * @param {{calls: object[], maxPar: number, execOne: Function, commitOne: Function, isSafe?: Function}} o
+ */
+export async function runToolBatches({ calls, maxPar, execOne, commitOne, isSafe = isParallelSafe }) {
+  for (const batch of planToolBatches(calls.map((c) => c.function.name), maxPar, isSafe)) {
+    await Promise.all(batch.map((i) => execOne(calls[i], i)));
+    batch.forEach(commitOne);
+  }
+}
 
 export async function runAgent({ provider, model, messages, permission = 'full', ctx = {}, keys, emit, temperature = 0.4 }) {
   // 无人值守判定（2026-09-15）：定时任务/契约驱动器 = true（driver 与 scheduler 都会显式带上），
@@ -887,7 +906,8 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         toolLog, usage: res.usage, paused: true, reason: '连续重复无进展', spentYuan: spentNow(), usageTotals: runTotals(),
       };
     }
-    // 工具调用轮（实时流式；同一步内的多个工具调用按 maxParallel 有界并行，结果按模型顺序落上下文）
+    // 工具调用轮（实时流式；同一步内的多个工具调用按**清单声明的并行安全度**分批：
+    // parallelSafe:true 的进有界池并发，独占的（写入类/等人/独占额度）单独跑、前后不与谁同跑）
     // C1：回填上下文用瘦身版 arguments（原始 calls 仍用于执行与落库，见下方 execOne）
     // P22（2026-09）：工具轮正文（旁白）仅灰字展示、不入上下文历史——content 置 null（历史只存工具调用与最终文本）
     msgs.push({ role: 'assistant', content: null, tool_calls: calls.map((c) => slimToolCallForContext(c)) });
@@ -935,28 +955,27 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       emitEv(ctx.conversationId, emit, { type: 'tool_done', tool: toolItem });
       return result;
     };
-    for (let start = 0; start < calls.length; start += maxPar) {
-      const chunk = calls.slice(start, start + maxPar);
-      const chunkIdx = chunk.map((c) => calls.indexOf(c)); // 原始下标
-      const rawResults = await Promise.all(chunk.map((c, k) => execOne(c, chunkIdx[k])));
-      // 提交顺序 = 模型顺序（顺序化 toolLog/计划事件/tool 消息）
-      chunk.forEach((call, k) => {
-        const idx = chunkIdx[k];
-        const toolItem = results[idx];
-        toolLog.push(toolItem);
-        if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
-          const p = plans.get(String(ctx.conversationId || 'g'));
-          if (p) emitEv(ctx.conversationId, emit, { type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
-        }
-        msgs.push({
-          role: 'tool', tool_call_id: call.id,
-          // 溢出改写在上面的 execOne 里已经算过（同一函数、同一 cap、同一组 meta，结果与改前逐字节相同）；
-          // 这里只按模型顺序取用。刻意**不做**"取不到就再算一次"的兜底：再算一次会写出第二个溢出文件
-          // （那是真实的副作用），取不到就该是个显眼的坏值，而不是静默多落一份盘。
-          content: ctxContents[idx],
-        });
+    // 提交顺序 = 模型顺序（顺序化 toolLog/计划事件/tool 消息）
+    const commitOne = (idx) => {
+      const call = calls[idx];
+      const toolItem = results[idx];
+      toolLog.push(toolItem);
+      if (emit && (call.function.name === 'plan_tasks' || call.function.name === 'plan_done')) {
+        const p = plans.get(String(ctx.conversationId || 'g'));
+        if (p) emitEv(ctx.conversationId, emit, { type: 'plan', plan: p.steps.map((s, i) => ({ index: i + 1, text: s.text, done: s.done })) });
+      }
+      msgs.push({
+        role: 'tool', tool_call_id: call.id,
+        // 溢出改写在上面的 execOne 里已经算过（同一函数、同一 cap、同一组 meta，结果与改前逐字节相同）；
+        // 这里只按模型顺序取用。刻意**不做**"取不到就再算一次"的兜底：再算一次会写出第二个溢出文件
+        // （那是真实的副作用），取不到就该是个显眼的坏值，而不是静默多落一份盘。
+        content: ctxContents[idx],
       });
-    }
+    };
+    // 分批（§7.1 ⑤）：可并行的一组并发跑，独占的单独跑；批次按下标升序 ⇒ 提交顺序仍是模型顺序。
+    // 改前是"每 maxPar 个切一块、无差别并发"——那等于把清单里的 parallelSafe 声明当摆设，
+    // 声明白写了就是骗人（写入类工具会和兄弟调用同时改同一份文件）。规则本体与理由见 runToolBatches。
+    await runToolBatches({ calls, maxPar, execOne, commitOne });
     // §4.3「工具」维的**逐次如实上报**（2026-09-17）：网关发现"该模型声明不支持工具调用"时，
     // 本轮的 tools 字段根本没发出去（`res.toolFacePruned`，判定在 server/modelcaps.js）。
     // 这里把它记成 toolLog 里的一条**事实**（不是工具名），于是它自动经 run_end.capabilities.used 带出去
