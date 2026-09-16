@@ -118,9 +118,9 @@ export async function executeScheduledTask(task) {
       // 于是所有定时任务都被当成受限会话、一律被围栏限制在 RW_WORKSPACE 内，与 permission=full 不符）。
       const effectivePermission = task.permission || 'full';
       const ctx = taskExecContext(task, conv.id, conv, accessRules);
-      // 编排面（v0.3 §4.5）**手动档的源**：`task.__manual` 只有一条路能置上——`server/index.js:1964`
-      // 的 `POST /api/tasks/:id/run`（任务列表的 ▶ 跑一次）。它本来就是"人主动触发一次执行"，
-      // 与 `schedule` 档（cron 到点）是两件事，所以在这里分清后再投递。
+      // 编排面（v0.3 §4.5）**手动档的源**：`task.__manual` 只有一条路能置上——`server/index.js` 里
+      // `POST /api/tasks/:id/run` 那个处理器（任务列表的 ▶ 跑一次；行号随该文件演进会漂，按端点名找）。
+      // 它本来就是"人主动触发一次执行"，与 `schedule` 档（cron 到点）是两件事，所以在这里分清后再投递。
       // 载荷只带排障要用的标识（任务 id / 名字 / 会话 id），**不带 prompt 正文、不带任何凭据**。
       fireSafely(task.__manual ? 'manual' : 'schedule',
         { taskId: task.id, name: task.name, conversationId: conv.id },
@@ -204,6 +204,8 @@ export async function runSchedulerTick({ db: database = db, runner = executeSche
     schedulerRunning += 1;
     inFlight.add(t.id);
     out.started += 1;
+    // 编排面（v0.3 §4.5）**定时档的源**：本轮真的发起执行时投递一次 `schedule`。
+    // 载荷只带排障要的四格（任务 id / 名字 / 本次推进到的 next_run / 本轮读数），**不带 prompt、不带凭据**。
     // 编排面（v0.3 §4.5）**定时档的源**：本轮真的发起执行时投递一次 `schedule`。
     // 载荷只带排障要的四格（任务 id / 名字 / 本次推进到的 next_run / 本轮读数），**不带 prompt、不带凭据**。
     fireSafely('schedule',

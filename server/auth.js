@@ -48,12 +48,14 @@ export async function createInvite(accountId) {
 }
 
 export async function registerWithInvite(username, password, code) {
+  // 邀请码那两条仍是 `db`（`invites` 不在存储接口的实体清单里，两个函数全仓零调用方）；**账号那两条走接口**
+  // ——账号是登录链的实体，留着直连就等于"这条链还剩一处连库"，jsonfile 实现下注册会半途失败。
   const rows = await db.query('SELECT code FROM invites WHERE code=? AND used_by IS NULL', [code]);
   if (!rows.length) throw new Error('邀请码无效或已使用');
-  const exists = await db.query('SELECT id FROM accounts WHERE username=?', [username]);
-  if (exists.length) throw new Error('用户名已存在');
-  const r = await db.query('INSERT INTO accounts (username, pass_hash, role) VALUES (?,?,?)', [username, hashPwd(password), 'user']);
-  await db.query('UPDATE invites SET used_by=?, used_at=NOW() WHERE code=?', [r.insertId, code]);
+  const exists = await storage.accounts.findByUsername(username);
+  if (exists) throw new Error('用户名已存在');
+  const r = await storage.accounts.create({ username, passHash: hashPwd(password), role: 'user' });
+  await db.query('UPDATE invites SET used_by=?, used_at=NOW() WHERE code=?', [r.id, code]);
   return true;
 }
 

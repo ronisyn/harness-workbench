@@ -13,6 +13,7 @@
 //   · 外部＝`server/external-trigger.js` 的 `wrapExternalCalls`（两个适配器脚本各自包一层）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { register, fire, fireSafely, TRIGGER_KINDS, makeProbeHandler } from '../server/triggers.js';
 import { runSchedulerTick, executeScheduledTask } from '../server/scheduler.js';
 import { externalCallPayload, wrapExternalCalls } from '../server/external-trigger.js';
@@ -194,7 +195,8 @@ test('手动档：__manual 的"跑一次"fire 到 manual 档（入口＝POST /ap
   const seen = [];
   const off = register('manual', makeProbeHandler(seen), { id: 'src-manual' });
   try {
-    // `__manual: true` 正是 `server/index.js:1972` 那一行传的形状（本轮不改 index.js，只接源）。
+    // `__manual: true` 正是 `server/index.js` 里 `POST /api/tasks/:id/run` 那个处理器传的形状
+    // （本轮不改 index.js，只接源；行号随该文件演进会漂，按端点名找）。
     // 拦截点选"进化目标"那一步：它就在 `runAgent` **之前**、且源接线点也在它之前 ⇒
     // 手动档的触发真的发生了，而这次执行在调模型之前就被夹具拦下（不真调模型）。
     const { result, seen: sqls } = await withInterceptedDb(/FROM evo_goal_tasks/,
@@ -283,6 +285,21 @@ test('外部档载荷白名单：不在清单里的参数一律不进载荷；�
   Object.defineProperty(boom, 'message', { enumerable: true, get() { throw new Error('读不动'); } });
   assert.deepEqual(externalCallPayload('session.chat', boom), { tool: 'session.chat', unreadable: true });
   assert.deepEqual(externalCallPayload('session.chat', ['不是对象']), { tool: 'session.chat', unreadable: true });
+});
+
+test('两个适配器脚本真的接了这条线（源码级核对：那两个文件会被 serveStdio 挂住进程，不可 import）', () => {
+  // 为什么是源码级：`scripts/rw-jsonrpc.mjs` / `scripts/rw-mcp-server.mjs` 末尾都会启动 stdio 服务循环
+  // （import 它们＝把夹具进程挂住），与 `test/probe-declaration.test.mjs:105` 对这四个文件的既有处置同一条路。
+  // 本文件其它用例锁的是**被接的那条线**（`wrapExternalCalls` 的语义），这一条锁"线真的接在脚本上"。
+  const wired = [
+    ['scripts/rw-jsonrpc.mjs', /serveStdioWith\(wrapExternalCalls\(backend, \{ source: 'jsonrpc' \}\)/],
+    ['scripts/rw-mcp-server.mjs', /backend: wrapExternalCalls\(backend, \{/],
+  ];
+  for (const [rel, re] of wired) {
+    const src = readFileSync(new URL('../' + rel, import.meta.url), 'utf8');
+    assert.match(src, /import \{ wrapExternalCalls \} from '\.\.\/server\/external-trigger\.js'/, rel + ' 必须从唯一出处引包装器');
+    assert.ok(re.test(src), rel + ' 的请求入口必须把后端包起来（否则外部调用这一档又回到"只定义、没接线"）');
+  }
 });
 
 // ── ④ handler 抛错不许打断主流程（定时档：一轮扫描照常跑完；外部档：方法照常返回）────────────────
