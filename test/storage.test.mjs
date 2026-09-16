@@ -1035,12 +1035,68 @@ test('[jsonfile] 文件版本不认识 ⇒ 显式拒绝（不许当空库继续�
   await assert.rejects(async () => createJsonFileStorage({ file }).settings.get('k'), /版本不认识/);
 });
 
-test('[jsonfile] 能力缺失一路传到调用方：归档在原生动词上如实抛"不支持"（不是静默跳过）', async () => {
+test('[jsonfile] 能力面自报 + 归档在无归档表介质上跳过并留痕（裁定 C，不是抛错、也不是"归档 0 行"）', async () => {
   const { storage: s } = makeJsonFile();
-  // 归档是唯一还用原生动词（SQL 面）的调用方：换到没有 SQL 面的实现时，它必须**当场报错**，
-  // 让调用方（index.js）能如实打印"该存储实现不支持归档，跳过"，而不是悄悄返回 0 行。
-  await assert.rejects(() => archiveOldEvents({ dbc: s }),
-    (e) => e.code === STORAGE_UNSUPPORTED && /该实现不支持/.test(e.message));
+  const cap = s.capabilities();
+  assert.equal(cap.archive, false, 'JSON 介质没有 events_archive/audit_log_archive 两张表 ⇒ archive:false');
+  assert.equal(cap.rawSql, false, '也没有原生动词（one/run/query 一律抛"不支持"）');
+  assert.equal(cap.medium, 'jsonfile');
+  // 领域侧据此**跳过并留痕**：返回值是 skipped，介质里多出一条 archive:skip 审计
+  const r = await archiveOldEvents({ dbc: s });
+  assert.equal(r.skipped, true);
+  assert.match(r.reason, /events_archive/);
+  // 读回来（管理视图条件里没有"按 action 精确等于"这一种，就在夹具里筛——夹具自己的活，不动介质）
+  const traces = (await s.audit.adminList({ conds: ['1=1'], params: [], limit: 50 })).filter((r) => r.action === 'archive:skip');
+  assert.equal(traces.length, 1, '跳过必须留下一条账（"没归档"与"归档了 0 行"要能分开）');
+  assert.match(String(traces[0].detail), /^events: .*jsonfile/);
+  // 真被直接调到（＝代码没先问能力）时仍如实抛"不支持"：静默返回"0 行"会让没归档看起来像归档成功
+  await assert.rejects(() => s.events.archiveBatch({ before: 90, limit: 10 }),
+    (e) => e.code === STORAGE_UNSUPPORTED && /events_archive/.test(e.message));
+  await assert.rejects(() => s.audit.archiveBatch({ before: 90, limit: 10 }),
+    (e) => e.code === STORAGE_UNSUPPORTED && /audit_log_archive/.test(e.message));
+  // 归档统计：能如实报的只有"当前多少行"，归档侧恒 0/null（本介质上没有归档表，0 就是事实）
+  const st = await s.audit.archiveStats();
+  assert.equal(st.archived.rows, 0);
+  assert.equal(st.archived.oldest, null);
+  assert.ok(st.current.rows >= 1, '刚写的那条 archive:skip 要算在"当前"里');
+});
+
+test('[mysql] 归档机制：先搬后删、只删搬过的那批、统计形状（裁定 C 的"有能力那一边"）', async () => {
+  // 假库只认这三种形状（形状改了当场红），喂给**真的 mysql 实现** —— 测的是真语句与真顺序。
+  const calls = [];
+  const archived = [];
+  const fake = {
+    async query(sql, params) {
+      calls.push({ kind: 'query', sql, params });
+      if (/^SELECT id FROM audit_log WHERE created_at < NOW\(\) - INTERVAL \? DAY/.test(sql)) return [{ id: 11 }, { id: 12 }];
+      if (/^INSERT INTO audit_log_archive/.test(sql)) { archived.push(...params); return []; }
+      if (/FROM audit_log$/.test(sql)) return [{ c: 3, oldest: '2026-09-01 00:00:00' }];
+      if (/FROM audit_log_archive$/.test(sql)) return [{ c: 0, oldest: null }];
+      throw new Error('假库不认识的语句：' + sql);
+    },
+    async run(sql, params) {
+      calls.push({ kind: 'run', sql, params });
+      if (/^DELETE FROM audit_log WHERE id IN/.test(sql)) return { affectedRows: params.length };
+      throw new Error('假库不认识的语句：' + sql);
+    },
+  };
+  const s = createMysqlStorage({ db: fake });
+  assert.equal(s.capabilities().archive, true, 'MySQL 有归档表 ⇒ archive:true');
+  assert.equal(s.capabilities().rawSql, true);
+  assert.deepEqual(await s.audit.archiveBatch({ before: 90, limit: 100 }), { moved: 2 });
+  assert.deepEqual(archived, [11, 12], '搬的就是查出来的那批 id');
+  const iIns = calls.findIndex((c) => /INSERT INTO audit_log_archive/.test(c.sql));
+  const iDel = calls.findIndex((c) => /^DELETE FROM audit_log WHERE id IN/.test(c.sql));
+  assert.ok(iIns > 0 && iDel > iIns, '先插入归档表、插入成功才删原表（顺序不许反）');
+  assert.deepEqual(await s.audit.archiveStats(), { current: { rows: 3, oldest: '2026-09-01 00:00:00' }, archived: { rows: 0, oldest: null } });
+  // 插入失败 ⇒ 一个字都不许删（宁可少归档，不许丢数据）
+  const calls2 = [];
+  const fake2 = {
+    async query(sql) { calls2.push(sql); if (/^SELECT id FROM/.test(sql)) return [{ id: 21 }]; throw new Error('归档表写入失败（模拟）'); },
+    async run() { calls2.push('RUN'); return {}; },
+  };
+  await assert.rejects(() => createMysqlStorage({ db: fake2 }).audit.archiveBatch({ before: 90 }), /归档表写入失败/);
+  assert.equal(calls2.some((c) => c === 'RUN'), false, '插入没成功 ⇒ DELETE 一个字都不许发');
 });
 
 // ── 选择点与迁移示范（源码级：这两条才是"可替换"的机检）────────────────────────────────────

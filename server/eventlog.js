@@ -23,7 +23,7 @@
 //     （`events_archive` 表 + `NOW() - INTERVAL`），不在"引擎必需"范围内，本轮不动它 ——
 //     动它要连带改既有归档夹具的假库注入点，收益不成比例。`RW_STORAGE=jsonfile` 时它会
 //     **显式抛"该实现不支持 原生 SQL 查询"**（不静默跳过归档）。
-import { storage } from './storage/index.js';
+import { storage, mediumCapabilities, noteArchiveSkip } from './storage/index.js';
 
 // 纯流式增量（think 思考块 / delta 正文增量）**不进账本**：它们是 UI 的实时糖，且最终文本已在
 // messages.reasoning / messages.content 里（§7.3 双投影：原文始终可在 DB 查）。记账本的是**状态事件**。
@@ -178,31 +178,29 @@ export async function persistContractEvent(contractId, kind, detail, { conversat
 // ── 保留与归档（RA-47 未闭环项，2026-09-15 补齐）────────────────────────────────────────────
 // 账本**只追加不删除**是设计（可回放的源），但主表会无界增长。保留口径不自己发明：沿用审计账本那一条
 // （`audit_log` 的 90 天归档，见 migrations 里 A9 的注释）。
-// 三条硬约束（顺序即安全性）：
-//   ① **先插入归档表、插入成功才删原表** —— 删之前那批行必须已经躺在 events_archive 里；
-//   ② 失败**宁可少归档也不许先删**：任何一步出错就原样抛出，events 一行不动（抛错是为了让调用方出声，
-//      不能把"没归档"静默报成"归档了 0 行"——那样没人会去查）；
-//   ③ 分批（limit，默认 5000，与 audit 归档同量级）：一次只搬一批，避免长事务锁大表。
+// 本函数只定**策略**（多少天、一批多少、要不要跑、没有归档能力时怎么办）；
+// 搬表的**机制**（先搬后删、只删搬过的 id、失败原样抛）在介质里：`storage.events.archiveBatch`
+// ——2026-09-16 从本模块搬过去（裁定 C）：那是介质机制，换介质时它属于介质那一侧。
 export const EVENT_ARCHIVE_DAYS = 90; // 与审计账本同一口径（单一出处：这里）
 export const EVENT_ARCHIVE_LIMIT = 5000;
 
 /**
  * 把早于 `days` 天的事件搬进 `events_archive`。
  * 幂等：搬完即从 events 删除，重复跑不会再搬同一批（第二次返回 0）。
- * @param {{days?:number, limit?:number, dbc?:object}} opts dbc 仅夹具用（默认真存储；归档走原生动词，
- *   所以假对象只要有 `query`/`run` 两个方法就够 —— 既有归档夹具不必改）
- * @returns {Promise<{archived:number, deleted:number}>}
+ * @param {{days?:number, limit?:number, dbc?:object}} opts dbc 仅夹具用（默认真存储）
+ *   **没有归档能力的介质**（如 jsonfile）按裁定 C **跳过并留痕**：不抛错，写一条 `archive:skip` 审计
+ *   （detail 写明介质与原因），返回值是 `{skipped:true, reason}` 而**不是**"归档成功 0 行" ——
+ *   同一份 JSON 文件里既没有归档表、也没有体积压力，抛错只会让归档这件事在干净机器上整体失败。
+ * @returns {Promise<{archived:number, deleted:number}|{skipped:true, reason:string}>}
  */
 export async function archiveOldEvents({ days = EVENT_ARCHIVE_DAYS, limit = EVENT_ARCHIVE_LIMIT, dbc = storage } = {}) {
   const d = Number(days) > 0 ? Number(days) : EVENT_ARCHIVE_DAYS;
   const n = Math.min(20000, Math.max(1, Number(limit) || EVENT_ARCHIVE_LIMIT));
-  const rows = await dbc.query('SELECT id FROM events WHERE created_at < NOW() - INTERVAL ? DAY ORDER BY id LIMIT ?', [d, n]);
-  if (!rows.length) return { archived: 0, deleted: 0 };
-  const ids = rows.map((r) => r.id);
-  const ph = ids.map(() => '?').join(',');
-  // ① 先搬：搬成功（整条语句原子）之前，下面这行 DELETE 一行都不会执行
-  await dbc.query(`INSERT INTO events_archive (id, conversation_id, seq, type, payload, created_at) SELECT id, conversation_id, seq, type, payload, created_at FROM events WHERE id IN (${ph})`, ids);
-  // ② 再删：只删**刚才搬过的那批 id**（不是"再按时间条件删一遍"——条件式删法在插入失败时会删掉没搬走的行）
-  const r = await dbc.run(`DELETE FROM events WHERE id IN (${ph})`, ids);
-  return { archived: ids.length, deleted: Number((r && r.affectedRows) || 0) };
+  const cap = mediumCapabilities(dbc);
+  if (cap && cap.archive === false) {
+    const reason = `介质 ${cap.medium || '未知'} 没有 events_archive 表`;
+    await noteArchiveSkip(dbc, { scope: 'events', reason });
+    return { skipped: true, reason };
+  }
+  return dbc.events.archiveBatch({ before: d, limit: n });
 }

@@ -466,6 +466,26 @@ function makeApi(r) {
           [conversationId, Number(afterId) || 0]);
         return rows.map((row) => toRecord('events', row, { at: true }));
       },
+      /**
+       * 把早于 `before` 天的事件搬进 `events_archive`（2026-09-16 从 `eventlog.js` 搬到这里：
+       * 这是**介质机制**，不是领域策略 —— 天数/批量上限/要不要跑，仍由 `eventlog.js` 定）。
+       * 三条硬约束（顺序即安全性，逐字沿用原实现）：
+       *   ① **先插入归档表、插入成功才删原表** —— 删之前那批行必须已经躺在 `events_archive` 里；
+       *   ② 失败**宁可少归档也不许先删**：任何一步出错就原样抛出，events 一行不动；
+       *   ③ 只删**刚才搬过的那批 id**（不是"再按时间条件删一遍"——条件式删法在插入失败时会删掉没搬走的行）。
+       * @returns {Promise<{archived:number, deleted:number}>} 幂等：重复跑不会再搬同一批（第二次 0/0）
+       */
+      async archiveBatch({ before, limit = 5000 } = {}) {
+        const d = Number(before) > 0 ? Number(before) : 90;
+        const n = Math.min(20000, Math.max(1, Number(limit) || 5000));
+        const rows = await r.many('SELECT id FROM events WHERE created_at < NOW() - INTERVAL ? DAY ORDER BY id LIMIT ?', [d, n]);
+        if (!rows.length) return { archived: 0, deleted: 0 };
+        const ids = rows.map((row) => row.id);
+        const ph = ids.map(() => '?').join(',');
+        await r.many(`INSERT INTO events_archive (id, conversation_id, seq, type, payload, created_at) SELECT id, conversation_id, seq, type, payload, created_at FROM events WHERE id IN (${ph})`, ids);
+        const res = await r.exec(`DELETE FROM events WHERE id IN (${ph})`, ids);
+        return { archived: ids.length, deleted: Number((res && res.affectedRows) || 0) };
+      },
     },
 
     deliveries: (() => {
@@ -763,6 +783,43 @@ function makeApi(r) {
         const rows = await r.many('SELECT DISTINCT conversation_id cid FROM audit_log WHERE action LIKE ? AND conversation_id IS NOT NULL', [String(prefix) + '%']);
         return rows.map((row) => Number(row.cid));
       },
+      /**
+       * 把早于 `before` 天的审计搬进 `audit_log_archive`（2026-09-16 从 `index.js` 的 `archiveAudit` 搬来：
+       * 这是介质机制；天数/批量/要不要跑由调用方定）。顺序与事件归档同一条口径：
+       * **先插入归档表、插入成功才删原表**；只删刚搬过的那批 id；任一步失败原样抛出（宁可少归档也不先删）。
+       * @returns {Promise<{moved:number}>} 幂等：重复跑不会再搬同一批（第二次 0）
+       */
+      async archiveBatch({ before, limit = 5000 } = {}) {
+        const d = Number(before) > 0 ? Number(before) : 90;
+        const n = Math.min(20000, Math.max(1, Number(limit) || 5000));
+        const rows = await r.many('SELECT id FROM audit_log WHERE created_at < NOW() - INTERVAL ? DAY LIMIT ?', [d, n]);
+        if (!rows.length) return { moved: 0 };
+        const ids = rows.map((row) => row.id);
+        const ph = ids.map(() => '?').join(',');
+        await r.many(`INSERT INTO audit_log_archive (account_id, action, detail, conversation_id, shell_id, created_at)
+    SELECT account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE id IN (${ph})`, ids);
+        await r.exec(`DELETE FROM audit_log WHERE id IN (${ph})`, ids);
+        return { moved: ids.length };
+      },
+      /**
+       * 归档前后各有多少行、最早一行是什么时候（`GET /api/audit/archive-stats`）：两表各一条聚合，
+       * 形状逐字沿用调用点原来那两条 SQL。**只报事实**——"归档表里有 0 行"在有归档能力的介质上
+       * 就是"还没归档"，在没有归档能力的介质上由 `capabilities().archive=false` 说明，两者不混淆。
+       */
+      async archiveStats() {
+        const [cur] = await r.many('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log');
+        const [arc] = await r.many('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log_archive');
+        const rec = (row) => ({ rows: Number((row && row.c) || 0), oldest: (row && row.oldest) || null });
+        return { current: rec(cur), archived: rec(arc) };
+      },
+    },
+
+    /**
+     * 介质自报能力（裁定 C）：MySQL 有 `events_archive` / `audit_log_archive` 两张归档表，
+     * 也有原生动词（`one/run/query`，`db.js` 就是 SQL）。调用方据此决定归档做不做。
+     */
+    capabilities() {
+      return { medium: IMPL, archive: true, rawSql: true };
     },
 
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */

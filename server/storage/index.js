@@ -80,6 +80,12 @@ export function unsupported(impl, what) {
  */
 export const CONTRACT = {
   verbs: ['one', 'run', 'query', 'tx'],
+  /**
+   * **介质能力面**（2026-09-16 裁定 C）：调用方**先问能力、再决定做不做**，
+   * 禁止用 `try/catch STORAGE_UNSUPPORTED` 当控制流 —— 异常是"出了意外"，能力查询是"事先声明"；
+   * 用异常做分支会让日志里天天出现假异常，也说不清"到底是没这能力还是归档真的失败了"。
+   */
+  medium: ['capabilities'],
   entities: {
     // 引擎必需（v0.3 符合性核对 §2.1 第 2 条点名的六类）
     // conversations/messages/settings 上带 Owned/ByAccount 后缀的那几个是**按账号收口**的读法：
@@ -90,7 +96,7 @@ export const CONTRACT = {
     toolCalls: ['append', 'list', 'recent', 'attachToMessage', 'removeByConversation', 'traceByConversation'],
     settings: ['get', 'set', 'all', 'getMany'],
     agentRuns: ['create', 'getLatest', 'update'],
-    events: ['append', 'read'],
+    events: ['append', 'read', 'archiveBatch'],
     // 用量记账（2026-09-17 加**写口**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时自落账并支持
     // 离线导出（默认开启）」。迁移前只有直连 SQL 一条路 ⇒ 干净机器上成本计量是空的（"省钱"这条主线在客户机
     // 上没有数）。本轮只迁**写口**：读法（C1–C5 报表 / 仪表 / 遥测 / 会话导出）仍走 SQL，如实登记。
@@ -100,7 +106,7 @@ export const CONTRACT = {
     // 只迁这一处读，是因为它在**每轮都在跑的路径**上 —— 写口迁了而它没迁，干净机器上"先读后写"仍然整段失败
     // （实测：`/api/chat` 的前缀账在 jsonfile 下被 catch 吞掉，介质里只有 `tool:*` 那一类审计）。
     // **其余读法（/api/audit 列表 + 归档 + 前缀账统计 + /trace）仍走 SQL**，如实登记在收口表。
-    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation', 'adminList', 'conversationIdsByActionPrefix'],
+    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation', 'adminList', 'conversationIdsByActionPrefix', 'archiveBatch', 'archiveStats'],
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],
@@ -169,11 +175,35 @@ export const PATCHABLE = {
 
 /** 展平成 `['query', 'conversations.create', ...]`：夹具与自检用它比对两个实现的方法面。 */
 export function contractMethods() {
-  const out = [...CONTRACT.verbs];
+  const out = [...CONTRACT.verbs, ...CONTRACT.medium];
   for (const [entity, verbs] of Object.entries(CONTRACT.entities)) {
     for (const v of verbs) out.push(entity + '.' + v);
   }
   return out;
+}
+
+/**
+ * 问介质"你能做什么"（裁定 C 的落地口，两个调用方共用这一处）。
+ * - 两个**真实介质**都自报能力（mysql：`archive:true`；jsonfile：`archive:false`）；
+ * - 返回 `null` 表示**这份对象没自报能力**（例如既有夹具里那些只有 `query`/`run` 的假对象）——
+ *   那时调用方按"没听说不能做"继续走原路，**不是**把 `null` 当 `false`：把"没自报"读成"不能"
+ *   会让所有旧夹具与旧注入点凭空变成"跳过归档"，那是另一种说谎。
+ */
+export function mediumCapabilities(store) {
+  if (!store || typeof store.capabilities !== 'function') return null;
+  return store.capabilities() || null;
+}
+
+/**
+ * **跳过留痕**（裁定 C 第 3 条）：没有归档能力的介质上，归档作业不是"失败了"，而是"这事在这里不成立"，
+ * 所以不抛错；但也不能让"没归档"看起来像"归档成功 0 行" —— 写一条 `archive:skip` 账，
+ * detail 里写明范围与原因，仪表/日志据此能与"真的搬了 0 行"分开。
+ * 写账失败**原样抛**：留痕是这条路径的交付物之一，写不进去就等于没留痕。
+ */
+export async function noteArchiveSkip(store, { scope, reason, accountId = null } = {}) {
+  const detail = `${scope}: ${reason}`.slice(0, 500);
+  await store.audit.append({ accountId, action: 'archive:skip', detail });
+  return { action: 'archive:skip', detail };
 }
 
 /**

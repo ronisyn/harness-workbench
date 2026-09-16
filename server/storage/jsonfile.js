@@ -340,6 +340,14 @@ function makeApi(holder, save, { persist }) {
   const api = {
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */
     impl: IMPL,
+    /**
+     * 介质自报能力（裁定 C）：本介质**没有** `events_archive` / `audit_log_archive` 两张归档表，
+     * 也不提供原生动词（`one/run/query` 一律抛"不支持"，见下）。
+     * 归档作业据此**跳过并留痕**（`archive:skip`），不抛错、也不报成"归档成功 0 行"。
+     */
+    capabilities() {
+      return { medium: IMPL, archive: false, rawSql: false };
+    },
 
     // ── 四类动词里的三个"原生动词"：JSON 实现没有 SQL 面 ⇒ 显式抛错（调用方必须走命名方法）──
     // 这不是缺陷而是设计：SQL 是 MySQL 的方言，把它当通用接口才是假装抽象。
@@ -684,6 +692,10 @@ function makeApi(holder, save, { persist }) {
           .filter((r) => Number(r.conversationId) === Number(conversationId) && Number(r.id) > Number(afterId));
         return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
       },
+      /** 本介质没有 `events_archive` 表：调用方先问 `capabilities().archive`（裁定 C）；真走到这里＝代码写错了。 */
+      async archiveBatch() {
+        throw unsupported(IMPL, '事件归档（同一份 JSON 文件里没有 events_archive 表；请先问 capabilities().archive）');
+      },
     },
 
     /**
@@ -1000,6 +1012,28 @@ function makeApi(holder, save, { persist }) {
           out.add(Number(r.conversationId));
         }
         return [...out];
+      },
+      /**
+       * **没有**归档表：同一份 JSON 文件里既没有 `audit_log_archive`、也没有体积压力（裁定 C）。
+       * 调用方**先问能力**（`capabilities().archive === false`）就不会走到这里；真走到了＝代码写错了，
+       * 所以如实抛"不支持"，绝不静默返回"搬了 0 行"（那会让"没归档"看起来像"归档成功"）。
+       */
+      async archiveBatch() {
+        throw unsupported(IMPL, '审计归档（同一份 JSON 文件里没有 audit_log_archive 表；请先问 capabilities().archive）');
+      },
+      /**
+       * 归档统计：能如实报的只有"当前有多少行、最早一行"，归档侧恒为 0 行/null ——
+       * 这不是"编一个 0"，而是**事实**：本介质上没有归档表，归档行数就是 0。
+       * 要区分"没归档"与"没这能力"，看 `capabilities().archive`。
+       */
+      async archiveStats() {
+        const rows = rowsOf('audit');
+        let oldest = null;
+        for (const r of rows) {
+          const at = r.createdAt ?? null;
+          if (at && (oldest === null || at < oldest)) oldest = at;
+        }
+        return { current: { rows: rows.length, oldest }, archived: { rows: 0, oldest: null } };
       },
     },
 

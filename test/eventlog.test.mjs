@@ -72,13 +72,17 @@ test('唯一写入点：只有 eventlog.js 往 events 表写，且挂在**对外
 });
 
 test('账本只追加：对 events 的 UPDATE/DELETE 只允许出现在归档器里（RA-47，且必须删在插入之后）', () => {
+  // 2026-09-16（裁定 C）：归档的**搬表机制**从 `eventlog.js` 搬进介质 `mysql.js` ——
+  // 这条机检跟着搬（它盯的始终是"那唯一一处删 events 的代码"，不是某个文件）。
   const src = read('server/eventlog.js');
-  assert.ok(!/UPDATE\s+events/i.test(src), '账本不改写：任何地方都不许 UPDATE events');
-  // 归档是唯一的例外（RA-47）：它删的两行（DELETE 与那条搬运动作）必须紧挨着，且 DELETE 在 INSERT 之后 ——
+  const mine = read('server/storage/mysql.js');
+  assert.ok(!/UPDATE\s+events\b/i.test(src) && !/UPDATE\s+events\b/i.test(mine), '账本不改写：任何地方都不许 UPDATE events');
+  assert.equal(src.indexOf('DELETE FROM events'), -1, '领域侧只定策略，不再直接写删表语句');
+  // 归档是唯一的例外（RA-47）：那两行必须紧挨着，且 DELETE 在 INSERT 之后 ——
   // "先插入归档表、插入成功才删原表"这条顺序就是"不许丢数据"的全部实现，位置写错就静默丢账。
-  const at = src.indexOf('DELETE FROM events');
+  const at = mine.indexOf('DELETE FROM events');
   assert.ok(at > 0, '归档器是唯一允许删 events 的地方');
-  assert.equal(src.indexOf('DELETE FROM events', at + 1), -1, '删 events 只许有一处');
-  assert.ok(src.indexOf('INSERT INTO events_archive') < at, '先插入归档表、插入成功才删原表（顺序不许反）');
+  assert.equal(mine.indexOf('DELETE FROM events', at + 1), -1, '删 events 只许有一处');
+  assert.ok(mine.indexOf('INSERT INTO events_archive') < at, '先插入归档表、插入成功才删原表（顺序不许反）');
   assert.match(src, /保留策略沿用审计账本/, '保留策略要写明出处（不自己发明一个天数）');
 });

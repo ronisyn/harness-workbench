@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { archiveOldEvents, EVENT_ARCHIVE_DAYS } from '../server/eventlog.js';
+import { createMysqlStorage } from '../server/storage/mysql.js';
 import { VERSIONS } from '../server/migrations.js';
 import { pool } from '../server/db.js';
 
@@ -20,7 +21,10 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 // ── 假库：只实现归档用到的两类语句（与 migrations 夹具同风格：按 SQL 片段分派）──────────────
 // 记录 calls 是为了回答"插入失败时到底有没有发出 DELETE"——那是本任务最要紧的一条。
-function fakeDb(rows, opts = {}) {
+// **2026-09-16（裁定 C）**：搬表机制从 `eventlog.js` 搬进了介质（`server/storage/mysql.js`），
+// 所以这里不再把假库直接喂给领域函数 —— 而是**喂给真的 mysql 存储实现**（`createMysqlStorage({db})`）。
+// 这样测的仍是"真的那套语句与顺序"（假库只认这三种形状，形状一改就红），而不是替身自己的语义。
+function fakeEventsDb(rows, opts = {}) {
   const events = [...rows];
   const archive = [...(opts.archive || [])];
   const calls = [];
@@ -52,29 +56,54 @@ function fakeDb(rows, opts = {}) {
     },
   };
 }
+// 归档用的存储面：假库 → 真实现（`capabilities()` 因此报的是 mysql 的真实能力：archive:true）
+const mysqlOf = (fake) => createMysqlStorage({ db: fake });
 const row = (id, daysAgo) => ({ id, conversation_id: 1, seq: id, type: 'tool_done', payload: { i: id }, created_at: Date.now() - daysAgo * 86400000 });
 
 test('只归档早于阈值的行：阈值内的行一行不动', async () => {
-  const dbc = fakeDb([row(1, 100), row(2, 91), row(3, 89), row(4, 1)]);
-  const r = await archiveOldEvents({ dbc });
+  const fake = fakeEventsDb([row(1, 100), row(2, 91), row(3, 89), row(4, 1)]);
+  const r = await archiveOldEvents({ dbc: mysqlOf(fake) });
   assert.deepEqual(r, { archived: 2, deleted: 2 });
-  assert.deepEqual(dbc.archive.map((e) => e.id), [1, 2], '只有 >90 天的两行进归档表');
-  assert.deepEqual(dbc.events.map((e) => e.id), [3, 4], '阈值内的两行必须原样留在 events');
+  assert.deepEqual(fake.archive.map((e) => e.id), [1, 2], '只有 >90 天的两行进归档表');
+  assert.deepEqual(fake.events.map((e) => e.id), [3, 4], '阈值内的两行必须原样留在 events');
   assert.equal(EVENT_ARCHIVE_DAYS, 90, '保留天数就是审计账本那一条（90 天），不许另发明');
 });
 
 test('插入失败时一行都不许删：宁可少归档，不许丢数据', async () => {
-  const dbc = fakeDb([row(1, 100), row(2, 100)], { failInsert: '归档表写入失败（模拟）' });
-  await assert.rejects(() => archiveOldEvents({ dbc }), /归档表写入失败/, '失败必须抛出去（不能静默报成"归档了 0 行"）');
-  assert.equal(dbc.calls.some((c) => /DELETE FROM events/.test(c.sql)), false, '插入没成功 ⇒ 一个字都不许删');
-  assert.deepEqual(dbc.events.map((e) => e.id), [1, 2], '原表必须原封不动');
+  const fake = fakeEventsDb([row(1, 100), row(2, 100)], { failInsert: '归档表写入失败（模拟）' });
+  await assert.rejects(() => archiveOldEvents({ dbc: mysqlOf(fake) }), /归档表写入失败/, '失败必须抛出去（不能静默报成"归档了 0 行"）');
+  assert.equal(fake.calls.some((c) => /DELETE FROM events/.test(c.sql)), false, '插入没成功 ⇒ 一个字都不许删');
+  assert.deepEqual(fake.events.map((e) => e.id), [1, 2], '原表必须原封不动');
 });
 
 test('幂等：重复跑不重复归档（第二次没得搬）', async () => {
-  const dbc = fakeDb([row(1, 100), row(2, 100), row(3, 5)]);
+  const fake = fakeEventsDb([row(1, 100), row(2, 100), row(3, 5)]);
+  const dbc = mysqlOf(fake);
   assert.deepEqual(await archiveOldEvents({ dbc }), { archived: 2, deleted: 2 });
   assert.deepEqual(await archiveOldEvents({ dbc }), { archived: 0, deleted: 0 }, '第二次没得搬');
-  assert.deepEqual(dbc.archive.map((e) => e.id), [1, 2], '归档表里不得出现重复行');
+  assert.deepEqual(fake.archive.map((e) => e.id), [1, 2], '归档表里不得出现重复行');
+});
+
+// ── 裁定 C：没有归档能力的介质**跳过并留痕**（不抛错、也不报成"归档成功 0 行"）──────────────
+// 这是 JSON 介质（干净机器）上真实发生的那条路：同一份文件里没有 events_archive 表。
+test('介质自报没有归档能力 ⇒ 跳过并留痕（返回值是 skipped，不是"归档 0 行"）', async () => {
+  const traces = [];
+  const dbc = {
+    capabilities: () => ({ medium: 'jsonfile', archive: false, rawSql: false }),
+    audit: { append: async (f) => { traces.push(f); return { id: traces.length }; } },
+  };
+  const r = await archiveOldEvents({ dbc });
+  assert.equal(r.skipped, true, '返回 skipped');
+  assert.match(r.reason, /events_archive/, '原因里要说清缺的是什么');
+  assert.deepEqual(traces.map((t) => t.action), ['archive:skip'], '必须留痕（一条 archive:skip 审计）');
+  assert.match(traces[0].detail, /^events: /, 'detail 里写清范围与原因');
+  assert.match(traces[0].detail, /jsonfile/, 'detail 里带上介质名（排障时要知道是哪一份介质）');
+});
+
+test('领域侧不再自己写 SQL：搬表语句只在介质里（策略与机制分家）', () => {
+  const src = read('server/eventlog.js');
+  assert.equal(/INSERT INTO events_archive|DELETE FROM events/.test(src), false, 'eventlog.js 里不许再出现搬表语句');
+  assert.match(src, /capabilities\(\)|mediumCapabilities/, '跳过判据来自介质自报的能力面');
 });
 
 test('两条路径都要建归档表（存量库走迁移、新库走 SCHEMA，缺一不可）', () => {

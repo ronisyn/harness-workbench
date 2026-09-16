@@ -58,7 +58,7 @@ import { SETTINGS_SCHEMA, validateSetting } from './settingsSchema.js';
 import { RW_WORKSPACE, RW_FS_ROOT, RW_JOBS_DIR, RW_OS_CN, RW_PLATFORM_DIR, RW_VERSION } from './env.js';
 import { SHELL_CN } from './shell.js';
 import { beginDelivery, finishDelivery, listDeliveries, requestHash, IDEM_KEY_MAX } from './deliveries.js'; // D4/RA-42 幂等键 + 死信落点
-import { STORAGE_UNSUPPORTED, storage } from './storage/index.js'; // v0.3 §7.1 ⑦：存储接口（单一选择点）——
+import { STORAGE_UNSUPPORTED, storage, mediumCapabilities, noteArchiveSkip } from './storage/index.js'; // v0.3 §7.1 ⑦：存储接口（单一选择点）——
 // "能力缺失"的稳定错误码（归档在无 SQL 面的实现下抛它）＋登录/会话/消息/设置这条链的读写入口。
 // `storage.impl` 是**当前实现名**（'mysql' | 'jsonfile'），下面"要不要连库"就按它判（理由见 main() 里的门）。
 import { exportConversation, importConversation } from './session-export.js'; // D4-7：带格式版本的导出/导入（新端点，旧的 /export 冻结）
@@ -551,15 +551,17 @@ function auditCatConds(cat) {
   return '(' + pats.map(() => 'action LIKE ?').join(' OR ') + ')';
 }
 // 归档：把 90 天前审计搬入 audit_log_archive（主表不膨胀；归档仍可查 archived=1）
+// 2026-09-16（裁定 C）：① 搬表机制移进介质（`storage.audit.archiveBatch`，先搬后删/只删搬过的 id 在那边）；
+// ② 这里只定策略，并**先问介质有没有归档能力** —— 没有归档表的介质（jsonfile）跳过并留痕，
+//    返回 `{skipped:true, reason}`，绝不把"没归档"报成"归档成功 0 行"。
 export async function archiveAudit(days = 90) {
-  const rows = await db.query('SELECT id FROM audit_log WHERE created_at < NOW() - INTERVAL ? DAY LIMIT 5000', [days]);
-  if (!rows.length) return { moved: 0 };
-  const ids = rows.map((r) => r.id);
-  const ph = ids.map(() => '?').join(',');
-  await db.query(`INSERT INTO audit_log_archive (account_id, action, detail, conversation_id, shell_id, created_at)
-    SELECT account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE id IN (${ph})`, ids);
-  await db.query(`DELETE FROM audit_log WHERE id IN (${ph})`, ids);
-  return { moved: ids.length };
+  const cap = mediumCapabilities(storage);
+  if (cap && cap.archive === false) {
+    const reason = `介质 ${cap.medium || '未知'} 没有 audit_log_archive 表`;
+    await noteArchiveSkip(storage, { scope: 'audit', reason });
+    return { skipped: true, reason };
+  }
+  return storage.audit.archiveBatch({ before: days, limit: 5000 });
 }
 // 审计查询：GET /api/audit?limit&q&category&days&conversation_id&shell_id&archived=0|1|all
 app.get('/api/audit', requireAuth, async (req, res) => {
@@ -578,10 +580,11 @@ app.get('/api/audit', requireAuth, async (req, res) => {
     if (shellId) { conds.push('shell_id=?'); p.push(shellId); }
     if (cat && AUDIT_CATS[cat]) { conds.push(auditCatConds(cat)); p.push(...AUDIT_CATS[cat]); }
     const fetch = () => storage.audit.adminList({ conds, params: p, limit: n });
+    // `archived=1|all` 要走归档表 ⇒ **先问介质有没有归档能力**（裁定 C）：没有归档表的介质（jsonfile）
+    // 如实给"归档侧为空"，而不是 500 —— 那半边本来就不存在，空是事实，不是错误。
+    const canArchive = (() => { const cap = mediumCapabilities(storage); return !cap || cap.archive !== false; })();
     let rows;
-    if (archived === 'all' || archived === '1') {
-      // 归档表那半边**仍是 SQL**（`audit_log_archive` 只在 MySQL 介质里有；JSON 侧"归档"口径待拍板，
-      // 见收口表第十九节的第 5 项）——这里如实保留原实现，不假装支持。
+    if ((archived === 'all' || archived === '1') && canArchive) {
       const tbl = archived === '1' ? 'audit_log_archive' : null;
       if (tbl) rows = (await db.query(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM ${tbl} WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...p, n])).map((r) => ({ ...r, archived: 1 }));
       else {
@@ -589,6 +592,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
         rows = [...cur.map((r) => ({ ...r, archived: 0 })), ...arc.map((r) => ({ ...r, archived: 1 }))].sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, n);
       }
     } else {
+      // archived=0、或介质没有归档表（`archived=1|all` 的归档那半边不存在 ⇒ 只剩活表这一半）
       rows = (await fetch()).map((r) => ({ ...r, archived: 0 }));
     }
     res.json({ ok: true, audit: rows.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })), categories: Object.keys(AUDIT_CATS) });
@@ -629,17 +633,14 @@ app.get('/api/conversations/:id/trace', requireAuth, async (req, res) => {
 // 归档状态/手动触发（管理员）
 app.get('/api/audit/archive-stats', requireAuth, async (req, res) => {
   try {
-    const [a, b] = await Promise.all([
-      db.query('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log'),
-      db.query('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log_archive'),
-    ]);
-    res.json({ ok: true, current: { rows: Number(a[0].c || 0), oldest: a[0].oldest }, archived: { rows: Number(b[0].c || 0), oldest: b[0].oldest } });
+    const s = await storage.audit.archiveStats();
+    res.json({ ok: true, current: s.current, archived: s.archived });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 app.post('/api/audit/archive', requireAuth, async (req, res) => {
   try {
     const r = await archiveAudit(Number((req.body || {}).days) || 90);
-    await storage.audit.append({ accountId: req.user.id, action: 'audit:archive', detail: 'moved=' + r.moved });
+    await storage.audit.append({ accountId: req.user.id, action: 'audit:archive', detail: r.skipped ? 'skipped=' + r.reason : 'moved=' + r.moved });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -3085,6 +3086,7 @@ async function main() {
   try {
     const a = await archiveAudit(90);
     if (a.moved) console.log('[audit] 启动归档 ' + a.moved + ' 行（>90 天）');
+    else if (a.skipped) console.log('[audit] 启动归档跳过（' + a.reason + '，已留痕 archive:skip）');
   } catch (e) { console.error('[audit] 启动归档失败:', e.message); }
   const auditArchTimer = setInterval(async () => {
     try { const a = await archiveAudit(90); if (a.moved) console.log('[audit] 定时归档 ' + a.moved + ' 行'); }
@@ -3129,12 +3131,14 @@ async function main() {
       if (a.archived) {
         console.log('[eventlog-archive] ' + when + '：归档 ' + a.archived + ' 行（>90 天）');
         await storage.audit.append({ accountId: null, action: 'eventlog:archive', detail: JSON.stringify(a).slice(0, 800) }).catch(() => {});
+      } else if (a.skipped) {
+        // 裁定 C：没有归档能力的介质**跳过并留痕**（留痕在 archiveOldEvents 里写 `archive:skip`），
+        // 这里只如实说一声；既不是失败，也不是"归档了 0 行"。
+        console.log('[eventlog-archive] ' + when + '：跳过（' + a.reason + '）');
       }
     } catch (e) {
-      // 存储实现没有 SQL 面时（RW_STORAGE=jsonfile）归档这条能力缺失是**如实报的**，别报成"失败"：
-      // 能力缺失与故障在排障时是两件事（v0.3 §4.6：显式降级要留痕、要客户可见，但也不能谎报成故障）。
-      if (e && e.code === STORAGE_UNSUPPORTED) console.log('[eventlog-archive] ' + when + '：该存储实现不支持归档，跳过（' + e.message + '）');
-      else console.error('[eventlog-archive] 失败:', e.message);
+      // 走到这里才是**真故障**（介质有归档能力却搬不动）——能力缺失那条路已经在上面按裁定 C 分流了。
+      console.error('[eventlog-archive] 失败:', e.message);
     }
   };
   await runEventArchive('启动归档');
