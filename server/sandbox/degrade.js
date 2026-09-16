@@ -14,6 +14,7 @@
 //   一旦目标机上装好 `bwrap`（或配好部署方 runner）并把开关打开，就是 v0.3 的字面语义，无需改代码。
 //   开关的**定义**归 `server/env.js`（真值表只有那一份实现，本模块转调；env 参数只是夹具的缝）。
 import { db } from '../db.js';
+import { storage } from '../storage/index.js'; // v0.3 §4.6「预算与审计：本地兜底」：降级留痕的写口走接口
 import { sandboxRequiredEnv } from '../env.js';
 
 /** 严格开关的真值判定（部署开关就该只认这几个写法；`0`/`false`/空一律当没开）。实现见 env.js。 */
@@ -36,8 +37,11 @@ export class SandboxUnavailableError extends Error {
  * "为什么降级"必须能从账上直接读出来，而不是让人再去翻一次探测。
  * 失败只打日志，绝不抛（与 hooks.js 的留痕同一条纪律：留痕失败不改判主流程）。
  * @returns {Promise<boolean>} 是否真的落账（夹具据此断言"降级必须落账"）
+ * @param {object} [store] 存储接口的**注入缝**（默认用进程单例）：夹具靠它挡在真库之外——
+ *   这条路径原先没有任何夹具覆盖，2026-09-16 迁写口时"忘了 import storage"只在**服务器启动**时才炸
+ *   （`storage is not defined`），本地全量门禁是绿的。补上注入缝 + 夹具之后这类漏网当场可见。
  */
-export async function auditDegrade(composed, extra = {}) {
+export async function auditDegrade(composed, extra = {}, store = storage) {
   const c = composed || {};
   const layers = Array.isArray(c.layers) ? c.layers : [];
   const missing = layers.filter((l) => l.state !== 'full').map((l) => l.id + ':' + l.state);
@@ -53,7 +57,7 @@ export async function auditDegrade(composed, extra = {}) {
     conversationId: (extra && extra.conversationId) ?? null,
   }).slice(0, 1000);
   try {
-    await storage.audit.append({ accountId: (extra && extra.accountId) ?? null, action: 'sandbox:degrade', detail: detail, shellId: (extra && extra.shellId) ?? null, conversationId: (extra && extra.conversationId) ?? null });
+    await store.audit.append({ accountId: (extra && extra.accountId) ?? null, action: 'sandbox:degrade', detail: detail, shellId: (extra && extra.shellId) ?? null, conversationId: (extra && extra.conversationId) ?? null });
     return true;
   } catch (e) {
     // 与 hooks.js/epoch.js 同口径：账本写不进去要出声，但不能把主流程带走。

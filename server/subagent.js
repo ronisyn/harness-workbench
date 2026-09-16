@@ -11,6 +11,7 @@ import { runAgent } from './agent.js';
 import { parseToolWhitelist, narrowEnabled } from './subtools.js';
 import { childEmit } from '../scripts/child-emit.js';
 import { db } from './db.js';
+import { storage } from './storage/index.js'; // v0.3 §4.6「预算与审计：本地兜底」：派生留痕的写口走接口
 
 export const subs = new Map(); // id -> { status: running|done|error, prompt, name, result, error, createdAt }
 let subSeq = 0;
