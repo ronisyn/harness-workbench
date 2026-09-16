@@ -842,6 +842,13 @@ function makeApi(holder, save, { persist }) {
           tokensOut: rows.reduce((a, r) => a + Number(r.tokensOut || 0), 0),
         };
       },
+      /** 某账号的成本三件套（C3 仪表）：与 mysql 侧那条聚合同口径（去重按 agent_run_id / conversation_id）。 */
+      async summaryByAccount(accountId) {
+        const rows = rowsOf('usage').filter((r) => Number(r.accountId) === Number(accountId));
+        const runs = new Set(rows.map((r) => r.agentRunId).filter((v) => v !== null && v !== undefined));
+        const convs = new Set(rows.map((r) => r.conversationId).filter((v) => v !== null && v !== undefined));
+        return { total: rows.reduce((a, r) => a + Number(r.cost || 0), 0), runs: runs.size, convs: convs.size };
+      },
     },
 
     /**

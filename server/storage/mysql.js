@@ -647,6 +647,12 @@ function makeApi(r) {
         const u = row || {};
         return { calls: Number(u.n || 0), cost: Number(u.cost || 0), tokensIn: Number(u.tin || 0), tokensOut: Number(u.tout || 0) };
       },
+      /** 某账号的**成本口径三件套**（C3 仪表）：总花费 + 去重后的执行次数与会话数。形状与既有那条聚合逐字一致。 */
+      async summaryByAccount(accountId) {
+        const row = await r.one('SELECT COALESCE(SUM(cost),0) total, COUNT(DISTINCT agent_run_id) runs, COUNT(DISTINCT conversation_id) convs FROM usage_stats WHERE account_id=?', [accountId]);
+        const u = row || {};
+        return { total: Number(u.total || 0), runs: Number(u.runs || 0), convs: Number(u.convs || 0) };
+      },
     },
 
     /**

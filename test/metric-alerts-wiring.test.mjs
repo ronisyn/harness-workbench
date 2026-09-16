@@ -56,11 +56,15 @@ before(async () => {
   //   为什么必须铺：这个夹具的 RW_STORAGE=jsonfile（干净机器形态）——C4/C5 本来就该从**本地账本**读出来，
   //   这正是"本地兜底"要的性质；以前那两张数来自假 db 的罐头行，是把"账本在库里"当成了前提。
   const seed = {
-    format: 'rw-store-json', version: 1, tables: { audit: {} }, counters: { audit: 15 },
+    format: 'rw-store-json', version: 1, tables: { audit: {}, usage: {} }, counters: { audit: 15, usage: 40 },
   };
   let id = 0;
   for (let i = 0; i < 3; i++) seed.tables.audit[String(++id)] = { id, accountId: null, action: 'prefix:invalidate', detail: 'fp=deadbeef cnt=3 peak=5 lane=abc', shellId: null, conversationId: 1, createdAt: '2026-09-17T09:00:00.000Z' };
   for (let i = 0; i < 12; i++) seed.tables.audit[String(++id)] = { id, accountId: null, action: 'prefix:exempt', detail: 'first-round fp=abc cnt=1', shellId: null, conversationId: 1, createdAt: '2026-09-17T09:00:0' + (i % 10) + '.000Z' };
+  // C3（账号口径三件套）也改成从**介质**读：40 次执行 / 10 个会话 / 总花费 100（每笔 2.5）
+  for (let i = 1; i <= 40; i++) {
+    seed.tables.usage[String(i)] = { id: i, accountId: 1, conversationId: ((i - 1) % 10) + 1, agentRunId: i, kind: 'round', cost: 2.5, tokensIn: 1, tokensOut: 1, createdAt: '2026-09-17T09:00:00.000Z' };
+  }
   fs.mkdirSync(path.join(WS, 'storage'), { recursive: true });
   fs.writeFileSync(path.join(WS, 'storage', 'rw-store.json'), JSON.stringify(seed, null, 2), 'utf8');
   const port = await freePort();

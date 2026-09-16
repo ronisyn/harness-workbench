@@ -1794,11 +1794,8 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     //     是另一把尺，**两口径不可混用**（v0.3 §0.3 C4 行原文）。
     //   · C5 只统计"本轮有多少真实流量轮次，其中多少轮被豁免"，外加两类豁免的条数与分因。
     try {
-      const cost = await db.query(
-        `SELECT COALESCE(SUM(cost),0) total, COUNT(DISTINCT agent_run_id) runs, COUNT(DISTINCT conversation_id) convs
-           FROM usage_stats WHERE account_id=?`, [req.user.id]);
-      const c = (cost && cost[0]) || {};
-      const runs = Number(c.runs || 0), convs = Number(c.convs || 0), total = Number(c.total || 0);
+      const c = await storage.usage.summaryByAccount(req.user.id);
+      const runs = c.runs, convs = c.convs, total = c.total;
       c3 = { perRun: runs ? Number((total / runs).toFixed(4)) : null, perConv: convs ? Number((total / convs).toFixed(4)) : null, total: Number(total.toFixed(2)), runs, convs };
     } catch { /* 成本取不到不影响其它字段 */ }
     try {

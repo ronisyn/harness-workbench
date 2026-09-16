@@ -264,6 +264,13 @@ function fakeMysql() {
       return [{ n: rows.length, cost: sum('cost'), tin: sum('tokens_in'), tout: sum('tokens_out') }];
     }
 
+    if ((m = /^SELECT COALESCE\(SUM\(cost\),0\) total, COUNT\(DISTINCT agent_run_id\) runs, COUNT\(DISTINCT conversation_id\) convs FROM usage_stats WHERE account_id=\?$/i.exec(q))) {
+      const acc = Number(p.shift());
+      const rows = [...rowsOf(store, 'usage_stats').values()].filter((r) => Number(r.account_id) === acc);
+      const uniq = (k) => new Set(rows.map((r) => r[k]).filter((v) => v !== null && v !== undefined)).size;
+      return [{ total: rows.reduce((a, r) => a + Number(r.cost || 0), 0), runs: uniq('agent_run_id'), convs: uniq('conversation_id') }];
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -645,6 +652,12 @@ function contractSuite(label, make, caps) {
     assert.equal(sum1.tokensOut, 290);
     assert.ok(Math.abs(sum1.cost - 0.0073) < 1e-9, 'cost = 0.0042 + 0.0031：' + sum1.cost);
     assert.deepEqual(await s.usage.summaryByConversation(999), { calls: 0, cost: 0, tokensIn: 0, tokensOut: 0 }, '空会话＝全 0（不是 null）');
+    // 账号口径三件套（C3 仪表）：总花费 + 去重后的执行次数/会话数（agentRunId 相同只算一次）
+    const sumA = await s.usage.summaryByAccount(7);
+    assert.equal(sumA.runs, 1, '两条 round/collapse 记的是同一个 agentRunId ⇒ 只算 1 次执行：' + JSON.stringify(sumA));
+    assert.equal(sumA.convs, 1, '同一个会话');
+    assert.ok(Math.abs(sumA.total - 0.0073) < 1e-9, '总花费 = 两条之和：' + sumA.total);
+    assert.deepEqual(await s.usage.summaryByAccount(12345), { total: 0, runs: 0, convs: 0 }, '没有记账的账号＝全 0');
   });
 
   // ── 审计账写口（2026-09-17）：v0.3 §4.6「预算与审计：本地兜底」────────────────────────────
