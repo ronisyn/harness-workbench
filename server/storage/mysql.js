@@ -653,6 +653,25 @@ function makeApi(r) {
         const u = row || {};
         return { total: Number(u.total || 0), runs: Number(u.runs || 0), convs: Number(u.convs || 0) };
       },
+      /**
+       * **逐轮读数**（C1/C2 的来源；裁定 A 的第二次读法）：本账号近 N 天、`kind='round'`、且落在
+       * `conversationIds` 这批会话里的行，只要 `{h, m, cid}` 三列（命中/未命中/会话）。
+       * `conversationIds` 是**归属解析的结果**（`cohort.realConversationIds`）——介质不负责判归属，
+       * 只按 id 列表过滤；给了空数组 ⇒ 空结果（不是"没有条件"）。
+       */
+      async roundRowsByAccount({ accountId, days = 7, conversationIds = null } = {}) {
+        const params = [accountId, Number(days) || 7];
+        let extra = '';
+        if (Array.isArray(conversationIds)) {
+          if (!conversationIds.length) return [];
+          extra = ` AND u.conversation_id IN (${conversationIds.map(() => '?').join(',')})`;
+          params.push(...conversationIds.map(Number));
+        }
+        return r.many(`SELECT u.cache_hit_tokens h, u.cache_miss_tokens m, u.conversation_id cid
+             FROM usage_stats u
+            WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)${extra}`,
+        params);
+      },
     },
 
     /**
@@ -720,6 +739,15 @@ function makeApi(r) {
         const n = Number(limit);
         const lim = Number.isInteger(n) && n > 0 ? n : 100;
         return r.many(`SELECT id, account_id, action, detail, conversation_id, shell_id, created_at FROM audit_log WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, lim]);
+      },
+      /**
+       * 某动作前缀涉及过哪些会话（`prefix:%` ⇒ 落过前缀账的会话）——**裁定 A 的两次读法**里那一半：
+       * 归属判据仍只有 `cohort.js` 一份，这里只回答"账本里出现过哪些会话 id"。
+       * `conversation_id IS NOT NULL`：无主行（孤儿）不是会话，不能进候选名单。
+       */
+      async conversationIdsByActionPrefix(prefix) {
+        const rows = await r.many('SELECT DISTINCT conversation_id cid FROM audit_log WHERE action LIKE ? AND conversation_id IS NOT NULL', [String(prefix) + '%']);
+        return rows.map((row) => Number(row.cid));
       },
     },
 

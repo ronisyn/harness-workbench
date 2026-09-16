@@ -298,6 +298,29 @@ function fakeMysql() {
         .map((r) => ({ id: r.id, account_id: r.account_id ?? null, action: r.action ?? null, detail: r.detail ?? null, conversation_id: r.conversation_id ?? null, shell_id: r.shell_id ?? null, created_at: r.created_at ?? null }));
     }
 
+    // 裁定 A 的两次读法：某动作前缀涉及过哪些会话（DISTINCT + IS NOT NULL），按整段认
+    if ((m = /^SELECT DISTINCT conversation_id cid FROM audit_log WHERE action LIKE \? AND conversation_id IS NOT NULL$/i.exec(q))) {
+      const pfx = String(p.shift()).replace(/%$/, '');
+      const out = new Set();
+      for (const r of rowsOf(store, 'audit_log').values()) {
+        if (!String(r.action || '').startsWith(pfx)) continue;
+        if (r.conversation_id === null || r.conversation_id === undefined) continue;
+        out.add(Number(r.conversation_id));
+      }
+      return [...out].map((cid) => ({ cid }));
+    }
+    // 逐轮读数（C1/C2 来源；裁定 A 的第二次读法）：account + kind='round' + 窗口 + 可选 IN (…)
+    if (/^SELECT u\.cache_hit_tokens h, u\.cache_miss_tokens m, u\.conversation_id cid\s+FROM usage_stats u\s+WHERE u\.account_id=\? AND u\.kind='round' AND u\.created_at >= DATE_SUB\(NOW\(\), INTERVAL \? DAY\)(?: AND u\.conversation_id IN \(([?\s,]+)\))?$/i.test(q)) {
+      const acc = Number(p.shift()); const days = Number(p.shift());
+      const inRaw = /IN \(([?\s,]+)\)/i.exec(q);
+      const ids = inRaw ? new Set(Array.from({ length: (inRaw[1].match(/\?/g) || []).length }, () => Number(p.shift()))) : null;
+      const floor = Date.now() - days * 86400000;
+      return [...rowsOf(store, 'usage_stats').values()]
+        .filter((r) => Number(r.account_id) === acc && r.kind === 'round' && new Date(r.created_at || 0).getTime() >= floor)
+        .filter((r) => !ids || ids.has(Number(r.conversation_id)))
+        .map((r) => ({ h: Number(r.cache_hit_tokens || 0), m: Number(r.cache_miss_tokens || 0), cid: r.conversation_id ?? null }));
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -778,6 +801,31 @@ function contractSuite(label, make, caps) {
     assert.equal(like.every((r) => r.action === 'prefix:exempt'), true, 'LIKE 条件按既有口径过滤');
     // 看不懂的条件：两个实现都必须**如实抛**（JSON 侧带 STORAGE_UNSUPPORTED 码，MySQL 侧由介质自己报错）
     await assert.rejects(() => s.audit.adminList({ conds: ['有些不认识的条件'] }), /不认识/, '看不懂的条件必须如实抛（绝不"当没条件"把整表放出去）');
+  });
+
+  // ── 裁定 A 的两次读法（2026-09-17）：前缀账涉及过哪些会话 + 按 id 列表取逐轮读数 ──────────────────
+  test(T('裁定 A：conversationIdsByActionPrefix 与 roundRowsByAccount（按 id 列表过滤、空列表＝空结果）'), async () => {
+    const { storage: s } = make();
+    await s.audit.append({ accountId: 1, action: 'prefix:assemble', detail: 'fp=a', conversationId: 11 });
+    await s.audit.append({ accountId: 1, action: 'prefix:exempt', detail: 'first-round', conversationId: 11 });
+    await s.audit.append({ accountId: 1, action: 'prefix:assemble', detail: 'fp=b', conversationId: 12 });
+    await s.audit.append({ accountId: 1, action: 'tool:read_file', detail: '{}', conversationId: 12 });
+    await s.audit.append({ accountId: 1, action: 'spill:cleanup', detail: '{}' });   // 无主行：不是会话，不许进名单
+    const ids = await s.audit.conversationIdsByActionPrefix('prefix:');
+    assert.deepEqual([...ids].sort((a, b) => a - b), [11, 12], '只回前缀命中的会话、去重、排除无主行：' + JSON.stringify(ids));
+    assert.deepEqual(await s.audit.conversationIdsByActionPrefix('没有这个前缀:'), [], '没命中＝空数组');
+    // 逐轮读数：窗口内 kind='round'，只取点名的那批会话
+    await s.usage.append({ accountId: 1, conversationId: 11, kind: 'round', cacheHit: 900, cacheMiss: 100 });
+    await s.usage.append({ accountId: 1, conversationId: 12, kind: 'round', cacheHit: 0, cacheMiss: 1000 });
+    await s.usage.append({ accountId: 1, conversationId: 13, kind: 'round', cacheHit: 500, cacheMiss: 500 });
+    await s.usage.append({ accountId: 1, conversationId: 11, kind: 'title', cacheHit: 0, cacheMiss: 5 });   // 非 round：不算
+    const rows = await s.usage.roundRowsByAccount({ accountId: 1, days: 7, conversationIds: [11, 12] });
+    assert.deepEqual(rows.map((r) => r.cid).sort((a, b) => a - b), [11, 12], '只取点名会话的 round 行：' + JSON.stringify(rows));
+    assert.equal(rows.find((r) => r.cid === 11).h, 900, '命中数如实回：' + JSON.stringify(rows));
+    assert.equal((await s.usage.roundRowsByAccount({ accountId: 1, days: 7, conversationIds: [11, 12] })).length, 2, 'title 那条不算 round');
+    assert.deepEqual(await s.usage.roundRowsByAccount({ accountId: 1, days: 7, conversationIds: [] }), [], '空名单＝空结果（不是"没有条件"⇒ 不许变成全量）');
+    const all = await s.usage.roundRowsByAccount({ accountId: 1, days: 7 });
+    assert.equal(all.length, 3, '不传名单＝不加会话条件（保留原来那条形状）：' + JSON.stringify(all.map((r) => r.cid)));
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {

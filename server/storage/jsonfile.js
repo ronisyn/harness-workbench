@@ -849,6 +849,18 @@ function makeApi(holder, save, { persist }) {
         const convs = new Set(rows.map((r) => r.conversationId).filter((v) => v !== null && v !== undefined));
         return { total: rows.reduce((a, r) => a + Number(r.cost || 0), 0), runs: runs.size, convs: convs.size };
       },
+      /** 逐轮读数（C1/C2 的来源；裁定 A 的第二次读法）：按 `conversationIds` 过滤，空数组＝空结果。 */
+      async roundRowsByAccount({ accountId, days = 7, conversationIds = null } = {}) {
+        const floor = Date.now() - (Number(days) || 7) * 86400000;
+        let rows = rowsOf('usage').filter((r) => Number(r.accountId) === Number(accountId)
+          && r.kind === 'round' && new Date(r.createdAt || 0).getTime() >= floor);
+        if (Array.isArray(conversationIds)) {
+          if (!conversationIds.length) return [];
+          const want = new Set(conversationIds.map(Number));
+          rows = rows.filter((r) => want.has(Number(r.conversationId)));
+        }
+        return rows.map((r) => ({ h: Number(r.cacheHit || 0), m: Number(r.cacheMiss || 0), cid: r.conversationId ?? null }));
+      },
     },
 
     /**
@@ -960,6 +972,17 @@ function makeApi(holder, save, { persist }) {
           id: r.id, account_id: r.accountId ?? null, action: r.action ?? null, detail: r.detail ?? null,
           conversation_id: r.conversationId ?? null, shell_id: r.shellId ?? null, created_at: r.createdAt ?? null,
         }));
+      },
+      /** 某动作前缀涉及过哪些会话（裁定 A 的那一半）：与 mysql 侧的 `DISTINCT … IS NOT NULL` 同义。 */
+      async conversationIdsByActionPrefix(prefix) {
+        const p = String(prefix);
+        const out = new Set();
+        for (const r of rowsOf('audit')) {
+          if (!String(r.action || '').startsWith(p)) continue;
+          if (r.conversationId === null || r.conversationId === undefined) continue;
+          out.add(Number(r.conversationId));
+        }
+        return [...out];
       },
     },
 

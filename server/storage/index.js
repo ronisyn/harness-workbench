@@ -94,13 +94,13 @@ export const CONTRACT = {
     // 用量记账（2026-09-17 加**写口**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时自落账并支持
     // 离线导出（默认开启）」。迁移前只有直连 SQL 一条路 ⇒ 干净机器上成本计量是空的（"省钱"这条主线在客户机
     // 上没有数）。本轮只迁**写口**：读法（C1–C5 报表 / 仪表 / 遥测 / 会话导出）仍走 SQL，如实登记。
-    usage: ['append', 'summaryByConversation', 'summaryByAccount'],
+    usage: ['append', 'summaryByConversation', 'summaryByAccount', 'roundRowsByAccount'],
     // 审计账（2026-09-17 加**写口**＋**一处读**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时
     // 自落账并支持离线导出（默认开启）」。`lastDetail` 是**跨轮前缀账**的对照读法（每一轮都要读上一行）：
     // 只迁这一处读，是因为它在**每轮都在跑的路径**上 —— 写口迁了而它没迁，干净机器上"先读后写"仍然整段失败
     // （实测：`/api/chat` 的前缀账在 jsonfile 下被 catch 吞掉，介质里只有 `tool:*` 那一类审计）。
     // **其余读法（/api/audit 列表 + 归档 + 前缀账统计 + /trace）仍走 SQL**，如实登记在收口表。
-    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation', 'adminList'],
+    audit: ['append', 'lastDetail', 'lastByAction', 'countByAction', 'countByFirstToken', 'traceByConversation', 'adminList', 'conversationIdsByActionPrefix'],
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],

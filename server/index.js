@@ -36,7 +36,7 @@ import { marketList, refreshMarket, connectModels, scheduleMarketRefresh } from 
 import { startWechatChannel } from './channels/wechat.js';
 import { registerFeishuWebhook } from './channels/feishu-webhook.js';
 import { startScheduler } from './scheduler.js';
-import { REAL_WHERE } from './cohort.js';      // 复测口径单一来源（首页指标与复跑脚本同一份判据）
+import { realConversationIds } from './cohort.js';  // 复测口径单一来源（首页指标与复跑脚本同一份判据）
 import { checkEpochAndWarm } from './epoch.js'; // M2 换纪元检测与一次预热
 // 2026-09-16（核对报告 §3.5③）：跨轮前缀指纹 —— C4 在"两次请求之间"这个维度上的机检
 // `detectPrefixRewrite`（判据本体，`server/history.js`）与 `PREFIX_RECORD_ACTION`（动作名）现在由
@@ -1769,11 +1769,13 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     let c4 = { count: 0, definition: '非预期整段前缀作废次数（不含首轮/切模型/折叠边界/长空闲/工具面变更）', lastAt: null, fromLedger: null };
     let c5 = { rounds: 0, exempt: 0, collapse: 0, total: 0, byReason: {}, reasons: [] };
     try {
-      const pr = await db.query(
-        `SELECT u.cache_hit_tokens h, u.cache_miss_tokens m, u.conversation_id cid
-           FROM usage_stats u
-          WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-            AND (${REAL_WHERE('u')})`, [req.user.id]);
+      // C1/C2 的逐轮读数：**两次读法**（裁定 A，见收口表第二十一节）——
+      // ① 先用两类事实解析出"真实流量"的会话 id 集合（判据仍是 cohort.js 那一份，不下沉到介质）；
+      // ② 再按 id 列表取逐轮读数。这样 JSON 介质也能算（跨表子查询只有 MySQL 能表达，`IN (…)` 两边都能）。
+      const convsForCohort = await storage.conversations.listByAccount(req.user.id);
+      const probeLedgerIds = await storage.audit.conversationIdsByActionPrefix('prefix:');
+      const realIds = realConversationIds({ conversations: convsForCohort, probeLedgerConvIds: probeLedgerIds });
+      const pr = await storage.usage.roundRowsByAccount({ accountId: req.user.id, days: 7, conversationIds: realIds });
       const rates = pr.filter((r) => (Number(r.h) + Number(r.m)) > 0).map((r) => Number(r.h) / (Number(r.h) + Number(r.m)));
       const q = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); const i = Math.min(s.length - 1, Math.max(0, Math.ceil(p * s.length) - 1)); return s[i]; };
       perRequest = {
