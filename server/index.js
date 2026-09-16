@@ -21,7 +21,8 @@ import { runGoldenChecks, loadGoldenItems } from './canary.js';
 import { SHELL_TEMPLATES } from './shelltemplates.js';
 import { listSkillsMeta, getSkill, saveSkill, setSkillEnabled, deleteSkill, skillNameOk } from './skillsmgr.js';
 import { parseKnowledgeUpload } from './knowledge.js';
-import { kbVisibleWhere } from './knowledge.js';
+// 注：`kbVisibleWhere` 的导入已随"知识注入/管理面走存储接口"一起去掉（可见范围判据现在只在存储实现里
+// 被引用，见 `storage/mysql.js` 的 `removeVisible`/`visibleList`）—— 这里不再自己拼那段 SQL。
 // 知识检索走后端层（v0.3 §4.3「记忆」行「全文检索打底…向量留接口位置后补」）：管理面带 `q` 时也走它，
 // 全仓**唯一**一份"知识怎么搜"的口径（会话侧 kb_search 走的同一个函数）。
 import { searchKnowledge } from './kbsearch/index.js';
@@ -1131,8 +1132,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const kbMode = kbInjectMode(content, u);
     if (kbMode !== 'none') {
       const kbShellId = (convShellCtx && convShellCtx.key !== 'default') ? convShellId : null;
-      const v = kbVisibleWhere({ accountId: req.user.id, shellId: kbShellId, conversationId });
-      const kb = await db.query(`SELECT id, scope, title, body FROM knowledge WHERE ${v.where} ORDER BY id DESC LIMIT 12`, v.params);
+      const kb = await storage.knowledge.visibleList({ accountId: req.user.id, shellId: kbShellId, conversationId, limit: 12 });
       const block = kbBlock(kb, kbMode);
       if (block) messages.push({ role: 'system', content: block });
     }
@@ -2490,27 +2490,36 @@ app.get('/api/telemetry/daily', requireAuth, async (req, res) => {
 //   · 带 `q` 时**仍按 `k.id DESC` 返回、仍带 shell_key/body_preview 这些展示列**——管理视图是 MySQL 表视图
 //     （前端 `web/dist` 读的就是这些列），不是检索结果视图；顺序与列形状一变，页面上就看得见；
 //   · `q` 为空白视为没给（`?q=` 与不带 `q` 同义），避免"空白词"被当成合法检索词。
-// 组合过滤（scope/shell_id/kind/status）与检索层的 `opts.filter` **同名同义**（`server/knowledge.js` 的
-// `kbVisibleWhere` 是同一套选项名），所以 `conds/params` 的两份形状一致，不会各长歪。
+// 组合过滤（scope/shell_id/kind/status）逐字沿用改造前那套条件（账号内的治理视图，不套"会话可见范围"）。
+// 2026-09-17：展示列改由 `storage.knowledge.adminList()` 取（MySQL 侧仍做 LEFT JOIN shells 拿 shell_key，
+// 列名逐字不变），`PATCH`/`DELETE`/导入三条也走接口 —— 干净机器（jsonfile）上这一页从此能打开。
 const KB_ADMIN_SEARCH_LIMIT = 200; // 检索层的取值上界（与 `server/kbsearch/fts.js` 的 limitOf 上界一致；展示条数仍由下面的 LIMIT 管）
 app.get('/api/knowledge', requireAuth, async (req, res) => {
   try {
-    const conds = ['account_id=?'];
-    const params = [req.user.id];
-    const scope = String(req.query.scope || '');
-    if (['global', 'shell', 'conv'].includes(scope)) { conds.push('scope=?'); params.push(scope); }
-    if (scope === 'shell' && Number(req.query.shell_id)) { conds.push('shell_id=?'); params.push(Number(req.query.shell_id)); }
+    // 过滤条件收成中性参数（2026-09-17 起走存储接口的 `knowledge.adminList`）：形状与列名逐字不变，
+    // 干净机器（RW_STORAGE=jsonfile）上这一页也能用 —— 迁移前它整段是直连 SQL。
+    const scope = ['global', 'shell', 'conv'].includes(String(req.query.scope || '')) ? String(req.query.scope) : null;
+    const shellId = (scope === 'shell' && Number(req.query.shell_id)) ? Number(req.query.shell_id) : null;
     // 2026-09-09 文档型升级：kind 过滤（管理 Tab 用；缺省=全部，不改变默认查询语义）
-    const kind = String(req.query.kind || '');
-    if (kind && /^(fact|progress|guide|skill|lesson)$/.test(kind)) { conds.push('kind=?'); params.push(kind); }
+    const kind = /^(fact|progress|guide|skill|lesson)$/.test(String(req.query.kind || '')) ? String(req.query.kind) : null;
     // A6 条目状态过滤（治理支撑 §7.3）：active|superseded|obsolete
-    const status = String(req.query.status || '');
-    if (['active', 'superseded', 'obsolete'].includes(status)) { conds.push('status=?'); params.push(status); }
+    const status = ['active', 'superseded', 'obsolete'].includes(String(req.query.status || '')) ? String(req.query.status) : null;
+    const filter = { accountId: req.user.id, scope, shellId, kind, status, limit: 500 };
     const q = String(req.query.q || '').trim();
     // ---- 带关键词：走检索后端（FTS 打底，索引不可用时它自己如实回落 LIKE 并报 mode:'like'）----
     if (q) {
+      // 条件串与改造前**逐字相同**（账号 + 可选 scope/shell/kind/status）：管理视图是**账号内的治理视图**，
+      // 与"会话可见范围"（kbVisibleWhere：global ∪ 本壳 ∪ 本会话）**不是一回事** —— 治理要能看到本账号的
+      // conv 私有条目，所以这里刻意不套可见范围判据（套上会当场少掉一整类条目）。
+      // 同时把 `storage` 也传给检索层：第二个实现（like，纯 JS）要它才读得到记录。
+      const conds = ['account_id=?'];
+      const params = [req.user.id];
+      if (scope) { conds.push('scope=?'); params.push(scope); }
+      if (scope === 'shell' && shellId) { conds.push('shell_id=?'); params.push(shellId); }
+      if (kind) { conds.push('kind=?'); params.push(kind); }
+      if (status) { conds.push('status=?'); params.push(status); }
       const r = await searchKnowledge(q, {
-        db, where: conds.join(' AND '), params,
+        db, storage, where: conds.join(' AND '), params,
         limit: KB_ADMIN_SEARCH_LIMIT, snippet: 0,
         // 管理视图是**历史视图**：没显式筛 status 时它本来就返回 active/superseded/obsolete 全部条目
         // （见上面那条 status 过滤；治理 Tab 要能看到 superseded/obsolete 才能把它们改回来）。
@@ -2523,19 +2532,13 @@ app.get('/api/knowledge', requireAuth, async (req, res) => {
       // 只按 id 过滤（可见范围/分类/状态/关键词**已经由检索层判过**——这里再套一遍条件就等于把判据写两份）。
       const ids = r.items.map((x) => Number(x.id)).filter((n) => Number.isFinite(n));
       if (!ids.length) return res.json({ ok: true, knowledge: [], mode: r.mode, backend: r.backend });
-      const rows = await db.query(
-        `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
-         FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
-         WHERE k.id IN (${ids.map(() => '?').join(',')}) LIMIT 500`, ids);
+      const rows = await storage.knowledge.adminList({ accountId: req.user.id, ids, limit: 500 });
       // 顺序沿用改造前的 `k.id DESC`（管理面口径不变；检索的分数**不**改展示顺序）
       rows.sort((a, b) => Number(b.id) - Number(a.id));
       return res.json({ ok: true, knowledge: rows, mode: r.mode, backend: r.backend });
     }
     // ---- 不带关键词：纯列表（与改造前逐字相同）----
-    const rows = await db.query(
-      `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
-       FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
-       WHERE ${conds.map((c) => 'k.' + c).join(' AND ')} ORDER BY k.id DESC LIMIT 500`, params);
+    const rows = await storage.knowledge.adminList(filter);
     res.json({ ok: true, knowledge: rows });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2543,17 +2546,16 @@ app.get('/api/knowledge', requireAuth, async (req, res) => {
 app.patch('/api/knowledge/:id', requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id) || 0;
-    const set = [], params = [];
     const { status, relatedComponent } = req.body || {};
+    const patch = {};
     if (status !== undefined) {
       if (!['active', 'superseded', 'obsolete'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 active|superseded|obsolete' });
-      set.push('status=?'); params.push(status);
+      patch.status = status;
     }
-    if (relatedComponent !== undefined) { set.push('related_component=?'); params.push(String(relatedComponent).slice(0, 120) || null); }
-    if (!set.length) return res.json({ ok: true });
-    params.push(id, req.user.id);
-    const r = await db.query(`UPDATE knowledge SET ${set.join(',')} WHERE id=? AND account_id=?`, params);
-    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '条目不存在或无权修改' });
+    if (relatedComponent !== undefined) patch.relatedComponent = String(relatedComponent).slice(0, 120) || null;
+    if (!Object.keys(patch).length) return res.json({ ok: true });
+    const r = await storage.knowledge.updateOwned(id, req.user.id, patch);
+    if (!r.updated) return res.status(404).json({ ok: false, message: '条目不存在或无权修改' });
     await storage.audit.append({ accountId: req.user.id, action: 'knowledge:status', detail: 'id=' + id + (status ? ' status=' + status : '') });
     res.json({ ok: true, id });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
@@ -2585,10 +2587,10 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(400).json({ ok: false, message: '文件解析后无可导入条目（全空或格式不符）' });
     let inserted = 0, updated = 0;
     for (const r of rows) {
-      const exist = await db.query('SELECT id FROM knowledge WHERE account_id=? AND scope=? AND (shell_id<=>?) AND (conversation_id<=>?) AND kind=? AND title=? ORDER BY id DESC LIMIT 1',
-        [req.user.id, sc, shellId, convId, kind, r.title]);
-      if (exist.length) { await db.query('UPDATE knowledge SET body=?, status="active", created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
-      else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, kind, r.title, r.body, 'active']); inserted++; }
+      // v0.3 §4.1「存储走接口」：同名判定与覆盖/新增走接口（判据六个条件一字未改）。
+      const exist = await storage.knowledge.findByTitle({ accountId: req.user.id, scope: sc, conversationId: convId, shellId, kind, title: r.title });
+      if (exist) { await storage.knowledge.update(exist.id, { body: r.body, status: 'active', touch: true }); updated++; }
+      else { await storage.knowledge.append({ accountId: req.user.id, scope: sc, conversationId: convId, shellId, kind, title: r.title, body: r.body, status: 'active' }); inserted++; }
     }
     await storage.audit.append({ accountId: req.user.id, action: 'knowledge:import', detail: 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' kind=' + kind + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated });
     res.json({ ok: true, scope: sc, shellKey: shellKey || null, kind, inserted, updated, total: rows.length });
@@ -2597,8 +2599,8 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
 // 删除：DELETE /api/knowledge/:id（仅本账号条目）
 app.delete('/api/knowledge/:id', requireAuth, async (req, res) => {
   try {
-    const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [Number(req.params.id) || 0, req.user.id]);
-    if (!r.affectedRows) return res.status(404).json({ ok: false, message: '知识条目不存在或无权删除' });
+    const r = await storage.knowledge.remove(Number(req.params.id) || 0, { accountId: req.user.id });
+    if (!r.removed) return res.status(404).json({ ok: false, message: '知识条目不存在或无权删除' });
     await storage.audit.append({ accountId: req.user.id, action: 'knowledge:delete', detail: 'id=' + req.params.id });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }

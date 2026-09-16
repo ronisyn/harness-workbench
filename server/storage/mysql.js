@@ -59,7 +59,7 @@ const COLS = {
   // 只映射检索层真正要用的列：`related_component` 是管理面的展示列，不在列里（同接口层的字段清单）。
   knowledge: {
     accountId: 'account_id', scope: 'scope', conversationId: 'conversation_id', shellId: 'shell_id',
-    kind: 'kind', title: 'title', body: 'body', status: 'status',
+    kind: 'kind', title: 'title', body: 'body', status: 'status', relatedComponent: 'related_component',
   },
   deliveries: {
     accountId: 'account_id', conversationId: 'conversation_id', idemKey: 'idem_key', requestHash: 'request_hash',
@@ -571,6 +571,57 @@ function makeApi(r) {
         const v = kbVisibleWhere({ accountId, shellId, conversationId, includeConv: true });
         const res = await r.exec(`DELETE FROM knowledge WHERE id=? AND ${v.where}`, [Number(id) || 0, ...v.params]);
         return { removed: res.affectedRows > 0 };
+      },
+      /**
+       * **管理视图的展示列**（`GET /api/knowledge` 的两个分支共用）：返回的行**逐字沿用改造前那条 SQL 的
+       * 列名**（`shell_key` / `body_preview` / `related_component` / `created_at`）——前端 `web/dist`
+       * 读的就是这些名字，"换实现不改调用方"在这里也意味着**不改前端**。
+       * `shell_key` 由介质自己 join（MySQL 有 shells 表；JSON 侧没有 ⇒ 如实 null，见那里的注释）。
+       * `ids` 给了就按 id 取（带 `q` 的分支：检索层判完命中，这里只补展示列）。`limit` 内联（与既有路线一致）。
+       */
+      async adminList({ accountId, scope = null, shellId = null, kind = null, status = null, ids = null, limit = 500 } = {}) {
+        const conds = ['k.account_id=?']; const params = [accountId];
+        if (scope) { conds.push('k.scope=?'); params.push(scope); }
+        if (scope === 'shell' && shellId) { conds.push('k.shell_id=?'); params.push(shellId); }
+        if (kind) { conds.push('k.kind=?'); params.push(kind); }
+        if (status) { conds.push('k.status=?'); params.push(status); }
+        if (Array.isArray(ids)) {
+          if (!ids.length) return [];
+          conds.push(`k.id IN (${ids.map(() => '?').join(',')})`);
+          params.push(...ids.map(Number));
+        }
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? ` LIMIT ${n}` : '';
+        return r.many(
+          `SELECT k.id, k.scope, k.shell_id, s.skey AS shell_key, k.conversation_id, k.kind, k.status, k.related_component, k.title, LEFT(k.body, 200) AS body_preview, k.created_at
+           FROM knowledge k LEFT JOIN shells s ON s.id = k.shell_id
+           WHERE ${conds.join(' AND ')} ORDER BY k.id DESC${lim}`, params);
+      },
+      /**
+       * **会话可见范围**下的条目（`/api/chat` 每轮的知识注入读法）：账号 + (global ∪ 本壳 shell ∪ 本会话 conv)
+       * + 仅 active，`id DESC LIMIT n`。可见范围的 SQL 片段只有一份出处（`kbVisibleWhere`），这里直接引用它 ——
+       * 与 `removeVisible` 同源；不迁这一处的话，干净机器上"记得的东西"永远不会被注入（失败还被 catch 吞掉）。
+       */
+      async visibleList({ accountId, shellId = null, conversationId = null, limit = 12 } = {}) {
+        const v = kbVisibleWhere({ accountId, shellId, conversationId, includeConv: true });
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? ` LIMIT ${n}` : '';
+        return r.many(`SELECT id, scope, title, body FROM knowledge WHERE ${v.where} ORDER BY id DESC${lim}`, v.params);
+      },
+      /** 账号边界内的修订（管理面 `PATCH /api/knowledge/:id`）：白名单＝`knowledgeOwned`，改不到别人的行。 */      async updateOwned(id, accountId, patch = {}) {
+        const keys = Object.keys(patch).filter((k) => k !== 'touch');
+        for (const k of keys) {
+          if (!PATCHABLE.knowledgeOwned.includes(k)) {
+            const e = new Error(`未知字段 knowledge.${k}（管理面可改的只有：${PATCHABLE.knowledgeOwned.join(', ')}）`);
+            e.code = STORAGE_INVALID_FIELD;
+            throw e;
+          }
+        }
+        if (!keys.length) return { updated: false };
+        const sets = keys.map((k) => `${COLS.knowledge[k]}=?`);
+        const params = keys.map((k) => enc(COLS.knowledge[k], patch[k]));
+        const res = await r.exec(`UPDATE knowledge SET ${sets.join(', ')} WHERE id=? AND account_id=?`, [...params, Number(id) || 0, accountId]);
+        return { updated: res.affectedRows > 0 };
       },
     },
 

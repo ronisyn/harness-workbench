@@ -112,7 +112,7 @@ export const CONTRACT = {
     // 不是引擎跑起来必需的那条链（见收口表第九节的"仍未闭合"）。
     // `removeVisible` 收的是**安全边界**（照 `conversations.getAs` 那条"接口上不留不带账号的读法"的先例）：
     // 会话可见范围＝本账号的 (global ∪ 本壳 shell ∪ 本会话 conv) 且 status=active，两个实现都要保证同一条。
-    knowledge: ['all', 'append', 'update', 'remove', 'removeVisible', 'findByTitle'],
+    knowledge: ['all', 'append', 'update', 'updateOwned', 'remove', 'removeVisible', 'findByTitle', 'adminList', 'visibleList'],
     // 非必需：本轮示范迁移的第七个实体（`jsonfile.js` 对它显式抛"不支持"）
     // `list` 另接受**可选**的 `accountId` 过滤（`{state?, limit?, accountId?}`）：路由按调用者账号收口时用它，
     // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
@@ -139,11 +139,11 @@ export const FIELDS = {
   //  这一点两边不同，已在 `jsonfile.js` 里写明；契约里放 TTL 而不是绝对时间，是为了别把时钟源也搬到应用层）。
   sessions: ['token', 'accountId', 'expiresAt'],
   // knowledge 的方法收的是具名参数（`all(accountId)`），这里列的是**记录形状**（读回来的行按它映射）：
-  // 字段名与 `server/db.js` 的 `knowledge` 表一一对应；`relatedComponent` 不在列里——
-  // 检索层用不到它（它是管理面的展示列），按"只收现在真正要用的"那条纪律不加。
-  // `createdAt` 也不在列里：它是**所有实体共有的介质时间戳**（`toRecord()` 按 `created_at` 统一带出），
-  // 不是 knowledge 特有的字段 —— 写进这张表反而会造成"有的实体登记了、有的没登记"的错觉。
-  knowledge: ['accountId', 'scope', 'conversationId', 'shellId', 'kind', 'title', 'body', 'status'],
+  // 字段名与 `server/db.js` 的 `knowledge` 表一一对应；`createdAt` 不在列里（它是**所有实体共有的
+  // 介质时间戳**，由 `toRecord()` 统一带出，不是 knowledge 特有的字段）。
+  // 2026-09-17：`relatedComponent` **加进来**了 —— 管理面（治理视图）就是靠它把条目关联到组件的；
+  // 当初"检索层用不到所以不加"的理由，在管理面迁上接口之后不再成立（加它有真实使用者）。
+  knowledge: ['accountId', 'scope', 'conversationId', 'shellId', 'kind', 'title', 'body', 'status', 'relatedComponent'],
   // 用量记账的中性字段名（列名与 `usage_stats` 的建表逐字对应；`createdAt` 不在这里——那是**所有实体共有的
   // 介质时间戳**，由建表的 `DEFAULT NOW()` / JSON 侧 `nowIso()` 盖，不是调用方能填的字段）
   usage: ['accountId', 'conversationId', 'agentRunId', 'messageId', 'providerId', 'modelId', 'tokensIn', 'tokensOut',
@@ -163,6 +163,8 @@ export const FIELDS = {
  */
 export const PATCHABLE = {
   knowledge: ['body', 'status', 'title'],
+  // 管理面（账号边界内）能改的：多了 `relatedComponent`（"这条知识关联到哪个组件"是治理视图的字段）
+  knowledgeOwned: ['body', 'status', 'title', 'relatedComponent'],
 };
 
 /** 展平成 `['query', 'conversations.create', ...]`：夹具与自检用它比对两个实现的方法面。 */

@@ -325,10 +325,14 @@ test("⑨ 管理面：空 q 走纯列表（不碰检索层）、命中后仍按 
   // 空 q = 没给：`String(req.query.q || '').trim()` 之后再判真假，所以 `?q=` / `?q=%20` 都走列表那条路
   assert.match(body, /const q = String\(req\.query\.q \|\| ''\)\.trim\(\);/, 'q 要先 trim 再判真假（空白词不许当检索词）');
   assert.match(body, /if \(q\) \{/, '带 q / 不带 q 必须是两条明确分开的路');
-  // 不带 q 那条路仍要 LEFT JOIN shells 取展示列（前端 web/dist 读 body_preview 与 shell_key）
-  assert.match(body, /LEFT JOIN shells s ON s\.id = k\.shell_id/, '展示列仍要取（shell_key/body_preview 是管理视图的列形状）');
-  assert.match(body, /LEFT\(k\.body, 200\) AS body_preview/, 'body_preview 必须在（前端读它）');
-  assert.match(body, /s\.skey AS shell_key/, 'shell_key 必须在（前端读它）');
+  // 不带 q 那条路仍取展示列，但**取法已迁到存储接口**（2026-09-17）：路由只调 `adminList`，
+  // 列形状由实现保证 —— 所以下面两条判据要打在**实现**上（那里才是 SQL 现在待的地方）。
+  assert.match(body, /storage\.knowledge\.adminList\(filter\)/, '纯列表走接口（干净机器上这一页也要能开）');
+  assert.match(body, /storage\.knowledge\.adminList\(\{ accountId: req\.user\.id, ids, limit: 500 \}\)/, '带 q 命中后按 id 取展示列，也走接口');
+  const impl = fs.readFileSync(path.join(ROOT, 'server', 'storage', 'mysql.js'), 'utf8');
+  assert.match(impl, /LEFT JOIN shells s ON s\.id = k\.shell_id/, '展示列仍要取（shell_key/body_preview 是管理视图的列形状）');
+  assert.match(impl, /LEFT\(k\.body, 200\) AS body_preview/, 'body_preview 必须在（前端读它）');
+  assert.match(impl, /s\.skey AS shell_key/, 'shell_key 必须在（前端读它）');
   // 顺序口径：FTS 那条路按分数、兜底按 id；管理面最后统一成 id DESC → 也就是管理视图的既有顺序
   assert.match(body, /rows\.sort\(\(a, b\) => Number\(b\.id\) - Number\(a\.id\)\)/, '管理面顺序仍按 id DESC（不改展示口径）');
 });

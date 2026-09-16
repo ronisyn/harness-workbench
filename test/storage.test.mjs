@@ -189,6 +189,41 @@ function fakeMysql() {
       return { insertId: 0, affectedRows: removed };
     }
 
+    // 知识管理视图的展示列（`knowledge.adminList`）：LEFT JOIN shells 拿 shell_key + LEFT(body,200) 截预览。
+    // 按**整段形状**认（与上面那条 kbVisibleWhere 同一个理由）：这几个列名是前端在读的对外形状，
+    // 拆成通用条件去糊，等于把"前端读什么"这件事从夹具里抹掉。
+    if (/^SELECT k\.id, k\.scope, k\.shell_id, s\.skey AS shell_key, k\.conversation_id, k\.kind, k\.status, k\.related_component, k\.title, LEFT\(k\.body, 200\) AS body_preview, k\.created_at\s+FROM knowledge k LEFT JOIN shells s ON s\.id = k\.shell_id\s+WHERE (.+?) ORDER BY k\.id DESC(?: LIMIT (\d+))?$/i.test(q)) {
+      const mm = /^SELECT [\s\S]*?WHERE (.+?) ORDER BY k\.id DESC(?: LIMIT (\d+))?$/i.exec(q);
+      let where = mm[1]; const limit = mm[2] ? Number(mm[2]) : null;
+      const conds = where.split(/\s+AND\s+/i).map((c) => c.trim());
+      const filters = conds.filter((c) => !/^k\.id IN \(/i.test(c)).map((c) => {
+        const m2 = /^k\.(\w+)\s*(<=>|=)\s*\?$/i.exec(c);
+        if (!m2) throw new Error('假 pool 不认识的管理面条件：' + c);
+        const val = p.shift();
+        return { col: m2[1], op: m2[2], val };
+      });
+      let rows = [...rowsOf(store, 'knowledge').values()];
+      for (const f of filters) {
+        rows = rows.filter((row) => (f.op === '<=>' ? (row[f.col] ?? null) === (f.val ?? null) : row[f.col] === f.val));
+      }
+      // `k.id IN (?,?,…)`：按出现顺序消费剩下的参数（上面那些等值条件已各自 shift 过）
+      const inClause = conds.find((c) => /^k\.id IN \(/i.test(c));
+      if (inClause) {
+        const n = (inClause.match(/\?/g) || []).length;
+        const ids = Array.from({ length: n }, () => Number(p.shift()));
+        rows = rows.filter((row) => ids.includes(Number(row.id)));
+      }
+      rows.sort((a, b) => Number(b.id) - Number(a.id));
+      if (limit) rows = rows.slice(0, limit);
+      // left join shells：假库里没有 shells 表 ⇒ shell_key 恒 null（与 JSON 介质同一事实）
+      return rows.map((k) => ({
+        id: k.id, scope: k.scope, shell_id: k.shell_id ?? null, shell_key: null,
+        conversation_id: k.conversation_id ?? null, kind: k.kind ?? null, status: k.status ?? null,
+        related_component: k.related_component ?? null, title: k.title ?? null,
+        body_preview: String(k.body ?? '').slice(0, 200), created_at: k.created_at ?? null,
+      }));
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -579,6 +614,44 @@ function contractSuite(label, make, caps) {
     assert.ok(sys.id > five.id, '系统级动作（accountId=null）必须能写');
     await assert.rejects(() => s.audit.append({ accountId: 7, detail: '没动作' }), (e) => e.code === STORAGE_INVALID_FIELD, '缺 action 必须当场拒写');
     await assert.rejects(() => s.audit.append({ action: 'x', detail: 'y', accountID: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '拼错字段名不许静默吞');
+  });
+
+  // ── 知识管理面（2026-09-17）：管理视图的展示列 + 账号边界内的修订 + 每轮注入的可见范围读法 ──────
+  test(T('知识管理面：展示列（含 shell_key/body_preview）、账号内修订、可见范围列表'), async () => {
+    const { storage: s } = make();
+    const add = (f) => s.knowledge.append({ kind: 'fact', status: 'active', body: '', ...f });
+    await add({ accountId: 1, scope: 'global', conversationId: null, shellId: null, title: 'g1', body: 'x'.repeat(300) });
+    await add({ accountId: 1, scope: 'conv', conversationId: 7, shellId: null, title: 'c1' });
+    await add({ accountId: 1, scope: 'conv', conversationId: 8, shellId: null, title: 'c2' });
+    await add({ accountId: 1, scope: 'global', conversationId: null, shellId: null, title: 'old', status: 'superseded' });
+    await add({ accountId: 2, scope: 'global', conversationId: null, shellId: null, title: '别人的' });
+
+    // ① 管理视图＝**账号内**的治理视图：能看到 superseded（治理要能改回来），但看不到别人的
+    const all = await s.knowledge.adminList({ accountId: 1 });
+    assert.deepEqual(all.map((r) => r.title), ['old', 'c2', 'c1', 'g1'], 'id DESC 且含 superseded（治理视图是历史视图）');
+    assert.equal(all[0].shell_key, null, 'JSON 介质没有 shells 表 ⇒ shell_key 如实 null（不编假值）');
+    assert.equal(all[0].body_preview.length, 0);
+    assert.equal(all[3].body_preview.length, 200, 'body_preview 截到 200 字（与 MySQL 的 LEFT(body,200) 同口径）');
+    assert.equal(all.some((r) => r.title === '别人的'), false, '账号边界：别人的条目一条都不许出现');
+    // 过滤（与路由那套同名同义）：注意管理面**不按会话过滤**（治理视图是账号级的，路由也没有这个参数）
+    assert.deepEqual((await s.knowledge.adminList({ accountId: 1, scope: 'conv' })).map((r) => r.title), ['c2', 'c1']);
+    assert.deepEqual((await s.knowledge.adminList({ accountId: 1, kind: 'fact', status: 'superseded' })).map((r) => r.title), ['old']);
+    // 按 id 取（带 q 命中后补展示列那条路）
+    const ids = await s.knowledge.adminList({ accountId: 1, ids: [all[1].id, all[3].id] });
+    assert.deepEqual(ids.map((r) => r.title), ['c2', 'g1']);
+    assert.deepEqual(await s.knowledge.adminList({ accountId: 1, ids: [] }), [], '空 id 列表＝空结果（不查库、也不许变成"没有条件"）');
+
+    // ② 可见范围列表（每轮注入的读法）：global + 本会话 conv，看不到别的会话与别人的
+    const vis = await s.knowledge.visibleList({ accountId: 1, conversationId: 7 });
+    assert.deepEqual(vis.map((r) => r.title), ['c1', 'g1'], 'id DESC：本会话 + global（不含别的会话/别人的/非 active）');
+    assert.deepEqual(Object.keys(vis[0]).sort(), ['body', 'id', 'scope', 'title'], '注入读法只要这四列（与改造前那条 SQL 同形）');
+
+    // ③ 管理面修订：账号边界 + 白名单
+    assert.deepEqual(await s.knowledge.updateOwned(all[3].id, 1, { status: 'obsolete', relatedComponent: 'agent' }), { updated: true });
+    assert.equal((await s.knowledge.adminList({ accountId: 1, ids: [all[3].id] }))[0].status, 'obsolete');
+    assert.equal((await s.knowledge.adminList({ accountId: 1, ids: [all[3].id] }))[0].related_component, 'agent', 'related_component 要真的写进去（治理视图读它）');
+    assert.deepEqual(await s.knowledge.updateOwned(all[3].id, 999, { status: 'active' }), { updated: false }, '别人的账号改不动');
+    await assert.rejects(() => s.knowledge.updateOwned(all[3].id, 1, { accountId: 2 }), (e) => e.code === STORAGE_INVALID_FIELD, '身份字段不许从管理面改');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {

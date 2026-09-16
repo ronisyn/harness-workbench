@@ -754,6 +754,63 @@ function makeApi(holder, save, { persist }) {
         await commit();
         return { removed: true };
       },
+      /**
+       * 管理视图的展示列（与 mysql 实现**同一套列名**，逐字沿用改造前那条 SQL：`shell_key`/`body_preview`/
+       * `related_component`/`created_at`）。
+       * `shellKey` 在 JSON 介质上**如实为 null**：这份存储里没有 `shells` 表（壳定义走文件/库，不在契约里），
+       * 编一个假 key 比 null 坏得多。`bodyPreview` 截断口径与 MySQL 的 `LEFT(body,200)` 一致。
+       */
+      async adminList({ accountId, scope = null, shellId = null, kind = null, status = null, ids = null, limit = 500 } = {}) {
+        let rows = rowsOf('knowledge').filter((r) => Number(r.accountId) === Number(accountId));
+        if (scope) rows = rows.filter((r) => r.scope === scope);
+        if (scope === 'shell' && shellId) rows = rows.filter((r) => Number(r.shellId) === Number(shellId));
+        if (kind) rows = rows.filter((r) => r.kind === kind);
+        if (status) rows = rows.filter((r) => r.status === status);
+        if (Array.isArray(ids)) {
+          const want = new Set(ids.map(Number));
+          rows = rows.filter((r) => want.has(Number(r.id)));
+        }
+        rows = rows.slice().reverse();   // rowsOf 升序 ⇒ 反向即 id DESC（与 mysql 的 ORDER BY k.id DESC 同向）
+        const n = Number(limit);
+        if (Number.isInteger(n) && n > 0) rows = rows.slice(0, n);
+        return rows.map((r) => ({
+          id: r.id, scope: r.scope, shell_id: r.shellId ?? null, shell_key: null,
+          conversation_id: r.conversationId ?? null, kind: r.kind ?? null, status: r.status ?? null,
+          related_component: r.relatedComponent ?? null, title: r.title ?? null,
+          body_preview: String(r.body ?? '').slice(0, 200), created_at: r.createdAt ?? null,
+        }));
+      },
+      /** 会话可见范围下的条目（每轮的知识注入读法）：与 mysql 侧 `kbVisibleWhere({includeConv:true})` 同一条判据。 */
+      async visibleList({ accountId, shellId = null, conversationId = null, limit = 12 } = {}) {
+        const eq = (a, b) => (a ?? null) === (b ?? null);
+        let rows = rowsOf('knowledge').filter((r) => Number(r.accountId) === Number(accountId)
+          && r.status === 'active'
+          && (r.scope === 'global'
+            || (r.scope === 'shell' && eq(r.shellId, shellId))
+            || (r.scope === 'conv' && eq(r.conversationId, conversationId ?? -1))));
+        rows = rows.slice().reverse();   // rowsOf 升序 ⇒ 反向即 id DESC
+        const n = Number(limit);
+        if (Number.isInteger(n) && n > 0) rows = rows.slice(0, n);
+        return rows.map((r) => ({ id: r.id, scope: r.scope, title: r.title ?? null, body: r.body ?? null }));
+      },
+      /** 账号边界内的修订（管理面）：白名单＝`knowledgeOwned`，改不到别人的行。 */
+      async updateOwned(id, accountId, patch = {}) {
+        for (const k of Object.keys(patch)) {
+          if (k === 'touch') continue;
+          if (!PATCHABLE.knowledgeOwned.includes(k)) {            const e = new Error(`未知字段 knowledge.${k}（管理面可改的只有：${PATCHABLE.knowledgeOwned.join(', ')}）`);
+            e.code = STORAGE_INVALID_FIELD;
+            throw e;
+          }
+        }
+        const rec = rowsOf('knowledge').find((r) => Number(r.id) === Number(id) && Number(r.accountId) === Number(accountId));
+        if (!rec) return { updated: false };
+        for (const k of Object.keys(patch)) {
+          if (k === 'touch') continue;
+          rec[k] = clone(patch[k]);
+        }
+        await commit();
+        return { updated: true };
+      },
     },
 
     /**
