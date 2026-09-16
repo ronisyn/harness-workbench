@@ -636,12 +636,15 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     // 进度帧（v0.3 §4.7 四要素之一「可观测…**进度**…逐步可见」）：此前思考/工具/计划/成本都有，**没有进度**。
     // 只发**已经算得出来的**那几个数，不给它们新造口径：
     //   · `round`＝第几轮（与 thinking/agent_thinking 同一个循环序号，1 基）；
-    //   · `roundCap`＝**既有护栏配置** settings.round_cap（0=不限 ⇒ null）——不是本帧发明的上限；
-    //     它只在无人值守档真正拦人（fuseDecision，见 server/progress.js），所以字段名就叫 roundCap，不叫 total；
+    //   · `roundCap`＝**既有护栏配置** settings.round_cap，且只在它**真的会拦人**时才报 ——
+    //     round_cap 的既有语义是"只在无人值守时生效"（settingsSchema 的 hint 与 progress.js 的 fuseDecision 同口径），
+    //     所以交互式会话里报一个 2000 只会误导（那不是"共 2000 轮"，是条不生效的保险丝）。判据与 fuseDecision 同一处，
+    //     不生效 ⇒ null（= 没有可报的上限，不发明一个）。
     //   · `plan`＝当前计划快照走到第几步（来自 tools/index.js 的 plans，与 plan 事件同一份状态；无计划 ⇒ null）。
+    const fuseOn = unattended || lim.fuseInteractive > 0;
     emitEv(ctx.conversationId, emit, {
       type: 'progress', v: 1, round: round + 1,
-      roundCap: lim.roundCap > 0 ? lim.roundCap : null,
+      roundCap: fuseOn && lim.roundCap > 0 ? lim.roundCap : null,
       plan: planProgress(ctx.conversationId),
     });
     // 段边界折叠（纪律1 允许的唯一改写）：整段替换一次，发生时记 collapseRound 供归因

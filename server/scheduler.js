@@ -242,17 +242,20 @@ export function startScheduler() {
            AND NOT EXISTS (SELECT 1 FROM conv_summaries s WHERE s.conversation_id=c.id AND s.updated_at > c.updated_at)
          ORDER BY c.updated_at ASC LIMIT 3`);
       for (const c of cands) {
+        try { await summarizeConversation(c.id, { semantic: true, keys: config.keys }); }
+        catch (e) { console.error('[scheduler] 归档失败 conv#' + c.id + ':', e.message); continue; }
+        // 「受限自动沉淀」接线点之二（v0.3 §4.3 记忆行；选点理由见 server/selfeval/knowledge-sink.js 文件头）：
+        // **摘要刚生成**就是"这段经历哪些值得留下"最清楚的时刻——与 /api/chat 收尾那条是同一个时机，
+        // 所以调的是同一个 `sinkSessionKnowledge`（产出**待审卡片**，不写库）。
+        // 这里不传 `emit`：那一端没有连着的客户端。卡片照常落在既有待答队列里（`GET /api/asks`），
+        // GUI 打开时照常看得到——不为"没有观众的帧"造一条假投递。
+        // 单独一层 catch：沉淀坏了**只记一行**，不许把"归档成功了"报成"归档失败"（两件事分开说）。
         try {
-          await summarizeConversation(c.id, { semantic: true, keys: config.keys });
-          // 「受限自动沉淀」接线点之二（v0.3 §4.3 记忆行；选点理由见 server/selfeval/knowledge-sink.js 文件头）：
-          // **摘要刚生成**就是"这段经历哪些值得留下"最清楚的时刻——与 /api/chat 收尾那条是同一个时机，
-          // 所以调的是同一个 `sinkSessionKnowledge`（产出**待审卡片**，不写库）。
-          // 这里不传 `emit`：那一端没有连着的客户端。卡片照常落在既有待答队列里（`GET /api/asks`），
-          // GUI 打开时照常看得到——不为"没有观众的帧"造一条假投递。
-          // 失败/无候选一律静默跳过（只记一行日志），不许把一次自动归档弄失败。
           const sink = await sinkSessionKnowledge({ conversationId: c.id, storage, dbc: db });
           if (sink.errors.length) console.warn('[knowledge-sink] 归档后沉淀提案未完全成功 conv#' + c.id + '：' + sink.errors.join('；'));
-        } catch (e) { console.error('[scheduler] 归档失败 conv#' + c.id + ':', e.message); }
+        } catch (e) {
+          console.warn('[knowledge-sink] 归档后沉淀提案失败（静默跳过，不影响归档）conv#' + c.id + '：' + ((e && e.message) || e));
+        }
       }
       if (cands.length) console.log('[scheduler] 自动归档', cands.length, '个空闲长会话');
     } catch (e) { /* 归档扫描容错 */ }

@@ -274,6 +274,13 @@ export async function saveRegisteredProvider(db, def, keys, opts = {}) {
   // 内存注册 + 槽位绑定（到这一步才可能对外可见）
   const reg = registerProvider(def, keys);
   if (!reg.ok) return { ok: false, problems: reg.problems, error: reg.error };
+  // 改名时把"默认模型"那一行的行名一起改掉：它是启动载入时补回 defaultModel 的**唯一线索**
+  // （providers 表没有 defaultModel 列，口径＝`<厂商名> 默认模型`）——不改的话，改一次名、重启后默认模型就丢了。
+  try {
+    if (existing && existing.name !== entry.name) {
+      await db.query('UPDATE models SET name=? WHERE provider_id=? AND name=?', [entry.name + ' 默认模型', pid, existing.name + ' 默认模型']);
+    }
+  } catch { /* 线索行改名失败不推翻注册：载入时查不到默认模型会如实留空（不猜） */ }
   // 模型目录：默认模型 + chatModels（复用既有 syncChatModels —— 它按 provider_key 从**注册表**取目录）
   let models = 0; let catalogError = null;
   try {
@@ -309,14 +316,26 @@ export async function removeRegisteredProvider(db, id) {
  * 启动载入：把库里**不在代码清单里**的厂商行载入内存注册表（客户网关/内网推理）。
  * 行字段 → 清单同形条目：`provider_key`→id、`name`→name、`base_url`→base、`api_key_env`→keyEnv。
  * 校验不过 ⇒ **报错并跳过该行**（不静默当没看见，也不阻断启动：库里的脏行不该让整个平台起不来）。
+ *
+ * **默认模型**：`providers` 表没有 defaultModel 列，它是 `models` 表里的那一条（行名口径＝
+ * `<厂商名> 默认模型`，与内置厂商播种时**逐字一致**）——所以把 models 行一并传进来就能把它补回来，
+ * 不另造存储位置、也不猜"第一个模型就是默认"（查不到就留空串，如实）。
+ * @param {Array} rows `SELECT id, provider_key, name, base_url, api_key_env FROM providers` 的行
+ * @param {object} keys config.keys（自注册槽位绑到它上面）
+ * @param {Array} [modelsRows] `SELECT provider_id, model_id, name FROM models` 的行（缺省＝不补默认模型）
  * @returns {{loaded:string[], problems:string[], skipped:string[]}}
  */
-export function loadRegisteredProviders(rows, keys) {
+export function loadRegisteredProviders(rows, keys, modelsRows = null) {
   const loaded = []; const problems = []; const skipped = [];
   for (const row of rows || []) {
     const id = row && row.provider_key;
     if (!id || MANIFEST_IDS.has(String(id))) continue;   // 内置厂商的行不在这条路上（它们是代码清单的镜像）
     const def = { id, name: row.name, base: row.base_url, keyEnv: row.api_key_env };
+    if (Array.isArray(modelsRows)) {
+      const mine = modelsRows.filter((m) => m && m.provider_id === row.id);
+      const d = mine.find((m) => m.name === String(row.name) + ' 默认模型');
+      if (d) def.defaultModel = String(d.model_id);
+    }
     const r = registerProvider(def, keys);
     if (r.ok) loaded.push(String(id));
     else { problems.push(String(id) + '：' + r.error); skipped.push(String(id)); }

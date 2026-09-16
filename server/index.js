@@ -713,7 +713,12 @@ app.put('/api/providers/:id', requireAuth, async (req, res) => {
     }
     const { saveRegisteredProvider } = await import('./llm/providers.js');
     const r = await saveRegisteredProvider(db, { ...body, id }, config.keys, { mustExist: true });
-    if (!r.ok) return res.status(400).json({ ok: false, message: r.error, ...(r.problems ? { problems: r.problems } : {}) });
+    if (!r.ok) {
+      // PUT 是**整体替换**（不做隐藏的字段合并：只传一半、另一半悄悄沿用旧值＝两处说法）。
+      // 校验失败时把这句话写进 message，免得读的人以为"只改 base 就够了"。
+      const hint = r.problems ? 'PUT 是整体替换（清单同形字段需一并给出，只改一处也请带上 id/name/base/keyEnv）——' : '';
+      return res.status(400).json({ ok: false, message: hint + r.error, ...(r.problems ? { problems: r.problems } : {}) });
+    }
     await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
       [req.user.id, 'provider:update', r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models]).catch(() => {});
     res.json({ ok: true, provider: r.entry, models: r.models, catalogError: r.catalogError, keyHint: '密钥写进 .env 的 ' + r.keyEnvVar + '（或设置同名环境变量）' });
@@ -3019,19 +3024,29 @@ async function main() {
     console.log('[db] 存储实现=' + storage.impl + '：跳过 MySQL 建表/迁移（本实现的介质不适用 DDL；数据见工作区下的 storage/ 目录）');
   }
   await ensureAdmin();
-  // 初始化 providers 表（同步硬编码 9 家）+ 默认模型 + 每日市场刷新
+  // 初始化 providers 表（同步代码清单的内置厂商）+ 载入部署方自注册厂商（客户网关/内网推理）+ 每日市场刷新
+  // 权威划分（唯一判据＝"id 在不在代码清单里"，见 server/llm/providers.js 的"自注册厂商"节）：
+  //   · 内置厂商（代码清单）⇒ 库行是它的**镜像**：**缺行才补**（含默认模型），有行就一个字都不改
+  //     （人工的 enabled/名称不被启动覆盖）。原来是"表里一行都没有才整批播种"：那样一来，
+  //     客户先在库里注册了自己的网关，内置厂商的行就永远补不上了——两处会打架，这里按 id 逐家判。
+  //   · 自注册厂商（provider_key 不在清单里）⇒ 库是**唯一权威**：启动时载入内存注册表，
+  //     否则路由（gateway 的 resolve → findProvider）找不到它——那正是"注册了却不生效"的形态。
   try {
-    const pCount = await db.query('SELECT COUNT(*) c FROM providers');
-    if (!pCount[0]?.c) {
-      for (const p of allProviders(config.keys)) {
-        const r = await db.query('INSERT INTO providers (provider_key, name, base_url, api_key_env, enabled, sort_order) VALUES (?,?,?,?,1,?)', [p.id, p.name, p.base, p.keyEnv, p.id === 'deepseek' ? 0 : 10]);
-        if (p.defaultModel) {
-          await db.query('INSERT INTO models (provider_id, model_id, name, capabilities, enabled, added_at, last_seen_at) VALUES (?,?,?,?,1,NOW(),NOW()) ON DUPLICATE KEY UPDATE enabled=1',
-            [r.insertId, p.defaultModel, p.name + ' 默认模型', JSON.stringify(p.capabilities || ['chat'])]);
-        }
+    const rows = await db.query('SELECT id, provider_key, name, base_url, api_key_env FROM providers');
+    const have = new Set(rows.map((r) => r.provider_key));
+    for (const p of allProviders(config.keys)) {
+      if (have.has(p.id)) continue;                 // 已有行：不覆盖（人工字段归人工）
+      const r = await db.query('INSERT INTO providers (provider_key, name, base_url, api_key_env, enabled, sort_order) VALUES (?,?,?,?,1,?)', [p.id, p.name, p.base, p.keyEnv, p.id === 'deepseek' ? 0 : 10]);
+      if (p.defaultModel) {
+        await db.query('INSERT INTO models (provider_id, model_id, name, capabilities, enabled, added_at, last_seen_at) VALUES (?,?,?,?,1,NOW(),NOW()) ON DUPLICATE KEY UPDATE enabled=1',
+          [r.insertId, p.defaultModel, p.name + ' 默认模型', JSON.stringify(p.capabilities || ['chat'])]);
       }
     }
-  } catch { /* 初始化失败不阻塞 */ }
+    const reg = loadRegisteredProviders(rows, config.keys, await db.query('SELECT provider_id, model_id, name FROM models'));
+    if (reg.loaded.length) console.log('[providers] 已载入自注册厂商：' + reg.loaded.join(',') + '（客户网关/内网推理）');
+    // 脏行如实报（不静默跳过、也不阻断启动：库里的脏行不该让整个平台起不来）
+    if (reg.problems.length) console.error('[providers] 自注册厂商载入失败（该行被跳过，不影响内置厂商）：\n  - ' + reg.problems.join('\n  - '));
+  } catch (e) { console.error('[providers] 初始化失败（不阻塞启动）:', e.message); }
   // 存量库修正：主默认模型统一 deepseek-v4-flash（reasoning 透传/思考可见），停用 deepseek-chat 别名
   try {
     const dpr = await db.query('SELECT id FROM providers WHERE provider_key=?', ['deepseek']);
