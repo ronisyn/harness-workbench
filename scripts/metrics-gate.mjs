@@ -144,7 +144,7 @@ async function main() {
     }
     for (const r of gate.reasons) console.log('  ' + (r.ok ? '✅' : (r.code === 'proposal.comparison' ? '⚠️' : '❌')) + ' ' + r.text);
     console.log('\n结论：' + (gate.verdict === GATE_VERDICT.PASS ? '✅ 通过' : gate.verdict === GATE_VERDICT.FAIL ? '❌ **不通过**' : '❌ **未判**（不放行）')
-      + ' —— ' + (gate.verdict === GATE_VERDICT.PASS ? gateLine(gate) : ''));
+      + ' —— ' + gateLine(gate));
     if (!propFile) console.log('（提示：加 --proposals <file> 才会判"每条提案附了前后指标对比"这一条）');
   }
 

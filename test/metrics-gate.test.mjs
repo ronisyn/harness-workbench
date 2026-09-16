@@ -359,6 +359,13 @@ test('㉔-⑥b CLI 契约：缺报告时 metrics-gate 退出码 1 且说"禁止�
     } catch (e) { code = e.status; out = String(e.stdout || '') + String(e.stderr || ''); }
     assert.equal(code, 1, '未判 ⇒ 退出码 1（不放行）');
     assert.match(out, /未判|禁止放行/);
+    // 2026-09-18（C-68）：缺报告那条路径在打印**结论行之前**就 return 了，所以"结论行必须带原因"这条
+    // 用**源码锚点**锁（本仓锁"接线"的既有做法；`gateLine` 的行为本身已由上面 ⑥a/⑥b 的用例盖住）：
+    // 以前写成 `verdict === PASS ? gateLine(gate) : ''` ⇒ 不通过/未判时打印成"❌ **不通过** —— "（原因空）。
+    // 门禁说"不行"却不说"为什么"，读的人只能翻上面十几行自己找 —— 正是"出错必须能定位"要治的形态。
+    const cli = read('scripts/metrics-gate.mjs');
+    assert.match(cli, /' —— ' \+ gateLine\(gate\)\)/, '结论行必须无条件拼 gateLine（不通过/未判也要带原因）');
+    assert.doesNotMatch(cli, /PASS \? gateLine\(gate\) : ''/, '不许再出现"只有 PASS 才给原因"的写法（C-68）');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
