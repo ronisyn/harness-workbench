@@ -565,6 +565,22 @@ function contractSuite(label, make, caps) {
     await assert.rejects(() => s.usage.append({ kind: 'round', tokenIn: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '拼错字段名必须报错');
   });
 
+  // ── 审计账写口（2026-09-17）：v0.3 §4.6「预算与审计：本地兜底」────────────────────────────
+  test(T('审计：两种写口形状（三列 / 五列）都能落，账号可空、action 必填、created_at 由介质盖'), async () => {
+    const { storage: s } = make();
+    // 三列形状（最常见的形状：账号 + 动作 + 说明）
+    const three = await s.audit.append({ accountId: 7, action: 'model:default', detail: 'x=1' });
+    assert.ok(three.id > 0, 'append 要回主键：' + JSON.stringify(three));
+    // 五列形状（挂会话/壳的那一类：前缀账、工具账、审计面板可归因）
+    const five = await s.audit.append({ accountId: 7, action: 'prefix:assemble', detail: 'fp=abc cnt=1 peak=1 lane=def', shellId: 2, conversationId: 42 });
+    assert.ok(five.id > three.id, '两次记账各占一行');
+    // 账号可空：系统级动作（预热/清理/声明错误）本来就没有账号 —— 把它登记成必需会把这一类合法账挡在门外
+    const sys = await s.audit.append({ accountId: null, action: 'spill:cleanup', detail: '{"removed":3}' });
+    assert.ok(sys.id > five.id, '系统级动作（accountId=null）必须能写');
+    await assert.rejects(() => s.audit.append({ accountId: 7, detail: '没动作' }), (e) => e.code === STORAGE_INVALID_FIELD, '缺 action 必须当场拒写');
+    await assert.rejects(() => s.audit.append({ action: 'x', detail: 'y', accountID: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '拼错字段名不许静默吞');
+  });
+
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {
     const { storage: s } = make();
     const mid = await s.tx(async (t) => {

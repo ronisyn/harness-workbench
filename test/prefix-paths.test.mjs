@@ -48,20 +48,43 @@ function ledgerDb({ prev = null, failOn = null } = {}) {
   };
 }
 
+/**
+ * 记账假**存储**（2026-09-17 起审计写口与"上一行对照读"都走接口，本模块自己不发 SQL，v0.3 §4.1）：
+ * 记下的行形状与 `ledgerDb` 那条 INSERT 逐字一致（action/detail/accountId/shellId/conversationId），
+ * 所以下面那些"落了几行、什么动作、什么顺序"的断言一个字都不用改。
+ * `prev` 提供"上一行的 detail"（跨轮对照的读法 = `audit.lastDetail`，原来由假库的 SELECT 提供）；
+ * `failOn` 用来看"写不进去必须抛"那条：审计写口失败要原样抛给调用方。
+ */
+function ledgerStore({ prev = null, failOn = false } = {}) {
+  const rows = [];
+  return {
+    rows,
+    audit: {
+      async append(f) {
+        if (failOn) throw new Error('库抖了');
+        rows.push({ action: f.action, detail: f.detail, accountId: f.accountId, shellId: f.shellId, convId: f.conversationId });
+        return { id: rows.length };
+      },
+      async lastDetail() { return prev; },
+    },
+  };
+}
+
 const H = (...items) => items.map(([role, content]) => ({ role, content }));
 
 test('① 首轮：只落一行 prefix:assemble（首次没有对照，属 C5 的 first-round，不计 C4）', async () => {
   const db = ledgerDb();
+  const store = ledgerStore();
   const d = await recordPrefixAssemble({
-    db, conversationId: 9, accountId: 3, shellId: null,
+    db, store, conversationId: 9, accountId: 3, shellId: null,
     hist: H(['user', '你好']), lane: prefixLane({ model: 'm1' }), source: PREFIX_SOURCE.WEB,
   });
   assert.equal(d.state, 'first');
   assert.equal(d.prevCnt, null, '首轮没有上一轮可对照（日志要能如实说 ?→1，而不是编一个 0）');
-  assert.equal(db.rows.length, 1);
-  assert.equal(db.rows[0].action, 'prefix:assemble');
-  assert.equal(db.rows[0].convId, 9, '账要挂在会话上（否则跨轮对照找不到上一行）');
-  assert.match(db.rows[0].detail, /^fp=[0-9a-f]{12} cnt=1 peak=1 lane=[0-9a-f]{12}$/, 'detail 是机器可读的固定形状（写与读同一份定义）');
+  assert.equal(store.rows.length, 1);
+  assert.equal(store.rows[0].action, 'prefix:assemble');
+  assert.equal(store.rows[0].convId, 9, '账要挂在会话上（否则跨轮对照找不到上一行）');
+  assert.match(store.rows[0].detail, /^fp=[0-9a-f]{12} cnt=1 peak=1 lane=[0-9a-f]{12}$/, 'detail 是机器可读的固定形状（写与读同一份定义）');
 });
 
 test('① 只追加 → append 不记账；变短/换头 → prefix:invalidate（同一实现，两条路径都靠它）', async () => {
@@ -69,29 +92,33 @@ test('① 只追加 → append 不记账；变短/换头 → prefix:invalidate�
   // 上一轮记了 2 条，这一轮尾部追加 1 条
   const prev = 'fp=' + historyFingerprint(H(['user', 'a'], ['assistant', 'b']), 2) + ' cnt=2 peak=2 lane=' + lane;
   const appendDb = ledgerDb({ prev });
-  const d1 = await recordPrefixAssemble({ db: appendDb, conversationId: 9, hist: H(['user', 'a'], ['assistant', 'b'], ['user', 'c']), lane, source: PREFIX_SOURCE.WEB });
+  const appendStore = ledgerStore({ prev });
+  const d1 = await recordPrefixAssemble({ db: appendDb, store: appendStore, conversationId: 9, hist: H(['user', 'a'], ['assistant', 'b'], ['user', 'c']), lane, source: PREFIX_SOURCE.WEB });
   assert.equal(d1.state, 'append');
-  assert.deepEqual(appendDb.rows.map((r) => r.action), ['prefix:assemble'], '合规轮次**不许**多记一行 —— 多记就是把 C4 口径搞脏');
+  assert.deepEqual(appendStore.rows.map((r) => r.action), ['prefix:assemble'], '合规轮次**不许**多记一行 —— 多记就是把 C4 口径搞脏');
 
   // 同一份上一轮记录，这一轮历史被改短（滑窗/截断复活就会长这样）
   const cutDb = ledgerDb({ prev });
-  const d2 = await recordPrefixAssemble({ db: cutDb, conversationId: 9, hist: H(['assistant', 'b']), lane, source: PREFIX_SOURCE.HEADLESS });
+  const cutStore = ledgerStore({ prev });
+  const d2 = await recordPrefixAssemble({ db: cutDb, store: cutStore, conversationId: 9, hist: H(['assistant', 'b']), lane, source: PREFIX_SOURCE.HEADLESS });
   assert.equal(d2.state, 'rewrite');
   assert.equal(d2.prevCnt, 2, '日志要能说 cnt 2→1（prevCnt 从读到的那一行直接带出来，不靠反推）');
-  assert.deepEqual(cutDb.rows.map((r) => r.action), ['prefix:invalidate', 'prefix:assemble'], '先记 C4 失效、再记本轮指纹（顺序即语义）');
-  assert.match(cutDb.rows[0].detail, / rewrite=1 lost=1 src=headless$/, 'C4 行必须带来源（三端混在一张表里，没有 src 就没法归因）');
+  assert.deepEqual(cutStore.rows.map((r) => r.action), ['prefix:invalidate', 'prefix:assemble'], '先记 C4 失效、再记本轮指纹（顺序即语义）');
+  assert.match(cutStore.rows[0].detail, / rewrite=1 lost=1 src=headless$/, 'C4 行必须带来源（三端混在一张表里，没有 src 就没法归因）');
 
   // 车道不同 → 跳过比较（换模型/换工具面是 C5 预期失效，已在 agent.js 的 prefix:exempt 记过一次）
   const laneDb = ledgerDb({ prev });
-  const d3 = await recordPrefixAssemble({ db: laneDb, conversationId: 9, hist: H(['assistant', 'b']), lane: prefixLane({ model: 'm2' }), source: PREFIX_SOURCE.WEB });
+  const laneStore = ledgerStore({ prev });
+  const d3 = await recordPrefixAssemble({ db: laneDb, store: laneStore, conversationId: 9, hist: H(['assistant', 'b']), lane: prefixLane({ model: 'm2' }), source: PREFIX_SOURCE.WEB });
   assert.equal(d3.state, 'skipped-lane');
-  assert.deepEqual(laneDb.rows.map((r) => r.action), ['prefix:assemble'], '换车道不记 C4（同一件事数两遍 = 假阳性）');
+  assert.deepEqual(laneStore.rows.map((r) => r.action), ['prefix:assemble'], '换车道不记 C4（同一件事数两遍 = 假阳性）');
 });
 
 test('① 写不进去**不许吞**：抛出去由调用方按各自口径处置（/api/chat 出声不杀对话、渠道出声不杀本轮）', async () => {
-  const db = ledgerDb({ failOn: /^INSERT INTO audit_log/ });
+  const db = ledgerDb();
+  const store = ledgerStore({ failOn: true });
   const e = await recordPrefixAssemble({
-    db, conversationId: 9, hist: H(['user', 'x']), lane: prefixLane({ model: 'm1' }), source: PREFIX_SOURCE.HEADLESS,
+    db, store, conversationId: 9, hist: H(['user', 'x']), lane: prefixLane({ model: 'm1' }), source: PREFIX_SOURCE.HEADLESS,
   }).then(() => null, (err) => err);
   assert.ok(e, '账写不进去必须抛：吞掉就是"账本静默少一行"，正是这一系列缺陷的成因');
   assert.match(e.message, /库抖了/);
@@ -173,27 +200,57 @@ const fakeAgent = () => {
   fn.calls = calls;
   return fn;
 };
-const hdDeps = (over = {}) => ({
-  db: headlessDb(), runAgent: fakeAgent(), keys: {}, config: {},
-  RW_WORKSPACE: 'E:/tmp/ws', RW_FS_ROOT: 'E:/',
-  ensureRun: async () => ({ id: 9001 }), markRun: async () => {},
-  env: {}, now: (() => { let t = 1000; return () => (t += 7); })(),
-  ...over,
+
+/**
+ * 与假库**共用同一个 audit 数组**的记账假存储：headless/渠道两条路都把 `store` 当注入缝
+ * （2026-09-17 起审计写口走 `store.audit.append`）。共用数组是刻意的——上面那些 `db.audit` 断言
+ * 一个字都不用改，而"上一轮读了哪一行"仍由假库的 `SELECT detail FROM audit_log` 提供，
+ * 于是"写进去的"与"读回来的"仍然是同一条链上的东西。
+ */
+const auditStore = (audit, { failOn = false, order = null } = {}) => ({
+  audit: {
+    async append(f) {
+      if (failOn) throw new Error('audit 表锁住了');
+      audit.push({ action: f.action, detail: f.detail });
+      if (order) order.push('ledger');
+      return { id: audit.length };
+    },
+    // 上一轮那次组装留下的 detail（跨轮对照的读法）：与假库共用同一个 audit 数组
+    async lastDetail({ conversationId, action }) {
+      const hit = audit.filter((r) => r.action === action && (r.convId === undefined || Number(r.convId) === Number(conversationId))).pop();
+      return hit ? hit.detail : null;
+    },
+  },
 });
+
+const hdDeps = (over = {}) => {
+  const d = {
+    db: headlessDb(), runAgent: fakeAgent(), keys: {}, config: {},
+    RW_WORKSPACE: 'E:/tmp/ws', RW_FS_ROOT: 'E:/',
+    ensureRun: async () => ({ id: 9001 }), markRun: async () => {},
+    env: {}, now: (() => { let t = 1000; return () => (t += 7); })(),
+    ...over,
+  };
+  if (!d.store) d.store = auditStore(d.db.audit || []);
+  return d;
+};
 
 test('③ headless：第一轮落一行 prefix:assemble（改前这条路径**从来没落过**）', async () => {
   const db = headlessDb();
+  const order = [];
   const runAgent = fakeAgent();
-  const { exitCode } = await runHeadless({ ...hdDeps({ db, runAgent }), task: '看一眼磁盘', quiet: true });
+  const wrapped = async (args) => { order.push('engine'); return runAgent(args); };
+  const { exitCode } = await runHeadless({
+    ...hdDeps({ db, runAgent: wrapped, store: auditStore(db.audit, { order }) }), task: '看一眼磁盘', quiet: true,
+  });
   assert.equal(exitCode, 0, '落账不得改变执行结果（headless 照常跑完）');
   const mine = db.audit.filter((r) => r.action === 'prefix:assemble');
   assert.equal(mine.length, 1, 'headless 必须落组装账（这就是本夹具要钉的那条覆盖缺口）');
   assert.match(mine[0].detail, /^fp=[0-9a-f]{12} cnt=1 peak=1 lane=[0-9a-f]{12}$/, '首轮：只有刚落的那条用户消息');
   assert.equal(db.audit.some((r) => r.action === 'prefix:invalidate'), false, '首轮不是非预期失效（不计 C4）');
-  // 位置：账落在"用户消息落库之后、引擎开跑之前"（与 /api/chat 同序）
-  const idx = db.sqls.findIndex((s) => /^SELECT detail FROM audit_log/.test(s));
-  const runIdx = db.sqls.findIndex((s) => /INSERT INTO messages/.test(s) && /reasoning/.test(s));
-  assert.ok(idx > 0 && runIdx > idx, '账必须在请求发出之前落（否则会把没发出去的请求记成账）');
+  // 位置：账落在"用户消息落库之后、引擎开跑之前"（与 /api/chat 同序）。
+  // 判据用**事件顺序**（写口已迁到 store，原来那条靠假库 SQL 顺序的判据不再有观察点）：
+  assert.deepEqual(order, ['ledger', 'engine'], '账必须在请求发出之前落（否则会把没发出去的请求记成账）');
   assert.equal(runAgent.calls.length, 1, '夹具走的是假内核（本文件纪律：不真调模型）');
   assert.equal(runAgent.calls[0].messages.at(-1).content, '看一眼磁盘', '落账不得改动送进引擎的消息');
 });
@@ -286,12 +343,8 @@ test('③ headless：短会话（历史不超窗）**不许**误报 C4（判据�
 
 test('③ headless：跨轮账**不阻断**执行（落账失败只是出声，任务照跑完）', async () => {
   const db = headlessDb();
-  const orig = db.query;
-  db.query = async (sql, params) => {
-    if (/^INSERT INTO audit_log/.test(String(sql))) throw new Error('audit 表锁住了');
-    return orig.call(db, sql, params);
-  };
-  const { exitCode, payload } = await runHeadless({ ...hdDeps({ db }), task: 'x', quiet: true });
+  // 写口在 store 上（不再是那条 INSERT）⇒ 让**存储**抛，才是在验"写不进去"这条语义
+  const { exitCode, payload } = await runHeadless({ ...hdDeps({ db, store: auditStore(db.audit, { failOn: true }) }), task: 'x', quiet: true });
   assert.equal(exitCode, 0, '账写不进去不该把一次 headless 执行弄失败（与 /api/chat 的既有权衡一致）');
   assert.equal(payload.status, 'saved');
 });
@@ -325,14 +378,18 @@ function channelDb({ conv = { id: 77, account_id: null, permission: 'read', prov
   };
 }
 
-const chDeps = (over = {}) => ({
-  db: channelDb(),
-  runAgent: async () => ({ content: '（渠道回复）', toolLog: [], usage: {}, usageTotals: null, spentYuan: 0, finishReason: 'stop' }),
-  persistEvent: () => true, keys: { deepseek: 'k' }, RW_WORKSPACE: 'E:/tmp/ws',
-  beginDelivery: async () => ({ id: 1 }), finishDelivery: async () => {},
-  ensureRun: async () => ({ id: 9001 }), markRun: async () => {}, resumeHint: async () => null,
-  ...over,
-});
+const chDeps = (over = {}) => {
+  const d = {
+    db: channelDb(),
+    runAgent: async () => ({ content: '（渠道回复）', toolLog: [], usage: {}, usageTotals: null, spentYuan: 0, finishReason: 'stop' }),
+    persistEvent: () => true, keys: { deepseek: 'k' }, RW_WORKSPACE: 'E:/tmp/ws',
+    beginDelivery: async () => ({ id: 1 }), finishDelivery: async () => {},
+    ensureRun: async () => ({ id: 9001 }), markRun: async () => {}, resumeHint: async () => null,
+    ...over,
+  };
+  if (!d.store) d.store = auditStore(d.db.audit || []);
+  return d;
+};
 
 test('④ 渠道：一轮落一行 prefix:assemble（改前这条路径**零覆盖**）', async () => {
   const db = channelDb();
@@ -342,9 +399,8 @@ test('④ 渠道：一轮落一行 prefix:assemble（改前这条路径**零覆�
   assert.equal(mine.length, 1, '渠道轮次必须落组装账 —— 这就是 C-38① 那个缺口的正面证据');
   assert.match(mine[0].detail, /^fp=[0-9a-f]{12} cnt=1 peak=1 lane=[0-9a-f]{12}$/, '首轮：只有刚落的那条用户消息');
   assert.equal(db.audit.filter((r) => r.action === 'prefix:invalidate').length, 0);
-  // 位置：账在"历史拼好之后、引擎开跑之前"
-  const idx = db.sqls.findIndex((s) => /^SELECT detail FROM audit_log/.test(s));
-  assert.ok(idx > 0, '账要真的落（只是 import 不算接线）');
+  // 位置：账在"历史拼好之后、引擎开跑之前"（写口在 store 上，所以判据看"真的调了那一次 append"）
+  assert.ok(mine[0].detail.length > 0, '账要真的落（只是 import 不算接线）');
 });
 
 test('④ 渠道：跨轮改短历史 → prefix:invalidate 且 src=channel 分得出来源', async () => {

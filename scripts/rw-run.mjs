@@ -334,7 +334,7 @@ async function assembleMessages({ db, conv, task, RW_WORKSPACE }) {
  */
 export async function runHeadless({
   task, conversationId = null, permission = null, quiet = false,
-  db, runAgent, keys, config, RW_WORKSPACE, RW_FS_ROOT, ensureRun, markRun,
+  db, store, runAgent, keys, config, RW_WORKSPACE, RW_FS_ROOT, ensureRun, markRun,
   env = process.env, now = () => Date.now(),
 }) {
   const t0 = now();
@@ -393,7 +393,7 @@ export async function runHeadless({
       shellKey: null, enabledTools, shellSchema: null,
     });
     const d = await recordPrefixAssemble({
-      db, conversationId: conv.id, accountId: headlessAccountId, hist, lane, source: PREFIX_SOURCE.HEADLESS,
+      store, conversationId: conv.id, accountId: headlessAccountId, hist, lane, source: PREFIX_SOURCE.HEADLESS,
     });
     if (d.state === 'rewrite') {
       // 出声但**不阻断**：一次 headless 执行照常跑完（这与 /api/chat 的既有权衡一致：账本失败不杀对话）
@@ -490,12 +490,15 @@ async function main() {
   let pool = null;
   try {
     // 动态 import：`--help` 与用法错**绝不碰数据库连接池**（否则一条帮助命令也会去连库、还可能挂住）
-    const [{ db, pool: p, initSchema }, { runAgent }, { config }, envMod, runtrack] = await Promise.all([
+    const [{ db, pool: p, initSchema }, { runAgent }, { config }, envMod, runtrack, storageMod] = await Promise.all([
       import('../server/db.js'),
       import('../server/agent.js'),
       import('../server/config.js'),
       import('../server/env.js'),
       import('../server/runtrack.js'),
+      // 存储接口（v0.3 §4.1「存储走接口」）：组装侧前缀账的**写口**走它，与 db 一样是注入缝。
+      // 同样动态 import——上面那条"`--help` 绝不碰连接池"的纪律不因为多了一个句柄而放松。
+      import('../server/storage/index.js'),
     ]);
     pool = p;
     // 建表/迁移：与服务启动是**同一件事**（server/index.js 启动时也调它），且全部幂等
@@ -506,7 +509,7 @@ async function main() {
     await bootstrapStorage({ initSchema });
     const { payload, exitCode } = await runHeadless({
       task: args.task, conversationId: args.conversationId, permission: args.permission, quiet: args.quiet,
-      db, runAgent, keys: config.keys, config,
+      db, store: storageMod.storage, runAgent, keys: config.keys, config,
       RW_WORKSPACE: envMod.RW_WORKSPACE, RW_FS_ROOT: envMod.RW_FS_ROOT,
       ensureRun: runtrack.ensureRun, markRun: runtrack.markRun,
     });

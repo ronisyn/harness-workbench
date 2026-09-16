@@ -169,7 +169,7 @@ app.put('/api/default-models', requireAuth, async (req, res) => {
       next[pk] = m;
     }
     await setSetting('default_models', next);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'model:default', JSON.stringify(patch).slice(0, 400)]);
+    await storage.audit.append({ accountId: req.user.id, action: 'model:default', detail: JSON.stringify(patch).slice(0, 400) });
     res.json({ ok: true, defaults: next });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -198,7 +198,7 @@ app.put('/api/models/:id', requireAuth, async (req, res) => {
     const r = await db.query('UPDATE models SET enabled=? WHERE id=?', [enabled ? 1 : 0, mid]);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '模型不存在' });
     const m = (await db.query('SELECT id, model_id, name FROM models WHERE id=?', [mid]))[0];
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'model:' + (enabled ? 'enable' : 'disable'), String(m ? m.model_id : mid)]);
+    await storage.audit.append({ accountId: req.user.id, action: 'model:' + (enabled ? 'enable' : 'disable'), detail: String(m ? m.model_id : mid) });
     res.json({ ok: true, id: mid, enabled });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -276,7 +276,7 @@ app.post('/api/skills/:name', requireAuth, async (req, res) => {
     if (!content) return res.status(400).json({ ok: false, message: 'content(SKILL.md 全文) 必填' });
     const r = saveSkill(name, content, { enabled: (req.body || {}).enabled });
     if (!r.ok) return res.status(400).json({ ok: false, message: '静态校验不过：' + r.errors.join('；') });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'skill:save', name + (r.enabled === false ? ' (enabled:false)' : '')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'skill:save', detail: name + (r.enabled === false ? ' (enabled:false)' : '') });
     res.json({ ok: true, name, enabled: r.enabled, conflictWarnings: r.conflictWarnings || [] });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
@@ -286,7 +286,7 @@ app.patch('/api/skills/:name', requireAuth, async (req, res) => {
     const enabled = (req.body || {}).enabled !== false;
     const r = setSkillEnabled(req.params.name, enabled);
     if (!r.ok) return res.status(400).json({ ok: false, message: r.message || '操作失败' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, enabled ? 'skill:enable' : 'skill:disable', req.params.name]);
+    await storage.audit.append({ accountId: req.user.id, action: enabled ? 'skill:enable' : 'skill:disable', detail: req.params.name });
     res.json({ ok: true, name: req.params.name, enabled });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
@@ -295,7 +295,7 @@ app.delete('/api/skills/:name', requireAuth, async (req, res) => {
   try {
     const r = deleteSkill(req.params.name);
     if (!r.ok) return res.status(400).json({ ok: false, message: r.message || '删除失败' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'skill:delete', req.params.name]);
+    await storage.audit.append({ accountId: req.user.id, action: 'skill:delete', detail: req.params.name });
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
@@ -320,7 +320,7 @@ app.post('/api/skills/:name/smoke', requireAuth, async (req, res) => {
     for (const t of ['messages', 'tool_calls', 'usage_stats', 'agent_runs', 'conv_skills']) {
       try { await db.query(`DELETE FROM ${t} WHERE conversation_id=?`, [cid]); } catch { /* 个别表未建则跳过 */ }
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [acc, 'skill:smoke', name + (ok ? ' PASS' : ' FAIL') + ' ' + summary.slice(0, 120)]);
+    await storage.audit.append({ accountId: acc, action: 'skill:smoke', detail: name + (ok ? ' PASS' : ' FAIL') + ' ' + summary.slice(0, 120) });
     res.json({ ok: true, name, passed: ok, summary });
   } catch (e) { res.status(400).json({ ok: false, message: '冒烟异常: ' + e.message }); }
 });
@@ -408,7 +408,7 @@ app.patch('/api/conversations/:id', requireAuth, async (req, res) => {
   await storage.conversations.updateOwned(req.params.id, req.user.id, patch);
   if (shell !== undefined) {
     const detail = shell === undefined || shell === '' || shell === 'default' || shell === null ? 'detach' : 'attach=' + String(shell).trim();
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'conv:shell', 'conv=' + req.params.id + ' ' + detail]);
+    await storage.audit.append({ accountId: req.user.id, action: 'conv:shell', detail: 'conv=' + req.params.id + ' ' + detail });
   }
   res.json({ ok: true });
 });
@@ -632,7 +632,7 @@ app.get('/api/audit/archive-stats', requireAuth, async (req, res) => {
 app.post('/api/audit/archive', requireAuth, async (req, res) => {
   try {
     const r = await archiveAudit(Number((req.body || {}).days) || 90);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'audit:archive', 'moved=' + r.moved]);
+    await storage.audit.append({ accountId: req.user.id, action: 'audit:archive', detail: 'moved=' + r.moved });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -698,8 +698,7 @@ app.post('/api/providers', requireAuth, async (req, res) => {
     const { saveRegisteredProvider } = await import('./llm/providers.js');
     const r = await saveRegisteredProvider(db, req.body || {}, config.keys, { mustNotExist: true });
     if (!r.ok) return res.status(400).json({ ok: false, message: r.error, ...(r.problems ? { problems: r.problems } : {}) });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'provider:register', r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models]).catch(() => {});
+    await storage.audit.append({ accountId: req.user.id, action: 'provider:register', detail: r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models }).catch(() => {});
     res.json({ ok: true, provider: r.entry, models: r.models, catalogError: r.catalogError, keyHint: '密钥写进 .env 的 ' + r.keyEnvVar + '（或设置同名环境变量）' });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -719,8 +718,7 @@ app.put('/api/providers/:id', requireAuth, async (req, res) => {
       const hint = r.problems ? 'PUT 是整体替换（清单同形字段需一并给出，只改一处也请带上 id/name/base/keyEnv）——' : '';
       return res.status(400).json({ ok: false, message: hint + r.error, ...(r.problems ? { problems: r.problems } : {}) });
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'provider:update', r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models]).catch(() => {});
+    await storage.audit.append({ accountId: req.user.id, action: 'provider:update', detail: r.entry.id + ' base=' + r.entry.base + ' keyEnv=' + r.entry.keyEnv + ' models=' + r.models }).catch(() => {});
     res.json({ ok: true, provider: r.entry, models: r.models, catalogError: r.catalogError, keyHint: '密钥写进 .env 的 ' + r.keyEnvVar + '（或设置同名环境变量）' });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -732,8 +730,7 @@ app.delete('/api/providers/:id', requireAuth, async (req, res) => {
     const { removeRegisteredProvider } = await import('./llm/providers.js');
     const r = await removeRegisteredProvider(db, id);
     if (!r.ok) return res.status(400).json({ ok: false, message: r.error });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'provider:delete', id + ' models=' + r.models]).catch(() => {});
+    await storage.audit.append({ accountId: req.user.id, action: 'provider:delete', detail: id + ' models=' + r.models }).catch(() => {});
     res.json({ ok: true, id, models: r.models });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -849,10 +846,7 @@ async function setSetting(key, val, noBump, actor) {
   if (!noBump) await bumpPolicyRev(); // 政策版本自增：仅护栏/政策类键（运行时快照提示模型"规则已更新"）；普通参数高频调整不应使版本抖动
   if (isPolicy) {
     try {
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-        [actor && actor.accountId != null ? actor.accountId : null, 'policy:settings-write',
-          policyWriteDetail({ kind: 'update', keys: [key], from: { [key]: before }, to: { [key]: JSON.stringify(val) }, ctx: { accountId: actor && actor.accountId }, actor: 'human-via-api', via: 'PUT /api/settings' }),
-          null, null]);
+      await storage.audit.append({ accountId: actor && actor.accountId != null ? actor.accountId : null, action: 'policy:settings-write', detail: policyWriteDetail({ kind: 'update', keys: [key], from: { [key]: before }, to: { [key]: JSON.stringify(val) }, ctx: { accountId: actor && actor.accountId }, actor: 'human-via-api', via: 'PUT /api/settings' }), shellId: null, conversationId: null });
     } catch (e) {
       // 留痕失败必须出声（本仓库教训：静默 catch 会让账本静默缺行），但不阻断设置写入
       console.error('[policy-audit] 人工策略变更留痕失败（设置已生效，但账本缺行）：' + ((e && e.message) || e));
@@ -1248,8 +1242,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (cl.label !== 'chat' || cl.echo) {
       // §8 审计脱敏：sample=用户原文可能含 sk-/ghp_ 等 → redactSecrets
       const detail = JSON.stringify({ hit: cl.hit || null, echo: cl.echo || null, sample: String(content).slice(0, 120) });
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-        [req.user.id, 'intent:' + cl.label, redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
+      await storage.audit.append({ accountId: req.user.id, action: 'intent:' + cl.label, detail: redactSecrets(detail).slice(0, 900), shellId: convShellId, conversationId: conversationId });
     }
   } catch { /* 意图事件失败不影响对话 */ }
   // B3/壳默认：路由灰字事件（档案点名或壳默认生效时；显式模型优先不受影响；不入消息正文/导出）
@@ -1259,13 +1252,11 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         // 第三级壳默认（§6.2）：会话无显式、未点名档案时按壳 modelPolicy 路由
         send({ type: 'route', profile: null, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '🧩 壳默认模型：本会话按壳默认使用 ' + profileSuggestion.model + '（显式选模型可覆盖）' });
         const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, shellDefault: true });
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [req.user.id, 'route:shell-default', redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
+        await storage.audit.append({ accountId: req.user.id, action: 'route:shell-default', detail: redactSecrets(detail).slice(0, 900), shellId: convShellId, conversationId: conversationId });
       } else {
         send({ type: 'route', profile: profileSuggestion.key, suggestProvider: profileSuggestion.provider, suggestModel: profileSuggestion.model, echo: '📋 任务档案：' + (profileSuggestion.name || profileSuggestion.key) + ' → 已按档案建议使用模型 ' + profileSuggestion.model + '（显式选模型始终优先）' });
         const detail = JSON.stringify({ provider: profileSuggestion.provider, model: profileSuggestion.model, sample: String(content).slice(0, 120) });
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [req.user.id, 'route:' + profileSuggestion.key, redactSecrets(detail).slice(0, 900), convShellId, conversationId]);
+        await storage.audit.append({ accountId: req.user.id, action: 'route:' + profileSuggestion.key, detail: redactSecrets(detail).slice(0, 900), shellId: convShellId, conversationId: conversationId });
       }
     } catch { /* 路由事件失败不影响对话 */ }
   }
@@ -1383,7 +1374,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
           shellKey: convShellCtx ? convShellCtx.key : null, enabledTools, shellSchema,
         });
         const d = await recordPrefixAssemble({
-          db, conversationId, accountId: req.user.id, shellId: convShellId, hist, lane, source: PREFIX_SOURCE.WEB,
+          store: storage, conversationId, accountId: req.user.id, shellId: convShellId, hist, lane, source: PREFIX_SOURCE.WEB,
         });
         if (d.state === 'rewrite') {
           console.warn('[prefix-rewrite] 跨轮前缀改写：conv=' + conversationId + ' cnt ' + (d.prevCnt == null ? '?' : d.prevCnt) + '→' + d.cnt
@@ -1902,8 +1893,7 @@ app.post('/api/asks/:id', requireAuth, async (req, res) => {
   if (option === undefined || option === null || option === '') return res.status(400).json({ ok: false, message: 'option 必填' });
   const decided = decideAsk(req.params.id, String(option));
   try {
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'ask:answer', JSON.stringify({ id: req.params.id, option: String(option).slice(0, 60), decided })]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ask:answer', detail: JSON.stringify({ id: req.params.id, option: String(option).slice(0, 60), decided }) });
   } catch { /* 忽略 */ }
   res.json({ ok: true, decided });
 });
@@ -1927,8 +1917,7 @@ app.post('/api/approvals/:id', requireAuth, async (req, res) => {
   const decided = decideApproval(req.params.id, decision);
   // 审计：审批裁决留痕（谁、批什么、结果）
   try {
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [req.user.id, 'approval:' + decision, JSON.stringify({ id: req.params.id, decided })]);
+    await storage.audit.append({ accountId: req.user.id, action: 'approval:' + decision, detail: JSON.stringify({ id: req.params.id, decided }) });
   } catch { /* 审计失败不影响 */ }
   res.json({ ok: true, decided });
 });
@@ -2169,7 +2158,7 @@ app.post('/api/tasks/:id/run', requireAuth, async (req, res) => {
     const t = (await db.query('SELECT * FROM scheduled_tasks WHERE id=? AND account_id=?', [req.params.id, req.user.id]))[0];
     if (!t) return res.status(404).json({ ok: false, message: '任务不存在' });
     const { executeScheduledTask } = await import('./scheduler.js');
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'task:run_once', 'id=' + t.id + ' name=' + String(t.name).slice(0, 60)]);
+    await storage.audit.append({ accountId: req.user.id, action: 'task:run_once', detail: 'id=' + t.id + ' name=' + String(t.name).slice(0, 60) });
     res.json({ ok: true, started: true });
     // 异步执行（不阻塞响应）：执行器内部推进 next_run 与 last_result，并写 task_history
     executeScheduledTask({ ...t, __manual: true }).catch((e) => console.error('[task] 手动跑异常:', e.message));
@@ -2209,7 +2198,7 @@ app.post('/api/evo/goals', requireAuth, async (req, res) => {
     const name = String((req.body || {}).name || '').trim();
     if (!name) return res.status(400).json({ ok: false, message: 'name 必填（一句事项描述，如"优化 token 成本"）' });
     const r = await db.query('INSERT INTO evo_goals (account_id, name, descr) VALUES (?,?,?)', [req.user.id, name.slice(0, 200), String((req.body || {}).descr || '').slice(0, 1000)]);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'evo:goal_create', 'id=' + r.insertId + ' ' + name.slice(0, 80)]);
+    await storage.audit.append({ accountId: req.user.id, action: 'evo:goal_create', detail: 'id=' + r.insertId + ' ' + name.slice(0, 80) });
     res.json({ ok: true, id: r.insertId });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
@@ -2243,7 +2232,7 @@ app.put('/api/evo/goals/:id/tasks', requireAuth, async (req, res) => {
       if (own) await db.query('INSERT IGNORE INTO evo_goal_tasks (goal_id, task_id) VALUES (?,?)', [g.id, tid]);
     }
     // 反向写在目标描述里供任务侧展示（任务页显示"此任务绑了哪些目标"）
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'evo:goal_bind', 'goal=' + g.id + ' tasks=' + list.join(',')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'evo:goal_bind', detail: 'goal=' + g.id + ' tasks=' + list.join(',') });
     res.json({ ok: true, goalId: g.id, taskIds: list });
   } catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
@@ -2390,12 +2379,12 @@ app.get('/api/shells/:key/export', requireAuth, async (req, res) => {
 app.post('/api/shells', requireAuth, async (req, res) => {
   const { pack } = req.body || {};
   if (!pack) return res.status(400).json({ ok: false, message: 'body.pack 必填' });
-  try { const r = await importShell(pack); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:import', String(r.key)]); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
+  try { const r = await importShell(pack); await storage.audit.append({ accountId: req.user.id, action: 'shell:import', detail: String(r.key) }); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.post('/api/shells/:key/clone', requireAuth, async (req, res) => {
   const { newKey, name } = req.body || {};
-  try { const r = await cloneShell(req.params.key, newKey, name); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:clone', req.params.key + '->' + newKey]); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
+  try { const r = await cloneShell(req.params.key, newKey, name); await storage.audit.append({ accountId: req.user.id, action: 'shell:clone', detail: req.params.key + '->' + newKey }); maybeAutoCanary(r.key, req.user.id); res.json({ ok: true, ...r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.patch('/api/shells/:key', requireAuth, async (req, res) => {
@@ -2403,7 +2392,7 @@ app.patch('/api/shells/:key', requireAuth, async (req, res) => {
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 app.delete('/api/shells/:key', requireAuth, async (req, res) => {
-  try { const r = await disableShell(req.params.key); await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'shell:disable', req.params.key]); res.json({ ok: r }); }
+  try { const r = await disableShell(req.params.key); await storage.audit.append({ accountId: req.user.id, action: 'shell:disable', detail: req.params.key }); res.json({ ok: r }); }
   catch (e) { res.status(400).json({ ok: false, message: e.message }); }
 });
 
@@ -2420,10 +2409,10 @@ async function runShellCanaryAndAudit(shellKey, accountId, { auto = false } = {}
     for (const t of (tools || [])) { if (t.mode === 'force_on') on.push(t.tool_name); else if (t.mode === 'force_off') off.push(t.tool_name); }
     const shell = { id: row.id, presetBase: row.tools_preset || 'standard', forceOn: on, forceOff: off };
     const r = await runGoldenChecks(row.eval_ref, shell);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [accountId, 'canary:run', 'shell=' + shellKey + ' ref=' + row.eval_ref + (r.skipped ? ' skipped(' + (r.reason || '') + ')' : ' passed=' + r.passed + '/' + r.total + (auto ? ' auto' : ''))]);
+    await storage.audit.append({ accountId: accountId, action: 'canary:run', detail: 'shell=' + shellKey + ' ref=' + row.eval_ref + (r.skipped ? ' skipped(' + (r.reason || '') + ')' : ' passed=' + r.passed + '/' + r.total + (auto ? ' auto' : '')) });
     return r;
   } catch (e) {
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [accountId, 'canary:run', 'shell=' + shellKey + ' error=' + String(e.message).slice(0, 200)]).catch(() => {});
+    await storage.audit.append({ accountId: accountId, action: 'canary:run', detail: 'shell=' + shellKey + ' error=' + String(e.message).slice(0, 200) }).catch(() => {});
     return { skipped: true, reason: '运行异常: ' + String(e.message).slice(0, 200) };
   }
 }
@@ -2460,7 +2449,7 @@ app.post('/api/reviews', requireAuth, async (req, res) => {
     if (difficulty) {
       try { await db.query('UPDATE model_telemetry SET difficulty=? WHERE conversation_id=? AND (difficulty IS NULL OR difficulty="")', [difficulty, conversationId]); } catch { /* 观测表不可用不影响复测记录 */ }
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'review:' + result, 'conversation=' + conversationId + (result === 'bug' ? ' reason=' + String(bugReason).trim().slice(0, 200) : '')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'review:' + result, detail: 'conversation=' + conversationId + (result === 'bug' ? ' reason=' + String(bugReason).trim().slice(0, 200) : '') });
     res.json({ ok: true, id: r.insertId });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2565,7 +2554,7 @@ app.patch('/api/knowledge/:id', requireAuth, async (req, res) => {
     params.push(id, req.user.id);
     const r = await db.query(`UPDATE knowledge SET ${set.join(',')} WHERE id=? AND account_id=?`, params);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '条目不存在或无权修改' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:status', 'id=' + id + (status ? ' status=' + status : '')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'knowledge:status', detail: 'id=' + id + (status ? ' status=' + status : '') });
     res.json({ ok: true, id });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2601,7 +2590,7 @@ app.post('/api/knowledge/import', requireAuth, async (req, res) => {
       if (exist.length) { await db.query('UPDATE knowledge SET body=?, status="active", created_at=NOW() WHERE id=?', [r.body, exist[0].id]); updated++; }
       else { await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [req.user.id, sc, convId, shellId, kind, r.title, r.body, 'active']); inserted++; }
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:import', 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' kind=' + kind + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated]);
+    await storage.audit.append({ accountId: req.user.id, action: 'knowledge:import', detail: 'scope=' + sc + (shellKey ? ' shell=' + shellKey : '') + ' kind=' + kind + ' file=' + String(name).slice(0, 120) + ' inserted=' + inserted + ' updated=' + updated });
     res.json({ ok: true, scope: sc, shellKey: shellKey || null, kind, inserted, updated, total: rows.length });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2610,7 +2599,7 @@ app.delete('/api/knowledge/:id', requireAuth, async (req, res) => {
   try {
     const r = await db.query('DELETE FROM knowledge WHERE id=? AND account_id=?', [Number(req.params.id) || 0, req.user.id]);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '知识条目不存在或无权删除' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'knowledge:delete', 'id=' + req.params.id]);
+    await storage.audit.append({ accountId: req.user.id, action: 'knowledge:delete', detail: 'id=' + req.params.id });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2632,7 +2621,7 @@ app.post('/api/templates/:key/prompt', requireAuth, async (req, res) => {
   const t = getTemplate(req.params.key);
   if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
   const prompt = buildLaunchPrompt(t, (req.body || {}).goal || '');
-  await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:prompt', req.params.key]);
+  await storage.audit.append({ accountId: req.user.id, action: 'template:prompt', detail: req.params.key });
   res.json({ ok: true, prompt });
 });
 // 共用：把 profile 片段 + skills 装配进指定壳（templates apply / apps launch 共用；同 key 覆盖、异 key 追加、技能 allow 去重）
@@ -2667,7 +2656,7 @@ app.post('/api/templates/:key/apply', requireAuth, async (req, res) => {
     if (shellKey === 'default') return res.status(400).json({ ok: false, message: 'default 保留壳不可装配' });
     const r = await ensureProfileOnShell(shellKey, frag, t.skills);
     if (r.error) return res.status(404).json({ ok: false, message: r.error });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:apply', 'template=' + req.params.key + ' shell=' + shellKey + ' profile=' + frag.key]);
+    await storage.audit.append({ accountId: req.user.id, action: 'template:apply', detail: 'template=' + req.params.key + ' shell=' + shellKey + ' profile=' + frag.key });
     res.json({ ok: true, shellKey, profile: frag.key, profiles: r.profiles, skills: r.skills });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2713,7 +2702,7 @@ app.get('/api/templates/:key/export', requireAuth, async (req, res) => {
     const t = getTemplate(req.params.key);
     if (!t) return res.status(404).json({ ok: false, message: '模板不存在' });
     const content = JSON.stringify(t, null, 2);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:export', req.params.key]);
+    await storage.audit.append({ accountId: req.user.id, action: 'template:export', detail: req.params.key });
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(t.key)}.tpl.json"`);
     res.type('application/json');
     res.send(content);
@@ -2730,7 +2719,7 @@ app.post('/api/templates/import', requireAuth, async (req, res) => {
     const r = writeTemplateFile(t);
     if (!r.ok) return res.status(400).json({ ok: false, message: r.errors.join('; ') });
     const committed = await syncTemplateGit(path.join('templates', t.key), (existed ? 'template:update ' : 'template:import ') + t.key);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, existed ? 'template:update' : 'template:import', t.key + (committed ? ' (git 已推送)' : ' (无变更)')]);
+    await storage.audit.append({ accountId: req.user.id, action: existed ? 'template:update' : 'template:import', detail: t.key + (committed ? ' (git 已推送)' : ' (无变更)') });
     res.json({ ok: true, key: t.key, mode: existed ? 'updated' : 'created', gitSynced: committed });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2748,7 +2737,7 @@ app.post('/api/templates/:key/clone', requireAuth, async (req, res) => {
       return res.status(code).json({ ok: false, message: r.errors ? r.errors.join('; ') : '目标模板已存在' });
     }
     const committed = await syncTemplateGit(path.join('templates', newKey), 'template:clone ' + fromKey + '->' + newKey);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'template:clone', fromKey + '->' + newKey + (committed ? ' (git 已推送)' : '')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'template:clone', detail: fromKey + '->' + newKey + (committed ? ' (git 已推送)' : '') });
     res.json({ ok: true, key: newKey, gitSynced: committed });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2784,7 +2773,7 @@ app.post('/api/apps/:key/launch', requireAuth, async (req, res) => {
       accountId: req.user.id, title: String(a.name || a.key).slice(0, 60), permission: 'full', preset: 'all', shellId,
     });
     const draft = buildLaunchDraft(a, (req.body || {}).goal || '');
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'app:launch', 'app=' + a.key + (shellKey ? ' shell=' + shellKey : '') + ' conv=' + c.id]);
+    await storage.audit.append({ accountId: req.user.id, action: 'app:launch', detail: 'app=' + a.key + (shellKey ? ' shell=' + shellKey : '') + ' conv=' + c.id });
     res.json({ ok: true, conversationId: c.id, shellKey: shellKey || null, draft });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2828,7 +2817,7 @@ app.post('/api/extensions', requireAuth, async (req, res) => {
     await db.query('INSERT INTO extensions (asset_type, akey, name, version, status, scope, capability, manifest_ref, meta) VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), version=VALUES(version), status=VALUES(status), scope=VALUES(scope), capability=VALUES(capability), manifest_ref=VALUES(manifest_ref), meta=VALUES(meta), updated_at=NOW()',
       [type, key, String(b.name || key).slice(0, 128), String(b.version || '0.1.0').slice(0, 32), status, scope,
        b.capability != null ? JSON.stringify(b.capability) : null, String(b.manifestRef || '').slice(0, 255), b.meta != null ? JSON.stringify(b.meta) : null]);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:register', 'type=' + type + ' key=' + key + ' status=' + status]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:register', detail: 'type=' + type + ' key=' + key + ' status=' + status });
     res.json({ ok: true, type, key, status });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2846,7 +2835,7 @@ app.patch('/api/extensions/demands/:id/status', requireAuth, async (req, res) =>
     if (!['待审', '采纳', '驳回', '升级'].includes(status)) return res.status(400).json({ ok: false, message: 'status 需为 待审|采纳|驳回|升级' });
     const r = await db.query('UPDATE extension_demands SET status=? WHERE id=?', [status, id]);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '需求不存在' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand_status', 'id=' + id + ' status=' + status]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:demand_status', detail: 'id=' + id + ' status=' + status });
     res.json({ ok: true, id, status });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2864,7 +2853,7 @@ app.patch('/api/extensions/:type/:key/status', requireAuth, async (req, res) => 
     }
     const r = await db.query('UPDATE extensions SET status=?, updated_at=NOW() WHERE asset_type=? AND akey=?', [status, type, key]);
     if (!r.affectedRows) return res.status(404).json({ ok: false, message: '资产不存在' });
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:status', 'type=' + type + ' key=' + key + ' status=' + status]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:status', detail: 'type=' + type + ' key=' + key + ' status=' + status });
     res.json({ ok: true, type, key, status });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2899,7 +2888,7 @@ app.put('/api/shells/:key/extensions', requireAuth, async (req, res) => {
     for (const it of list) if (!it || !['plugin', 'mcp', 'app'].includes(it.type) || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(String(it.key || ''))) return res.status(400).json({ ok: false, message: 'extensions 项需含合法 type/key' });
     await db.query('DELETE FROM shell_extensions WHERE shell_id=?', [sh.id]);
     for (const it of list) await db.query('INSERT IGNORE INTO shell_extensions (shell_id, asset_type, asset_key) VALUES (?,?,?)', [sh.id, it.type, it.key]);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:load', 'shell=' + key + ' count=' + list.length + ' ' + list.map((i) => i.type + ':' + i.key).join(',')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:load', detail: 'shell=' + key + ' count=' + list.length + ' ' + list.map((i) => i.type + ':' + i.key).join(',') });
     res.json({ ok: true, shellKey: key, count: list.length });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2923,7 +2912,7 @@ app.post('/api/extensions/:key/demand', requireAuth, async (req, res) => {
     if (!content) return res.status(400).json({ ok: false, message: 'content 或 fields 必填' });
     const source = String(b.source || '扩展中心').slice(0, 24);
     const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key || null, kind, source, content.slice(0, 2000)]);
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' id=' + r.insertId]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:demand', detail: 'asset=' + (key || '通用') + ' kind=' + kind + ' id=' + r.insertId });
     res.json({ ok: true, id: r.insertId, kindCn: DEMAND_KIND_CN[kind] });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -2955,7 +2944,7 @@ app.post('/api/extensions/mcp-sync', requireAuth, async (req, res) => {
         [s.id, String(s.name || s.id).slice(0, 128), '0.1.0', status, 'global', JSON.stringify(cap), null, JSON.stringify(meta)]);
       out.push({ id: s.id, status, tools: tools.length, connected: !!cl });
     }
-    await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [req.user.id, 'ext:mcp_sync', 'count=' + out.length + ' ' + out.map((x) => x.id + ':' + x.status).join(',')]);
+    await storage.audit.append({ accountId: req.user.id, action: 'ext:mcp_sync', detail: 'count=' + out.length + ' ' + out.map((x) => x.id + ':' + x.status).join(',') });
     res.json({ ok: true, synced: out.length, items: out });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -3107,7 +3096,7 @@ async function main() {
     const a = auditPrefixDeclarations();
     if (a.bad.length) {
       console.error('[prefix-decl] ⚠️ 前缀组件声明不合法（' + a.bad.join('；') + '）——见 server/prefix-participants.js');
-      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:decl-error', a.bad.join('；').slice(0, 500)]).catch(() => {});
+      await storage.audit.append({ accountId: null, action: 'prefix:decl-error', detail: a.bad.join('；').slice(0, 500) }).catch(() => {});
     } else {
       console.log('[prefix-decl] 前缀组件声明自检通过：' + a.n + ' 个组件（其中会破坏前缀的 ' + a.breakers.length + ' 个：' + a.breakers.join('/') + '；尾巴区 ' + a.tailOnly + ' 个）');
     }
@@ -3122,8 +3111,7 @@ async function main() {
       if (c.deletedAge || c.deletedQuota) {
         console.log('[spill-cleanup] ' + when + '：按龄 ' + c.deletedAge + ' · 按量 ' + c.deletedQuota
           + ' · 释放 ' + c.freedBytes + ' 字节 · 现存 ' + c.totalBytes + ' 字节');
-        await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-          [null, 'spill:cleanup', JSON.stringify(c).slice(0, 800)]).catch(() => {});
+        await storage.audit.append({ accountId: null, action: 'spill:cleanup', detail: JSON.stringify(c).slice(0, 800) }).catch(() => {});
       }
     } catch (e) { console.error('[spill-cleanup] 失败:', e.message); }
   };
@@ -3138,8 +3126,7 @@ async function main() {
       const a = await archiveOldEvents();
       if (a.archived) {
         console.log('[eventlog-archive] ' + when + '：归档 ' + a.archived + ' 行（>90 天）');
-        await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-          [null, 'eventlog:archive', JSON.stringify(a).slice(0, 800)]).catch(() => {});
+        await storage.audit.append({ accountId: null, action: 'eventlog:archive', detail: JSON.stringify(a).slice(0, 800) }).catch(() => {});
       }
     } catch (e) {
       // 存储实现没有 SQL 面时（RW_STORAGE=jsonfile）归档这条能力缺失是**如实报的**，别报成"失败"：

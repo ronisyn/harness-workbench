@@ -30,6 +30,7 @@
 // 依赖注入（`db`/`runAgent`/`persistEvent`/… 都可传）：与 `scripts/rw-run.mjs` 的 `runHeadless` 同一做法，
 // 夹具因此可以**不碰真库、不调模型**就把这段语义钉死。
 import { db as realDb } from '../db.js';
+import { storage as realStore } from '../storage/index.js'; // 组装侧前缀账的写口（v0.3 §4.1「存储走接口」）
 import { persistEvent as realPersistEvent } from '../eventlog.js';
 import { beginDelivery, finishDelivery } from '../deliveries.js';
 import { ensureRun, markRun, resumeHint } from '../runtrack.js';
@@ -116,7 +117,7 @@ function withKeyGuard(provider, model, keys) {
  */
 export async function runChannelTurn({ channel, conversationId, text, permission = null, deps = {} }) {
   const {
-    db = realDb, runAgent, persistEvent = realPersistEvent,
+    db = realDb, store = realStore, runAgent, persistEvent = realPersistEvent,
     keys = config.keys, RW_WORKSPACE: workspace = RW_WORKSPACE,
     beginDelivery: begin = beginDelivery, finishDelivery: finish = finishDelivery,
     ensureRun: ensure = ensureRun, markRun: mark = markRun, resumeHint: hintOf = resumeHint,
@@ -199,7 +200,7 @@ export async function runChannelTurn({ channel, conversationId, text, permission
       shellKey: null, enabledTools: null, shellSchema: null,
     });
     const d = await recordPrefixAssemble({
-      db, conversationId, accountId: conv.account_id ?? null, shellId: null, hist, lane, source: PREFIX_SOURCE.CHANNEL,
+      store, conversationId, accountId: conv.account_id ?? null, shellId: null, hist, lane, source: PREFIX_SOURCE.CHANNEL,
     });
     if (d.state === 'rewrite') {
       console.warn('[channel-turn] 跨轮前缀改写（C4 非预期）：' + channel + ' conv=' + conversationId

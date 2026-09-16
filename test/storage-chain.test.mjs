@@ -285,6 +285,7 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
     '工具调用账（读）': 'toolCalls.recent',
     '工具调用账（写）': 'toolCalls.append',   // 2026-09-17 从"登记缺口"变成"已迁移"：写口也走接口了
     '用量记账（逐轮）': 'usage.append',       // 2026-09-17：v0.3 §4.6「预算与审计：本地兜底」的写口
+    '审计账（组装侧前缀账）': 'audit.append',  // 2026-09-17：同一条款的另一半（全仓 62 处写口共用它）
   };
   for (const [what, name] of Object.entries(REQUIRED)) {
     assert.ok(has(name), what + ' 没有经过存储接口（期望 ' + name + '）。实际记录：' + [...names].sort().join(', '));
@@ -296,7 +297,7 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
   const WRITES = {
     accounts: ['create'], sessions: ['create'], conversations: ['create'], messages: ['append', 'guardAppend'],
     events: ['append'], settings: ['set'], agentRuns: ['create', 'update'], deliveries: ['insert'], toolCalls: ['append'],
-    usage: ['append'],
+    usage: ['append'], audit: ['append'],
   };
   const unpaired = Object.entries(WRITES)
     .filter(([t, verbs]) => rows(t).length && !verbs.some((v) => has(t + '.' + v)))
@@ -324,6 +325,12 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
     '这一轮真花了钱 ⇒ 介质里必须有 kind=round 的用量行：' + JSON.stringify(rows('usage').map((u) => [u.kind, u.tokensIn])).slice(0, 300));
   assert.ok(has('usage.append'), '用量记账必须经过存储接口（usage.append）');
   for (const u of rows('usage')) assert.ok(u.createdAt, '每条用量都要有介质时间戳（调用方不给时间，介质自己盖）');
+  // ⑤ 审计账：这一轮 `/api/chat` 必然落了组装侧前缀账（`prefix:assemble`）⇒ 介质里必须有那一行、且经过接口。
+  //    2026-09-17 之前这 62 处审计写口全是直连 SQL ⇒ 干净机器上**审计整条链落不了账**（多数被 catch 吞掉）。
+  assert.ok(rows('audit').some((a) => a.action === 'prefix:assemble'),
+    '这一轮真跑了对话 ⇒ 介质里必须有组装侧前缀账：' + JSON.stringify(rows('audit').map((a) => a.action)).slice(0, 300));
+  assert.ok(has('audit.append'), '审计写口必须经过存储接口（audit.append）');
+  for (const a of rows('audit')) assert.ok(a.createdAt, '每条审计都要有介质时间戳');
 });
 
 test('[jsonfile] 重启进程后：同一个 token 仍认得出人、同一会话与消息读得回来（数据在文件里，不在内存里）', async () => {

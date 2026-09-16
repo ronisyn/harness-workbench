@@ -1296,7 +1296,7 @@ const RAW_TOOLS = [
       const content = `【能力类型】${assetType === 'plugin' ? '插件' : assetType === 'app' ? '应用' : '壳'}\n【能力名】${a.assetKey || '(新资产-待立项)'}\n【触发场景】${scene}\n【期望效果】${effect}\n【涉及壳】${shells}\n【代码动作类型】${actionType}`;
       const key = String(a.assetKey || '').slice(0, 64) || null;
       const r = await db.query('INSERT INTO extension_demands (asset_key, kind, source, content) VALUES (?,?,?,?)', [key, kind, '会话(intake)', content.slice(0, 2000)]);
-      try { await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [ctx.accountId ?? null, 'ext:demand', 'asset=' + (key || '通用') + ' kind=' + kind + ' via=intake_submit id=' + r.insertId]); } catch { /* 审计失败不阻断 */ }
+      try { await storage.audit.append({ accountId: ctx.accountId ?? null, action: 'ext:demand', detail: 'asset=' + (key || '通用') + ' kind=' + kind + ' via=intake_submit id=' + r.insertId }); } catch { /* 审计失败不阻断 */ }
       return { ok: true, id: r.insertId, status: '待审', note: '已进入需求闭环：进化集审批台统一审（采纳→立项；驳回→记录）。请勿在审批前自行开发。' };
     } },
 
@@ -1903,8 +1903,7 @@ export async function execTool(name, args, ctx) {
     const argsChanged = rewrites.length > 0 || JSON.stringify(argsAsked) !== JSON.stringify(args);
     if (argsChanged) {
       const detail = redactSecrets(JSON.stringify({ tool: name, rewrites: rewrites.map((w) => ({ by: w.by, asked: w.asked, used: w.used })), asked: argsAsked, used: args })).slice(0, 1500);
-      db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-        [ctx.accountId ?? null, 'hook:rewrite', detail, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+      storage.audit.append({ accountId: ctx.accountId ?? null, action: 'hook:rewrite', detail: detail, shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null }).catch(() => {});
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         result.hookRewrite = rewrites.length ? ('参数经 hook 改写（' + rewrites.map((w) => w.by).join(',') + '）') : '参数经平台归一（相对路径/占位符）';
       }
@@ -1914,7 +1913,7 @@ export async function execTool(name, args, ctx) {
     //    只出声一次，措辞说清"少了哪一半"，免得日志里那一行又被当成"留痕整体失败"。
     //    RA-05b 原始体积遥测（`result_bytes`）在①里已经落上了，它原本就与这条 audit 行无关。
     try {
-      await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)', [ctx.accountId, 'tool:' + name, redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0, code: errCode })).slice(0, 1000), ctx.shellId ?? null, ctx.conversationId ?? null]);
+      await storage.audit.append({ accountId: ctx.accountId, action: 'tool:' + name, detail: redactSecrets(JSON.stringify({ args: redactSecrets(rArgs), result: redactSecrets(rResult), ms: Date.now() - t0, code: errCode })).slice(0, 1000), shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null });
     } catch (e) {
       if (!auditUnavailable) {
         auditUnavailable = true;

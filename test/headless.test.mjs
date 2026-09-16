@@ -135,6 +135,15 @@ const deps = (over = {}) => ({
   RW_WORKSPACE: 'E:/tmp/ws', RW_FS_ROOT: 'E:/',
   ensureRun: async () => ({ id: 9001 }), markRun: async () => {},
   env: {}, now: (() => { let t = 1000; return () => (t += 7); })(),
+  // 审计写口的注入缝（2026-09-17 起走 store.audit.append）：不注入的话 headless 会打到真库，
+  // 而这条夹具的口径是"不连真库"。这里的假存储只做两件事：记 append、答"上一行是什么"（跨轮对照读法）。
+  store: {
+    audit: {
+      appends: [],
+      async append(f) { this.appends.push(f); return { id: this.appends.length }; },
+      async lastDetail() { return null; },
+    },
+  },
   ...over,
 });
 

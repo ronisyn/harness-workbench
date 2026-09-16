@@ -95,7 +95,9 @@ export function prefixLane({
  * 落一次组装侧跨轮账：**先判改写、再记本轮指纹**（顺序即语义，别调换）。
  *
  * @param {object} o
- * @param {object} o.db              数据库句柄（唯一注入缝；生产=真库，夹具=假库）
+ * @param {object} o.store           存储接口（**唯一注入缝**，理由见文件头"依赖纪律"：本模块不许自己
+ *                                   import storage/db —— 那会让 `rw-run.mjs --help` 这条"绝不碰连接池"的路
+ *                                   静态地把库模块拖进来）。对照读（上一行的 detail）与两处写都走它。
  * @param {number|string} o.conversationId 会话 id（跨轮对照的键）
  * @param {number|null} o.accountId  归属账号（渠道/headless 可能为 null —— 如实记 null，不编一个）
  * @param {number|null} [o.shellId]  壳 id（非 default 壳才有；没有就是 null）
@@ -110,18 +112,17 @@ export function prefixLane({
  * 抛错语义：**不吞异常**。真库写不进去是事实，吞掉就是"账本静默少一行"（正是这一系列缺陷的成因）。
  * 调用方按各自既有口径处置：`/api/chat` 出声但**不阻断对话**（它的既有行为，一个字不改）。
  */
-export async function recordPrefixAssemble({ db, conversationId, accountId = null, shellId = null, hist, lane, source }) {
-  const prevRow = (await db.query('SELECT detail FROM audit_log WHERE conversation_id=? AND action=? ORDER BY id DESC LIMIT 1',
-    [conversationId, PREFIX_ASSEMBLE_ACTION]))[0];
-  const prev = parsePrefixRecord(prevRow && prevRow.detail);
+export async function recordPrefixAssemble({ store, conversationId, accountId = null, shellId = null, hist, lane, source }) {
+  // 对照读走存储接口（`audit.lastDetail`，形状＝原来那条 `ORDER BY id DESC LIMIT 1`）：
+  // 2026-09-17 之前这处读是直连 SQL —— 写口迁了而它没迁时，干净机器上"先读后写"整段失败（被调用方 catch 吞掉）。
+  const prevDetail = await store.audit.lastDetail({ conversationId, action: PREFIX_ASSEMBLE_ACTION });
+  const prev = parsePrefixRecord(prevDetail);
   const d = detectPrefixRewrite(prev, hist, lane);
   if (d.state === 'rewrite') {
     // C4 非预期失效：这是一等观测指标，不是日志噪音 —— 必须能被 SQL 数出来（agent.js 的 run 内断链
     // 落的是 `first-diff-idx=…`，本条落的是 `src=` + 指纹字段，两种失效在账本上分得开）。
-    await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-      [accountId, PREFIX_LEDGER.INVALIDATE, formatPrefixRecord(d) + ' src=' + source, shellId, conversationId]);
+    await store.audit.append({ accountId: accountId, action: PREFIX_LEDGER.INVALIDATE, detail: formatPrefixRecord(d) + ' src=' + source, shellId: shellId, conversationId: conversationId });
   }
-  await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-    [accountId, PREFIX_ASSEMBLE_ACTION, formatPrefixRecord(d), shellId, conversationId]);
+  await store.audit.append({ accountId: accountId, action: PREFIX_ASSEMBLE_ACTION, detail: formatPrefixRecord(d), shellId: shellId, conversationId: conversationId });
   return { ...d, prevCnt: prev ? Number(prev.cnt) : null };
 }

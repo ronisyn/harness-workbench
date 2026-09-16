@@ -54,7 +54,7 @@ export const STORE_FORMAT_FIRST_VERSION = 1;
 // （`server/kbsearch/like.js`，`RW_KB_SEARCH=like`）不碰 SQL，它的记录只能从这套接口读。
 // 有它在表里，夹具/嵌入方才能把条目放进这份 JSON 文件并被 `storage.knowledge.all()` 读到；
 // 不在这张表里的话，`loadDoc` 会把 `tables.knowledge` 当成未知表丢掉（而"丢了却不报错"最坏）。
-const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions', 'knowledge', 'usage'];
+const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions', 'knowledge', 'usage', 'audit'];
 
 // 默认落点：工作区下的 storage/（与 spill/、.rw-checkpoints/ 同属"运行期产物"，不进仓库）。
 // 要挪位置得在 server/env.js 加一个 RW_STORAGE_FILE（env.js 是环境事实的唯一出处，本轮由协调方维护，
@@ -767,6 +767,30 @@ function makeApi(holder, save, { persist }) {
         put('usage', rec);
         await commit();
         return { id: rec.id };
+      },
+    },
+
+    /**
+     * 审计账（v0.3 §4.6「预算与审计：本地兜底」的写口；与 mysql 实现同一套字段与语义）。
+     * 干净机器上这才有审计：迁移前 62 处直连 SQL 全打在不存在的库上（多数被 catch 吞掉）。
+     */
+    audit: {
+      async append(fields) {
+        assertFields('audit', fields);
+        const rec = { id: nextId('audit'), ...fields, createdAt: nowIso() };
+        put('audit', rec);
+        await commit();
+        return { id: rec.id };
+      },
+      /**
+       * 某一会话某动作的**最后一行说明**：语义与 mysql 侧那条 `ORDER BY id DESC LIMIT 1` 相同
+       * （rowsOf 升序 ⇒ 反向取第一条即 id 最大的一条）。
+       */
+      async lastDetail({ conversationId, action } = {}) {
+        const hit = rowsOf('audit')
+          .filter((r) => Number(r.conversationId) === Number(conversationId) && r.action === action)
+          .pop();
+        return hit ? hit.detail : null;
       },
     },
 

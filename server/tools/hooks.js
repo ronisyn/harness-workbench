@@ -86,8 +86,7 @@ export function clearHook(side, tool, name) {
 // 钩子失败留痕（OP-03 规则③）：不阻断主流程，失败必须可事后查到。
 function logHookFailure(h, kind, reason) {
   try {
-    db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-      [null, 'hook:' + kind, `hook=${h.name} side=${h.side} tool=${h.tool} failure=${h.failure} ${String(reason).slice(0, 200)}`]).catch(() => {});
+    storage.audit.append({ accountId: null, action: 'hook:' + kind, detail: `hook=${h.name} side=${h.side} tool=${h.tool} failure=${h.failure} ${String(reason).slice(0, 200)}` }).catch(() => {});
   } catch { /* 留痕失败不影响主流程 */ }
 }
 
@@ -493,8 +492,7 @@ registerHook('after', 'db_write', 'policy_write_audit', async ({ args, result, c
   if (result && result.error) return {};
   const detail = policyWriteDetail({ kind: p.kind, keys: p.keys, from: cap ? cap.from : null, to: await readPolicyValues(p.keys), ctx, result, sql: cap ? cap.sql : (args && args.sql) });
   try {
-    await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-      [ctx.accountId ?? null, 'policy:settings-write', detail, ctx.shellId ?? null, ctx.conversationId ?? null]);
+    await storage.audit.append({ accountId: ctx.accountId ?? null, action: 'policy:settings-write', detail: detail, shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null });
   } catch (e) {
     // 留痕失败必须出声（与 tool-audit 同口径）：工具已经改完了，不能因为写账失败就改判，但绝不能静默。
     console.error('[policy-audit] 策略写入账本缺行（策略已被改）conv=' + (ctx.conversationId || '-') + ' keys=' + p.keys.join(',') + '：' + ((e && e.message) || e));

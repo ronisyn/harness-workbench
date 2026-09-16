@@ -600,8 +600,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       }
       if (faceChanged) reasons.push('tool-face-changed');
       if (reasons.length) {
-        await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, PREFIX_LEDGER.EXEMPT, reasons.join(' '), ctx.shellId ?? null, ctx.conversationId]);
+        await storage.audit.append({ accountId: ctx.accountId ?? null, action: PREFIX_LEDGER.EXEMPT, detail: reasons.join(' '), shellId: ctx.shellId ?? null, conversationId: ctx.conversationId });
       }
     } catch { /* 归因失败不影响执行 */ }
     if (faceChanged) {
@@ -680,8 +679,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     if (collapsed) {
       collapseRound = round;
       console.warn('[collapse] 段边界整段替换（conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + ' → 替换后 ' + msgs.length + ' 条）');
-      db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-        [ctx.accountId ?? null, PREFIX_LEDGER.COLLAPSE, 'round=' + (round + 1) + ' msgs=' + msgs.length, ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+      storage.audit.append({ accountId: ctx.accountId ?? null, action: PREFIX_LEDGER.COLLAPSE, detail: 'round=' + (round + 1) + ' msgs=' + msgs.length, shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null }).catch(() => {});
     }
     // 前缀不变量（缓存三纪律机检之一 · 只追加）：本轮与上轮的**非 system** 消息序列必须逐条同一对象。
     // system 消息都是随轮易变的提示（快照/后台通知/护栏提示/完成度提示），不参与比对；
@@ -705,8 +703,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
         console.warn('[prefix-invariant] 非预期前缀改写：首个不同下标=' + d.broke
           + '（上轮 ' + d.prevLen + ' 条 → 本轮 ' + d.curLen + ' 条，conv=' + (ctx.conversationId || '-') + ' round=' + (round + 1) + '）');
         // C4 计数落 audit_log（唯一账本；不新造表）
-        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, PREFIX_LEDGER.INVALIDATE, 'first-diff-idx=' + d.broke + ' core ' + d.prevLen + '→' + d.curLen + ' round=' + (round + 1), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+        storage.audit.append({ accountId: ctx.accountId ?? null, action: PREFIX_LEDGER.INVALIDATE, detail: 'first-diff-idx=' + d.broke + ' core ' + d.prevLen + '→' + d.curLen + ' round=' + (round + 1), shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null }).catch(() => {});
       }
       prevCore = core;
       if (process.env.RW_PREFIX_DEBUG === '1') {
@@ -1042,8 +1039,7 @@ export async function runAgent({ provider, model, messages, permission = 'full',
       }
       if (lim.progressStallN > 0 && pj.stalled >= lim.progressStallN) {
         console.warn('[progress] 连续 ' + pj.stalled + ' 轮无进展，挂起 conv=' + (ctx.conversationId || '-') + ' 重复调用=' + pj.repeats.join('|'));
-        db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-          [ctx.accountId ?? null, 'progress:stall', 'round=' + (round + 1) + ' stalled=' + pj.stalled + ' repeats=' + pj.repeats.join(',').slice(0, 300), ctx.shellId ?? null, ctx.conversationId ?? null]).catch(() => {});
+        storage.audit.append({ accountId: ctx.accountId ?? null, action: 'progress:stall', detail: 'round=' + (round + 1) + ' stalled=' + pj.stalled + ' repeats=' + pj.repeats.join(',').slice(0, 300), shellId: ctx.shellId ?? null, conversationId: ctx.conversationId ?? null }).catch(() => {});
         return { content: stallMessage(prog, round, lim, pj.repeats), toolLog, usage: {}, guard: 'no-progress', paused: true, reason: '连续无进展', spentYuan: spentNow(), usageTotals: runTotals() };
       }
     }

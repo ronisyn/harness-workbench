@@ -56,10 +56,11 @@ function parseArgs(argv) {
 const stripOneNewline = (s) => String(s).replace(/\r?\n$/, '');
 
 /**
- * 跑一次轮换。可注入（argv/env/stdin/db/log）——夹具据此在不碰真终端、不连真库的情况下验全程。
+ * 跑一次轮换。可注入（argv/env/stdin/db/store/log）——夹具据此在不碰真终端、不连真库的情况下验全程。
+ * `store` 是**审计写口的注入缝**（2026-09-17 起写口走 `storage.audit.append`）：不注入＝用进程默认实现。
  * @returns {Promise<{exitCode:number, result?:{name:string, updatedAt:string, fingerprint:string}}>}
  */
-export async function main({ db: database = db, log = console, argv = process.argv.slice(2), env = process.env, readStdin = readStdinValue } = {}) {
+export async function main({ db: database = db, store = null, log = console, argv = process.argv.slice(2), env = process.env, readStdin = readStdinValue } = {}) {
   const { help, name } = parseArgs(argv);
   if (help) { log.log(USAGE); return { exitCode: 0 }; }
   if (!name) throw new UsageError('缺少 --name');
@@ -67,7 +68,7 @@ export async function main({ db: database = db, log = console, argv = process.ar
   const value = (fromEnv !== undefined && fromEnv !== '') ? fromEnv : stripOneNewline(await readStdin());
   if (!value) throw new UsageError('没读到新值（RW_CRED_VALUE 为空且 stdin 没送出内容）——空值不是"已配置的密钥"');
   log.log('[cred] 凭据文档：' + credentialsFile());
-  const r = await rotateSecret(name, value, { db: database });
+  const r = await rotateSecret(name, value, { db: database, store });
   // 只报"它知道的事"：新值已落文档、指纹是多少。**不替落账宣布成功**——落账失败由 credentials.js 自己出声
   // （那行以 `[cred] 轮换落账失败` 开头）；入口抢着说"审计已落账"，正是在制造一条没人能核对的断言。
   log.log('[cred] 已轮换：' + r.name + '  updatedAt=' + r.updatedAt + '  fingerprint=' + r.fingerprint);

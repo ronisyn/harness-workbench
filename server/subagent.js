@@ -149,10 +149,7 @@ export async function spawnSubagent({ prompt, name, provider, model, permission 
   // 只在**有会话归属**时落账：没有归属的派生（夹具/无会话调用）落了也没法归因，只会污染"真实任务用到第几层"
   // 这个统计——实测夹具用 `conversationId: 0` 起子代理，若不加这条，测试跑一遍就往证据里灌一批 depth=1。
   if (parentCtx.conversationId) {
-    db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-      [parentCtx.accountId ?? null, 'subagent:spawn',
-        JSON.stringify({ id, name: String(record.name || '').slice(0, 60), depth: childDepth, maxDepth, canSpawnMore: !childCtx.noSubagent, tools: whitelist ? whitelist.size : null }),
-        parentCtx.shellId ?? null, parentCtx.conversationId])
+    storage.audit.append({ accountId: parentCtx.accountId ?? null, action: 'subagent:spawn', detail: JSON.stringify({ id, name: String(record.name || '').slice(0, 60), depth: childDepth, maxDepth, canSpawnMore: !childCtx.noSubagent, tools: whitelist ? whitelist.size : null }), shellId: parentCtx.shellId ?? null, conversationId: parentCtx.conversationId })
       .catch((e) => console.warn('[subagent] 派生留痕失败（不影响执行，但 OP-08 的深度证据会缺行）：' + ((e && e.message) || e)));
   }
   const t0 = Date.now();

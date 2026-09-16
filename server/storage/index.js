@@ -95,6 +95,12 @@ export const CONTRACT = {
     // 离线导出（默认开启）」。迁移前只有直连 SQL 一条路 ⇒ 干净机器上成本计量是空的（"省钱"这条主线在客户机
     // 上没有数）。本轮只迁**写口**：读法（C1–C5 报表 / 仪表 / 遥测 / 会话导出）仍走 SQL，如实登记。
     usage: ['append'],
+    // 审计账（2026-09-17 加**写口**＋**一处读**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时
+    // 自落账并支持离线导出（默认开启）」。`lastDetail` 是**跨轮前缀账**的对照读法（每一轮都要读上一行）：
+    // 只迁这一处读，是因为它在**每轮都在跑的路径**上 —— 写口迁了而它没迁，干净机器上"先读后写"仍然整段失败
+    // （实测：`/api/chat` 的前缀账在 jsonfile 下被 catch 吞掉，介质里只有 `tool:*` 那一类审计）。
+    // **其余读法（/api/audit 列表 + 归档 + 前缀账统计 + /trace）仍走 SQL**，如实登记在收口表。
+    audit: ['append', 'lastDetail'],
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],
@@ -142,6 +148,8 @@ export const FIELDS = {
   // 介质时间戳**，由建表的 `DEFAULT NOW()` / JSON 侧 `nowIso()` 盖，不是调用方能填的字段）
   usage: ['accountId', 'conversationId', 'agentRunId', 'messageId', 'providerId', 'modelId', 'tokensIn', 'tokensOut',
     'cost', 'durationMs', 'firstTokenMs', 'cacheHit', 'cacheMiss', 'prefixSysHash', 'prefixToolsHash', 'shellId', 'kind'],
+  // 审计账的中性字段名（列名与 `audit_log` 建表逐字对应；`createdAt` 同样是介质时间戳，不在字段里）
+  audit: ['accountId', 'action', 'detail', 'shellId', 'conversationId'],
   // deliveries 的方法收的是具名参数（不是整条记录），这里列的是它的**记录形状**：
   // `finish(id, patch)` 的 patch 按它校验，`findByKey`/`list` 回来的记录也按它映射。
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
@@ -188,6 +196,9 @@ export const REQUIRED = {
   // 正是这条账**唯一的分类维度**——漏了它，一条账就退回默认值、混进"真实轮次"里，
   // 而 C1–C5 的口径全部按 kind 过滤（`cohort.js`）。其余字段各有默认值/可空，不登记。
   usage: ['kind'],
+  // audit：**必需的是 `action`**（建表里它是唯一标识"发生了什么事"的列；`accountId` 可空——系统级动作
+  // 就是 `null`，例如 `prefix:decl-error`、`spill:cleanup`，把账号登记成必需会把这一类合法账挡在门外）。
+  audit: ['action'],
 };
 
 /**

@@ -52,6 +52,9 @@ const COLS = {
     durationMs: 'duration_ms', firstTokenMs: 'first_token_ms', cacheHit: 'cache_hit_tokens', cacheMiss: 'cache_miss_tokens',
     prefixSysHash: 'prefix_sys_hash', prefixToolsHash: 'prefix_tools_hash', shellId: 'shell_id', kind: 'kind',
   },
+  // 审计账（2026-09-17 加写口）：列名与 `audit_log` 建表逐字对应；`created_at` 由库的 `DEFAULT NOW()` 盖。
+  // `audit_log_archive`（90 天归档表）**不在**这里：归档是维护作业的读法+搬表，本轮只迁写口（如实登记）。
+  audit: { accountId: 'account_id', action: 'action', detail: 'detail', shellId: 'shell_id', conversationId: 'conversation_id' },
   // 知识库（2026-09-17 加，**只读**：给 `kbsearch/like.js` 取记录用）。
   // 只映射检索层真正要用的列：`related_component` 是管理面的展示列，不在列里（同接口层的字段清单）。
   knowledge: {
@@ -67,7 +70,7 @@ const COLS = {
 const TABLES = {
   conversations: 'conversations', messages: 'messages', toolCalls: 'tool_calls', settings: 'settings',
   agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries', accounts: 'accounts', sessions: 'sessions',
-  knowledge: 'knowledge', usage: 'usage_stats',
+  knowledge: 'knowledge', usage: 'usage_stats', audit: 'audit_log',
 };
 /** JSON 列：写时 stringify、读时 parse（MySQL 的 JSON 列在新旧驱动下有时给对象、有时给字符串）。 */
 const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 'svalue']);
@@ -580,6 +583,27 @@ function makeApi(r) {
         assertFields('usage', fields);
         const { sql, params } = insertOf('usage', fields);
         return { id: (await r.exec(sql, params)).insertId };
+      },
+    },
+
+    /**
+     * 审计账（v0.3 §4.6「预算与审计：本地兜底」的写口）：全仓 62 处写口共用这一条。
+     * 只写调用方给了的列（三列 / 五列两种形状各自保持原样）；`created_at` 由建表的 `DEFAULT NOW()` 盖。
+     */
+    audit: {
+      async append(fields) {
+        assertFields('audit', fields);
+        const { sql, params } = insertOf('audit', fields);
+        return { id: (await r.exec(sql, params)).insertId };
+      },
+      /**
+       * 某一会话某动作的**最后一行说明**（跨轮前缀账的对照读法，每一轮都要读）。
+       * 形状逐字沿用调用点原来那条 SQL（`ORDER BY id DESC LIMIT 1`）——换实现不改调用方。
+       */
+      async lastDetail({ conversationId, action } = {}) {
+        const row = await r.one('SELECT detail FROM audit_log WHERE conversation_id=? AND action=? ORDER BY id DESC LIMIT 1',
+          [conversationId, action]);
+        return row ? row.detail : null;
       },
     },
 

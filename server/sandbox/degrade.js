@@ -53,8 +53,7 @@ export async function auditDegrade(composed, extra = {}) {
     conversationId: (extra && extra.conversationId) ?? null,
   }).slice(0, 1000);
   try {
-    await db.query('INSERT INTO audit_log (account_id, action, detail, shell_id, conversation_id) VALUES (?,?,?,?,?)',
-      [(extra && extra.accountId) ?? null, 'sandbox:degrade', detail, (extra && extra.shellId) ?? null, (extra && extra.conversationId) ?? null]);
+    await storage.audit.append({ accountId: (extra && extra.accountId) ?? null, action: 'sandbox:degrade', detail: detail, shellId: (extra && extra.shellId) ?? null, conversationId: (extra && extra.conversationId) ?? null });
     return true;
   } catch (e) {
     // 与 hooks.js/epoch.js 同口径：账本写不进去要出声，但不能把主流程带走。

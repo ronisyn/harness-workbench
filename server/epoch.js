@@ -116,13 +116,13 @@ export async function warmLane(lane, { provider = 'deepseek', model = 'deepseek-
       });
     } catch { /* 计量失败不影响预热 */ }
     const note = `lane=${e.lane} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length} hit=${hit} miss=${miss} ¥${cost.toFixed(4)} ms=${Date.now() - t0}`;
-    db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:warmup', note]).catch(() => {});
+    storage.audit.append({ accountId: null, action: 'prefix:warmup', detail: note }).catch(() => {});
     console.log('[epoch] 预热完成 ' + note + (miss > 8000 ? '（本次未命中=新纪元首次重建，属预期）' : '（命中，几乎免费）'));
     return { ok: true, lane: e.lane, hit, miss, sysHash: e.sysHash, toolsHash: e.toolsHash };
   } catch (err) {
     const msg = String((err && err.message) || err).slice(0, 200);
     console.warn('[epoch] 预热失败 lane=' + e.lane + '：' + msg);
-    db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:warmup-fail', 'lane=' + e.lane + ' err=' + msg]).catch(() => {});
+    storage.audit.append({ accountId: null, action: 'prefix:warmup-fail', detail: 'lane=' + e.lane + ' err=' + msg }).catch(() => {});
     return { ok: false, lane: e.lane, error: msg };
   }
 }
@@ -150,8 +150,7 @@ export async function checkEpochAndWarm({ provider = 'deepseek', model = 'deepse
             + '　前缀面变了 ⇒ 该面前缀作废；已发一次预热，别让真实用户承担这笔重建');
           // 账本里带上工具数与面名：MCP 是 `npx -y` 拉的（工具清单随外部包版本漂移），
           // 而轻量面/全量面会随会话消息内容切换 —— 这两件事都是"换纪元"的常见来源。
-          db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-            [null, 'prefix:epoch-change', `lane=${e.lane} face=${face.name} ${prev}→${e.key} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length}`]).catch(() => {});
+          storage.audit.append({ accountId: null, action: 'prefix:epoch-change', detail: `lane=${e.lane} face=${face.name} ${prev}→${e.key} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length}` }).catch(() => {});
         }
         await writePrev(e.lane, e.key);
         // 预热条件比"变更"宽一档：**没有记录也要预热**（我们从没为这个面做过保温，它多半是冷的）。

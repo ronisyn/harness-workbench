@@ -27,6 +27,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { config } from './config.js';
+import { storage } from './storage/index.js'; // v0.3 §4.6「预算与审计：本地兜底」：审计写口走接口
 
 /** 凭据文档位置：部署用 `RW_CREDENTIALS_FILE` 指定；默认放**平台目录**（`.env` 的同一层）。
  *  为什么是平台目录而不是 `$DSH_HOME`：我们的部署事实是"单机 Linux 服务 + systemd + `.env` 在平台目录"，
@@ -201,14 +202,15 @@ export function secretFingerprint(value) {
  *   本模块不 import db.js —— 凭据文档的读写不该依赖"库连得上"，夹具也就能用假库）
  * @returns {Promise<{name:string, updatedAt:string, fingerprint:string}>} 描述里**永远不含值**
  */
-export async function rotateSecret(name, newValue, { db = null, accountId = null } = {}) {
+export async function rotateSecret(name, newValue, { db = null, store = null, accountId = null } = {}) {
   const fingerprint = secretFingerprint(newValue); // 先算：值随后只进文档，本函数不再引用它
   setSecret(name, newValue);                       // 唯一写路径；抛错＝没换成功，旧值一个字没动
   const updatedAt = new Date().toISOString();
   if (db) {
     try {
-      await db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)',
-        [accountId, 'cred:rotate', 'name=' + name + ' fingerprint=' + fingerprint]);
+      // 写口走存储接口（v0.3 §4.1/§4.6）：`store` 与 `db` 一样是**注入缝**——夹具靠它挡在真库之外
+      // （2026-09-17 教训：只把 `db` 当缝、写口却用模块级 storage ⇒ 夹具的假库挡不住，真库被写了 12 行）。
+      await (store || storage).audit.append({ accountId: accountId, action: 'cred:rotate', detail: 'name=' + name + ' fingerprint=' + fingerprint });
     } catch (e) {
       let msg = String((e && e.message) || e);
       // 兜底脱敏（日志出口的纪律）；脱敏本身失败不得盖住原错，更不得让"已经换好了"变成抛错

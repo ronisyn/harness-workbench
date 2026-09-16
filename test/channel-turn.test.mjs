@@ -78,20 +78,46 @@ function fakeDeliveries() {
   };
 }
 
-const deps = (over = {}) => ({
-  db: fakeDb(),
-  runAgent: fakeRunAgent(),
-  persistEvent: () => true,
-  keys: { deepseek: 'k-deepseek' },
-  RW_WORKSPACE: 'E:/tmp/ws',
-  beginDelivery: fakeDeliveries().begin,
-  finishDelivery: fakeDeliveries().finish,
-  ensureRun: async () => ({ id: 9001 }),
-  markRun: async () => {},
-  resumeHint: async () => null,
-  now: (() => { let t = 1000; return () => (t += 7); })(),
-  ...over,
-});
+/**
+ * 记账假**存储**（2026-09-17 起渠道轮的审计写口与"上一行对照读"都走接口，本模块不再自己发 SQL）：
+ * 与假库共用同一个 `audit` 数组（`db.audit`），于是下面那些"落了几行、读了上一行没有"的断言口径不变。
+ * `sqls` 里那些 `SELECT detail FROM audit_log` / `INSERT INTO audit_log` 的匹配**不再出现**——
+ * 相应地，判据改看 `readCount`（对照读真的发生过）与 `db.audit`（账真的落了）。
+ */
+const auditStore = (audit) => {
+  const st = {
+    readCount: 0,
+    async append(f) { audit.push({ action: f.action, detail: f.detail }); return { id: audit.length }; },
+    async lastDetail() { st.readCount++; return audit.filter((r) => r.action === 'prefix:assemble').pop()?.detail || null; },
+  };
+  return { audit: st, readCount: () => st.readCount };
+};
+
+const deps = (over = {}) => {
+  const d = {
+    db: fakeDb(),
+    runAgent: fakeRunAgent(),
+    persistEvent: () => true,
+    keys: { deepseek: 'k-deepseek' },
+    RW_WORKSPACE: 'E:/tmp/ws',
+    beginDelivery: fakeDeliveries().begin,
+    finishDelivery: fakeDeliveries().finish,
+    ensureRun: async () => ({ id: 9001 }),
+    markRun: async () => {},
+    resumeHint: async () => null,
+    now: (() => { let t = 1000; return () => (t += 7); })(),
+    ...over,
+  };
+  // 审计写口的注入缝：不注入就会打到真库（这条夹具的口径是"不连真库"）
+  if (!d.store) d.store = fakeStore(d.db);
+  return d;
+};
+
+/** 造一个与 `db` 共享 audit 数组的假存储 */
+function fakeStore(db) {
+  if (!db.audit) db.audit = [];
+  return auditStore(db.audit);
+}
 
 const ledger = () => { const rows = []; const fn = (convId, ev) => { rows.push({ convId, ev }); return true; }; fn.rows = rows; return fn; };
 const typesOf = (rows) => rows.map((r) => r.ev.type);
@@ -256,17 +282,17 @@ test('③ 跨端一致：渠道走的就是会话 ctx 与全量工具面（不�
 
 test('③ 跨端一致：渠道轮次也落**组装侧跨轮前缀账**（v0.3 §4.4.1 规则5；改前这条路径零覆盖）', async () => {
   const db = fakeDb();
-  await runChannelTurn({ channel: 'feishu', conversationId: 77, text: '你好', deps: deps({ db }) });
+  const store = fakeStore(db);
+  await runChannelTurn({ channel: 'feishu', conversationId: 77, text: '你好', deps: deps({ db, store }) });
 
-  const readIdx = db.sqls.findIndex((s) => /^SELECT detail FROM audit_log/.test(s));
   const histIdx = db.sqls.findIndex((s) => /FROM messages WHERE conversation_id=\?/.test(s));
   const userInsertIdx = db.sqls.findIndex((s) => /^INSERT INTO messages/.test(s));
-  assert.ok(readIdx > 0, '渠道轮次必须读上一轮的指纹当对照（改前一次都没有——这就是覆盖缺口）');
-  assert.ok(histIdx > 0 && histIdx < readIdx, '先拼好历史、再落账（账要对着"这一轮真发出去的那串"）');
-  assert.ok(userInsertIdx > 0 && userInsertIdx < readIdx, '用户消息先落库、再算前缀（与 /api/chat 同序）');
+  assert.ok(store.readCount() >= 1, '渠道轮次必须读上一轮的指纹当对照（改前一次都没有——这就是覆盖缺口）');
+  assert.ok(histIdx > 0, '先拼好历史、再落账（账要对着"这一轮真发出去的那串"）');
+  assert.ok(userInsertIdx > 0 && userInsertIdx < histIdx, '用户消息先落库、再读历史（与 /api/chat 同序）');
   // 落账用的动作名/来源标签与 `/api/chat`、headless **同一份常量**（各写各的字符串 = 静默不计账）
-  const inserts = db.sqls.filter((s) => /^INSERT INTO audit_log/.test(s));
-  assert.ok(inserts.length >= 1, '至少一行 prefix:assemble');
+  const assembled = db.audit.filter((a) => a.action === 'prefix:assemble');
+  assert.equal(assembled.length, 1, '一轮落一行 prefix:assemble：' + JSON.stringify(db.audit));
   assert.equal(PREFIX_LEDGER.ASSEMBLE, 'prefix:assemble');
   assert.equal(PREFIX_SOURCE.CHANNEL, 'channel');
 });

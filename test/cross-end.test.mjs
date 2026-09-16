@@ -105,6 +105,9 @@ const turnDeps = (over = {}) => ({
   ensureRun: async () => ({ id: 7001 }),
   markRun: async () => {},
   resumeHint: async () => null,
+  // 审计写口的注入缝（2026-09-17 起走 store.audit.append）：不注入就会打到真库，
+  // 与上面那条"夹具只替换 db.query、不碰真库"的纪律冲突。这里只记下 appends，够断言用。
+  store: { audit: { appends: [], async append(f) { this.appends.push(f); return { id: this.appends.length }; }, async lastDetail() { return null; } } },
   ...over,
 });
 

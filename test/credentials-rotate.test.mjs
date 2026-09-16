@@ -33,16 +33,25 @@ assert.ok(!process.env[NAME], '夹具前提：' + NAME + ' 不得已存在于进
 const reset = () => { for (const f of fs.readdirSync(TMP)) fs.rmSync(path.join(TMP, f), { force: true, recursive: true }); };
 test.beforeEach(reset);
 
-/** 夹具假库：只认审计那一条 INSERT，其余一律抛错（免得夹具悄悄假装支持了什么）。 */
-class FakeDb {
-  constructor({ fail = null } = {}) { this.calls = []; this.fail = fail; this.rows = []; }
-  async query(sql, params) {
-    this.calls.push({ sql, params });
-    if (this.fail) throw new Error(this.fail);
-    this.rows.push(params);
-    return { insertId: this.rows.length };
+/**
+ * 夹具假**存储**（2026-09-17 起审计写口走 `storage.audit.append`，原来那版"假库挡 INSERT"的 FakeDb 随之删掉）：
+ * 只认 `audit.append` 一种调用，其余一律抛错（免得夹具悄悄假装支持了什么）；`fail` 用来模拟"审计写不进去"。
+ * ⚠️ 为什么必须注入它：写口在 `rotateSecret` 里是 `(store || storage)`——**不注入就等于写进真库**
+ * （2026-09-16 实测：只注入 `db` 时这条夹具把 12 行 `cred:rotate` 写进了共享库 rw_test，见 C-65）。
+ */
+class FakeStore {
+  constructor({ fail = null } = {}) { this.appends = []; this.fail = fail; }
+  get audit() {
+    const self = this;
+    return {
+      async append(f) {
+        if (self.fail) throw new Error(self.fail);
+        self.appends.push(f);
+        return { id: self.appends.length };
+      },
+    };
   }
-  inserts() { return this.rows; }
+  inserts() { return this.appends; }
 }
 
 /** 安静地收集 log/console 输出（同时检查"日志里没有明文"）。 */
@@ -90,7 +99,7 @@ test('连续轮换：每次旧值都不可见，文档里始终只有一行', as
 test('原子性：写新值这一步失败 ⇒ 抛错、旧值仍可用、文档一字未动、**不落账**', async () => {
   setSecret(NAME, TOKEN);
   const before = fs.readFileSync(FILE, 'utf8');
-  const fake = new FakeDb();
+  const store = new FakeStore();
   // 只让"写新值"这一次写盘失败：拦掉**内容里含新值**的那次 `fs.writeFileSync`。
   // 为什么不用"把 tmp 路径占住"那一招（本仓既有夹具的写法）：它会让**任何**一次写入都失败，
   // 于是"先删旧值、再写新值"这种非原子实现照样活得下来（它删旧值那一步同样写不进去），
@@ -101,15 +110,15 @@ test('原子性：写新值这一步失败 ⇒ 抛错、旧值仍可用、文档
     return real(p, data, ...rest);
   };
   try {
-    await assert.rejects(() => rotateSecret(NAME, TOKEN2, { db: fake }), /模拟写盘失败/, '写失败必须如实抛错，不许假装换好了');
+    await assert.rejects(() => rotateSecret(NAME, TOKEN2, { db: {}, store }), /模拟写盘失败/, '写失败必须如实抛错，不许假装换好了');
   } finally { fs.writeFileSync = real; }
   assert.equal(getSecret(NAME), TOKEN, '旧值仍可用（rename 语义下不存在"旧值已作废、新值还没到"的中间态）');
   assert.equal(fs.readFileSync(FILE, 'utf8'), before, '文档逐字节未动');
-  assert.deepEqual(fake.calls, [], '没换成功就不许落账：审计里不能留下"换过"的痕迹');
+  assert.deepEqual(store.inserts(), [], '没换成功就不许落账：审计里不能留下"换过"的痕迹');
   // 障碍清掉后同一条命令能成（证明上一条失败的原因就是那个写入障碍，不是别的东西）
-  const r = await rotateSecret(NAME, TOKEN2, { db: fake });
+  const r = await rotateSecret(NAME, TOKEN2, { db: {}, store });
   assert.equal(getSecret(NAME), TOKEN2);
-  assert.equal(fake.inserts().length, 1, '这次才落账');
+  assert.equal(store.inserts().length, 1, '这次才落账');
   assert.equal(r.fingerprint, secretFingerprint(TOKEN2));
 });
 
@@ -142,17 +151,16 @@ test('fingerprint：8 位十六进制、同值稳定、换值就变（"换没换
 // ── ④⑤ 落账 ─────────────────────────────────────────────────────────────────────
 test('落账：cred:rotate 一条，detail 只含 name 与 fingerprint，绝不含值', async () => {
   setSecret(NAME, TOKEN);
-  const fake = new FakeDb();
-  const r = await rotateSecret(NAME, TOKEN2, { db: fake, accountId: 7 });
-  assert.equal(fake.inserts().length, 1);
-  const [params] = fake.inserts();
-  assert.deepEqual(params, [7, 'cred:rotate', 'name=' + NAME + ' fingerprint=' + r.fingerprint]);
-  assert.equal(JSON.stringify(params).includes(TOKEN2), false, '账本里绝不能出现明文');
-  assert.match(fake.calls[0].sql, /INSERT INTO audit_log \(account_id, action, detail\) VALUES \(\?,\?,\?\)/, '沿用既有 audit_log 的写法');
+  const store = new FakeStore();
+  const r = await rotateSecret(NAME, TOKEN2, { db: {}, store, accountId: 7 });
+  assert.equal(store.inserts().length, 1);
+  const [fields] = store.inserts();
+  assert.deepEqual(fields, { accountId: 7, action: 'cred:rotate', detail: 'name=' + NAME + ' fingerprint=' + r.fingerprint });
+  assert.equal(JSON.stringify(fields).includes(TOKEN2), false, '账本里绝不能出现明文');
   // 不传 accountId（CLI 场景：没有会话/用户）⇒ null，而不是 0 或 undefined 混进列
-  const fake2 = new FakeDb();
-  await rotateSecret(NAME, TOKEN, { db: fake2 });
-  assert.equal(fake2.inserts()[0][0], null);
+  const store2 = new FakeStore();
+  await rotateSecret(NAME, TOKEN, { db: {}, store: store2 });
+  assert.equal(store2.inserts()[0].accountId, null);
 });
 
 test('不传 db 就不落账（本模块不 import db.js：凭据文档的读写不依赖"库连得上"）', async () => {
@@ -167,7 +175,7 @@ test('落账失败不改判轮换结果：钥匙确实换了、调用方不抛�
   const cap = capture();
   let r;
   try {
-    r = await rotateSecret(NAME, TOKEN2, { db: new FakeDb({ fail: 'audit down' }) });
+    r = await rotateSecret(NAME, TOKEN2, { db: {}, store: new FakeStore({ fail: 'audit down' }) });
   } finally { cap.restore(); }
   assert.equal(r.fingerprint, secretFingerprint(TOKEN2), '返回的是"换成了"的描述');
   assert.equal(getSecret(NAME), TOKEN2, '轮换已经生效——报失败会诱发复跑（第二次换的是同一把，纯属白折腾）');
@@ -179,16 +187,17 @@ test('落账失败不改判轮换结果：钥匙确实换了、调用方不抛�
 // ── ⑥ CLI ───────────────────────────────────────────────────────────────────────
 test('CLI：值从 RW_CRED_VALUE 读，落一条账，输出里没有明文、也不含值参数', async () => {
   setSecret(NAME, TOKEN);
-  const fake = new FakeDb();
+  const store = new FakeStore();
   const cap = capture();
   let out;
   try {
-    out = await cliMain({ db: fake, log: cap.log, argv: ['--name', NAME], env: { RW_CRED_VALUE: TOKEN2 } });
+    out = await cliMain({ db: {}, store, log: cap.log, argv: ['--name', NAME], env: { RW_CRED_VALUE: TOKEN2 } });
   } finally { cap.restore(); }
   assert.equal(out.exitCode, 0);
   assert.deepEqual(out.result.name, NAME);
   assert.equal(getSecret(NAME), TOKEN2, 'CLI 真的换了钥匙');
-  assert.equal(fake.inserts().length, 1, 'CLI 路径也落账');
+  assert.equal(store.inserts().length, 1, 'CLI 路径也落账');
+  assert.equal(store.inserts()[0].action, 'cred:rotate');
   assert.match(cap.text(), new RegExp('fingerprint=' + out.result.fingerprint));
   assert.equal(cap.text().includes(TOKEN2), false, 'CLI 输出里不得出现明文：' + cap.text());
   assert.equal(cap.text().includes(credentialsFile()), true, '要打印凭据文档位置（排障第一件事）');
@@ -198,7 +207,7 @@ test('CLI：值从 RW_CRED_VALUE 读，落一条账，输出里没有明文、�
 test('CLI：值从 stdin 读（管道那条路）——**只剥一个**行尾换行，多出来的换行是值的一部分', async () => {
   // 为什么用"两个换行"来验：`echo` 会补一个换行，去掉它是应该的；去多了就是在改值。
   // 换行在文档里被 escape 成 `\n` 两个字符，所以这个用例同时穿过"写→读→还原"整条路。
-  const out = await cliMain({ db: new FakeDb(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: {}, readStdin: async () => 'tok en\n\n' });
+  const out = await cliMain({ db: {}, store: new FakeStore(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: {}, readStdin: async () => 'tok en\n\n' });
   assert.equal(out.exitCode, 0);
   assert.equal(getSecret(NAME), 'tok en\n', '只剥掉一个行尾换行（若实现里写了 trim，这里会变成 "tok en"）');
 });
@@ -207,13 +216,13 @@ test('（现状登记，非本次改动）行式文档格式读回时会 trim �
   // credentials.js 的 readStore 对每一行做 `line.trim()`（行式格式的既有做法），所以值里**首尾**的空格
   // 存进去也读不回来（中间的空格不受影响）。token/URL 这类值不受影响，但"CLI 没 trim"不代表"空格一定进得去"——
   // 这个区别只能靠夹具说清楚，本轮不顺手改格式（改它等于换存储格式，属于另一件事）。
-  await cliMain({ db: new FakeDb(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: {}, readStdin: async () => '  spaced  \n' });
+  await cliMain({ db: {}, store: new FakeStore(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: {}, readStdin: async () => '  spaced  \n' });
   assert.equal(getSecret(NAME), 'spaced');
 });
 
 test('CLI：**值参数当场拒绝**（argv 会进 shell 历史与 ps），退出码 2 且一个字都不写', async () => {
   await assert.rejects(
-    () => cliMain({ db: new FakeDb(), log: { log() {}, error() {} }, argv: ['--name', NAME, '--value=' + TOKEN2], env: {} }),
+    () => cliMain({ db: {}, store: new FakeStore(), log: { log() {}, error() {} }, argv: ['--name', NAME, '--value=' + TOKEN2], env: {} }),
     /不认识的参数：--value/, '把值写在命令行上必须被拦下');
   assert.equal(fs.existsSync(FILE), false, '被拒的用法不许碰凭据文档');
   await assert.rejects(() => cliMain({ log: { log() {}, error() {} }, argv: [], env: {} }), /缺少 --name/);
@@ -228,7 +237,7 @@ test('CLI：轮换失败时如实抛错（旧值仍在）——入口不吞错',
   fs.mkdirSync(tmpPath);
   try {
     await assert.rejects(
-      () => cliMain({ db: new FakeDb(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: { RW_CRED_VALUE: TOKEN2 } }),
+      () => cliMain({ db: {}, store: new FakeStore(), log: { log() {}, error() {} }, argv: ['--name', NAME], env: { RW_CRED_VALUE: TOKEN2 } }),
       undefined, '写失败必须冒到调用方（直接执行时由入口转成退出码 1）');
     assert.equal(getSecret(NAME), TOKEN, '旧值仍可用');
   } finally { fs.rmSync(tmpPath, { recursive: true, force: true }); }
