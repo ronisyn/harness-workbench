@@ -1746,10 +1746,7 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     const raw = await storage.settings.get('cache_hit_rate_target');
     let target = 0;
     if (raw != null) { const v = Number(raw); target = Number.isFinite(v) && v > 0 ? v : 0; }
-    const rows = await db.query(
-      `SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
-       FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-       GROUP BY DATE(created_at) ORDER BY d`, [req.user.id]);
+    const rows = await storage.usage.dailyByAccount({ accountId: req.user.id, days: 30 });
     const now = new Date(); const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
     const rate = (arr) => { const h = arr.reduce((s, r) => s + Number(r.hit), 0); const m = arr.reduce((s, r) => s + Number(r.miss), 0); return (h + m) > 0 ? (100 * h / (h + m)) : null; };
     const todayRow = rows.find((r) => String(r.d).slice(0, 10) === todayStr) || null;

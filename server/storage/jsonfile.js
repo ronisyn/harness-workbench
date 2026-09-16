@@ -861,6 +861,23 @@ function makeApi(holder, save, { persist }) {
         }
         return rows.map((r) => ({ h: Number(r.cacheHit || 0), m: Number(r.cacheMiss || 0), cid: r.conversationId ?? null }));
       },
+      /** 按天的逐轮读数（仪表那条 30 天线）：`d` 用**进程本地日期**（与路由算"今天"的口径一致）。 */
+      async dailyByAccount({ accountId, days = 30 } = {}) {
+        const floor = Date.now() - (Number(days) || 30) * 86400000;
+        const byDay = new Map();
+        for (const r of rowsOf('usage')) {
+          if (Number(r.accountId) !== Number(accountId) || r.kind !== 'round') continue;
+          const at = new Date(r.createdAt || 0);
+          if (at.getTime() < floor) continue;
+          const d = at.getFullYear() + '-' + String(at.getMonth() + 1).padStart(2, '0') + '-' + String(at.getDate()).padStart(2, '0');
+          const cur = byDay.get(d) || { d, hit: 0, miss: 0, n: 0 };
+          cur.hit += Number(r.cacheHit || 0);
+          cur.miss += Number(r.cacheMiss || 0);
+          cur.n += 1;
+          byDay.set(d, cur);
+        }
+        return [...byDay.values()].sort((a, b) => (a.d < b.d ? -1 : 1));
+      },
     },
 
     /**

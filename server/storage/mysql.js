@@ -672,6 +672,16 @@ function makeApi(r) {
             WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)${extra}`,
         params);
       },
+      /**
+       * **按天**的逐轮读数（仪表那条 30 天线）：`[{d, hit, miss, n}]`，`d` 是 `YYYY-MM-DD`。
+       * 形状与调用点原来那条 `GROUP BY DATE(created_at)` 逐字一致；日期口径＝**介质自己的本地日期**
+       * （MySQL 是会话时区、JSON 是进程时区）——这一点沿用改造前的口径，不改判据。
+       */
+      async dailyByAccount({ accountId, days = 30 } = {}) {
+        return r.many(`SELECT DATE(created_at) d, COALESCE(SUM(cache_hit_tokens),0) hit, COALESCE(SUM(cache_miss_tokens),0) miss, COUNT(*) n
+             FROM usage_stats u WHERE u.account_id=? AND u.kind='round' AND u.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+             GROUP BY DATE(created_at) ORDER BY d`, [accountId, Number(days) || 30]);
+      },
     },
 
     /**

@@ -321,6 +321,23 @@ function fakeMysql() {
         .map((r) => ({ h: Number(r.cache_hit_tokens || 0), m: Number(r.cache_miss_tokens || 0), cid: r.conversation_id ?? null }));
     }
 
+    // 按天读数（仪表 30 天线）：`GROUP BY DATE(created_at)` 的形状，按整段认
+    if (/^SELECT DATE\(created_at\) d, COALESCE\(SUM\(cache_hit_tokens\),0\) hit, COALESCE\(SUM\(cache_miss_tokens\),0\) miss, COUNT\(\*\) n\s+FROM usage_stats u WHERE u\.account_id=\? AND u\.kind='round' AND u\.created_at >= DATE_SUB\(NOW\(\), INTERVAL \? DAY\)\s+GROUP BY DATE\(created_at\) ORDER BY d$/i.test(q)) {
+      const acc = Number(p.shift());
+      const byDay = new Map();
+      for (const r of rowsOf(store, 'usage_stats').values()) {
+        if (Number(r.account_id) !== acc || r.kind !== 'round') continue;
+        const at = r.created_at instanceof Date ? r.created_at : new Date(r.created_at || 0);
+        const d = at.getFullYear() + '-' + String(at.getMonth() + 1).padStart(2, '0') + '-' + String(at.getDate()).padStart(2, '0');
+        const cur = byDay.get(d) || { d, hit: 0, miss: 0, n: 0 };
+        cur.hit += Number(r.cache_hit_tokens || 0);
+        cur.miss += Number(r.cache_miss_tokens || 0);
+        cur.n += 1;
+        byDay.set(d, cur);
+      }
+      return [...byDay.values()].sort((a, b) => (a.d < b.d ? -1 : 1));
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -826,6 +843,14 @@ function contractSuite(label, make, caps) {
     assert.deepEqual(await s.usage.roundRowsByAccount({ accountId: 1, days: 7, conversationIds: [] }), [], '空名单＝空结果（不是"没有条件"⇒ 不许变成全量）');
     const all = await s.usage.roundRowsByAccount({ accountId: 1, days: 7 });
     assert.equal(all.length, 3, '不传名单＝不加会话条件（保留原来那条形状）：' + JSON.stringify(all.map((r) => r.cid)));
+    // 按天读数（仪表 30 天线）：同一天的多条要合起来（hit/miss 求和、n 计数），只算 round
+    const daily = await s.usage.dailyByAccount({ accountId: 1, days: 30 });
+    assert.equal(daily.length, 1, '这一批都是同一天 ⇒ 一天一行：' + JSON.stringify(daily));
+    assert.equal(daily[0].n, 3, '三条 round 行合到一天（title 那条不算）');
+    assert.equal(daily[0].hit, 900 + 0 + 500, '命中数按天求和');
+    assert.equal(daily[0].miss, 100 + 1000 + 500, '未命中数按天求和');
+    assert.match(daily[0].d, /^\d{4}-\d{2}-\d{2}$/, 'd 是 YYYY-MM-DD（与路由算"今天"的口径一致）');
+    assert.deepEqual(await s.usage.dailyByAccount({ accountId: 12345, days: 30 }), [], '没有记账的账号＝空数组');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {
