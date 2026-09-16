@@ -608,15 +608,15 @@ app.get('/api/conversations/:id/trace', requireAuth, async (req, res) => {
     const cid = Number(req.params.id) || 0;
     const own = await convAccess(cid, req.user.id, 'shared');
     if (!own) return res.status(404).json({ ok: false, message: '会话不存在或无权查看' });
-    const audit = await db.query(
-      'SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=? OR detail LIKE ? ORDER BY id DESC LIMIT 200',
-      [cid, '%conv=' + cid + '%']);
-    const tools = await db.query('SELECT id, tool_name, status, duration_ms, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC LIMIT 200', [cid]);
-    const usage = (await db.query('SELECT COUNT(*) n, COALESCE(SUM(cost),0) cost, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout FROM usage_stats WHERE conversation_id=?', [cid]))[0] || {};
+    // 三条读法都走存储接口（2026-09-17）：迁移前它们直连 SQL ⇒ 干净机器上这一页整页失败。
+    // 行形状（列名）与改造前逐字一致（前端 `web/dist` 读的就是这些名字）。
+    const audit = await storage.audit.traceByConversation({ conversationId: cid, limit: 200 });
+    const tools = await storage.toolCalls.traceByConversation({ conversationId: cid, limit: 200 });
+    const usage = await storage.usage.summaryByConversation(cid);
     res.json({
       ok: true, conversation: { id: own.id, title: own.title, shell_id: own.shellId ?? null },
       audit: audit.map((r) => ({ ...r, detail: r.detail ? redactSecrets(String(r.detail)) : r.detail })),
-      toolCalls: tools, usage: { calls: Number(usage.n || 0), cost: Number(usage.cost || 0), tokensIn: Number(usage.tin || 0), tokensOut: Number(usage.tout || 0) },
+      toolCalls: tools, usage: { calls: usage.calls, cost: usage.cost, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut },
     });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });

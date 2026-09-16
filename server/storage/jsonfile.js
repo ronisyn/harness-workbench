@@ -524,6 +524,13 @@ function makeApi(holder, save, { persist }) {
         const rows = rowsOf('toolCalls').filter((r) => Number(r.conversationId) === Number(conversationId)).reverse();
         return snap(Number.isFinite(Number(limit)) && Number(limit) > 0 ? rows.slice(0, Number(limit)) : rows);
       },
+      /** 展示列形状（`/trace` 用；列名与 mysql 侧那条 SQL 逐字一致）。 */
+      async traceByConversation({ conversationId, limit = 200 } = {}) {
+        let rows = rowsOf('toolCalls').filter((r) => Number(r.conversationId) === Number(conversationId)).reverse();
+        const n = Number(limit);
+        rows = rows.slice(0, Number.isInteger(n) && n > 0 ? n : 200);
+        return rows.map((r) => ({ id: r.id, tool_name: r.toolName ?? null, status: r.status ?? null, duration_ms: r.durationMs ?? 0, created_at: r.createdAt ?? null }));
+      },
       /**
        * 把本会话**尚未归属**的工具调用挂到刚落的这条 assistant 消息上（对应 `server/index.js:1410` 的轨迹回填）。
        * `messageId` 为空的才算"没人认领过"（与 mysql 侧 `message_id IS NULL` 同一条判据）。返回认领了几条。
@@ -825,6 +832,16 @@ function makeApi(holder, save, { persist }) {
         await commit();
         return { id: rec.id };
       },
+      /** 某会话的用量合计（`/trace` 的 usage 段）：口径与 mysql 侧那条聚合查询一致。 */
+      async summaryByConversation(conversationId) {
+        const rows = rowsOf('usage').filter((r) => Number(r.conversationId) === Number(conversationId));
+        return {
+          calls: rows.length,
+          cost: rows.reduce((a, r) => a + Number(r.cost || 0), 0),
+          tokensIn: rows.reduce((a, r) => a + Number(r.tokensIn || 0), 0),
+          tokensOut: rows.reduce((a, r) => a + Number(r.tokensOut || 0), 0),
+        };
+      },
     },
 
     /**
@@ -874,6 +891,17 @@ function makeApi(holder, save, { persist }) {
           out.set(word, (out.get(word) || 0) + 1);
         }
         return [...out.entries()].map(([reason, n]) => ({ reason, n })).sort((a, b) => b.n - a.n);
+      },
+      /** 按会话回溯（`/trace`）：挂在该会话上的 **＋** detail 里带 `conv=<id>` 的，列名与 mysql 侧逐字一致。 */
+      async traceByConversation({ conversationId, limit = 200 } = {}) {
+        const cid = Number(conversationId);
+        const needle = 'conv=' + cid;
+        let rows = rowsOf('audit').filter((r) => Number(r.conversationId) === cid || String(r.detail ?? '').includes(needle));
+        rows = rows.slice().reverse();
+        const n = Number(limit);
+        if (Number.isInteger(n) && n > 0) rows = rows.slice(0, n);
+        else rows = rows.slice(0, 200);
+        return rows.map((r) => ({ id: r.id, action: r.action, detail: r.detail ?? null, shell_id: r.shellId ?? null, created_at: r.createdAt ?? null }));
       },
     },
 

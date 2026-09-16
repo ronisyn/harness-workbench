@@ -340,6 +340,12 @@ function makeApi(r) {
         const rows = await r.many(`SELECT * FROM tool_calls WHERE conversation_id=? ORDER BY id DESC${limitClause(limit)}`, [conversationId]);
         return rows.map((row) => toRecord('toolCalls', row));
       },
+      /** 展示列形状（`/trace` 用；与那条既有 SQL 的列名逐字一致：`tool_name`/`duration_ms`/`created_at`）。 */
+      async traceByConversation({ conversationId, limit = 200 } = {}) {
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? ` LIMIT ${n}` : ' LIMIT 200';
+        return r.many('SELECT id, tool_name, status, duration_ms, created_at FROM tool_calls WHERE conversation_id=? ORDER BY id DESC' + lim, [conversationId]);
+      },
       /**
        * 把本会话**尚未归属**的工具调用挂到刚落的这条 assistant 消息上（`server/index.js:1410` 的轨迹回填：
        * `UPDATE tool_calls SET message_id=? WHERE conversation_id=? AND message_id IS NULL`）。
@@ -635,6 +641,12 @@ function makeApi(r) {
         const { sql, params } = insertOf('usage', fields);
         return { id: (await r.exec(sql, params)).insertId };
       },
+      /** 某会话的用量合计（`/trace` 的 usage 段）：形状与调用点原来那条聚合查询逐字一致。 */
+      async summaryByConversation(conversationId) {
+        const row = await r.one('SELECT COUNT(*) n, COALESCE(SUM(cost),0) cost, COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout FROM usage_stats WHERE conversation_id=?', [conversationId]);
+        const u = row || {};
+        return { calls: Number(u.n || 0), cost: Number(u.cost || 0), tokensIn: Number(u.tin || 0), tokensOut: Number(u.tout || 0) };
+      },
     },
 
     /**
@@ -681,6 +693,16 @@ function makeApi(r) {
       async countByFirstToken(action) {
         const rows = await r.many("SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=? GROUP BY r ORDER BY n DESC", [action]);
         return rows.map((row) => ({ reason: row.r, n: Number(row.n || 0) }));
+      },
+      /**
+       * **按会话回溯**（`GET /api/conversations/:id/trace`）：挂在该会话上的行 **＋** detail 里带 `conv=<id>`
+       * 的行（后者是那些"没有会话归属、但在说明里点了会话"的动作——口径逐字沿用改造前那条 SQL）。
+       */
+      async traceByConversation({ conversationId, limit = 200 } = {}) {
+        const n = Number(limit);
+        const lim = Number.isInteger(n) && n > 0 ? ` LIMIT ${n}` : ' LIMIT 200';
+        return r.many('SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=? OR detail LIKE ? ORDER BY id DESC' + lim,
+          [conversationId, '%conv=' + conversationId + '%']);
       },
     },
 

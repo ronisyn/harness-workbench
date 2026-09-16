@@ -248,6 +248,22 @@ function fakeMysql() {
       return [...counts.entries()].map(([r, n]) => ({ r, n })).sort((a, b) => b.n - a.n);
     }
 
+    // `/trace` 的三条读法（2026-09-17）：审计的 OR-LIKE 形状 + 用量聚合的形状，按整段认。
+    if ((m = /^SELECT id, action, detail, shell_id, created_at FROM audit_log WHERE conversation_id=\? OR detail LIKE \? ORDER BY id DESC LIMIT (\d+)$/i.exec(q))) {
+      const cid = Number(p.shift()); const like = String(p.shift()); const lim = Number(m[1]);
+      const needle = like.replace(/%/g, '');
+      return [...rowsOf(store, 'audit_log').values()]
+        .filter((r) => Number(r.conversation_id) === cid || String(r.detail ?? '').includes(needle))
+        .sort((a, b) => Number(b.id) - Number(a.id)).slice(0, lim)
+        .map((r) => ({ id: r.id, action: r.action, detail: r.detail ?? null, shell_id: r.shell_id ?? null, created_at: r.created_at ?? null }));
+    }
+    if ((m = /^SELECT COUNT\(\*\) n, COALESCE\(SUM\(cost\),0\) cost, COALESCE\(SUM\(tokens_in\),0\) tin, COALESCE\(SUM\(tokens_out\),0\) tout FROM usage_stats WHERE conversation_id=\?$/i.exec(q))) {
+      const cid = Number(p.shift());
+      const rows = [...rowsOf(store, 'usage_stats').values()].filter((r) => Number(r.conversation_id) === cid);
+      const sum = (k) => rows.reduce((a, r) => a + Number(r[k] || 0), 0);
+      return [{ n: rows.length, cost: sum('cost'), tin: sum('tokens_in'), tout: sum('tokens_out') }];
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -622,6 +638,13 @@ function contractSuite(label, make, caps) {
     await assert.rejects(() => s.usage.append({ conversationId: 42, tokensIn: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '缺 kind 必须当场拒写');
     // 字段白名单：拼错的字段名不许静默吞掉
     await assert.rejects(() => s.usage.append({ kind: 'round', tokenIn: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '拼错字段名必须报错');
+    // 会话用量合计（`/trace` 的 usage 段）：只有挂了会话的两条算进来（预热那条没有会话归属 ⇒ 不计）
+    const sum1 = await s.usage.summaryByConversation(42);
+    assert.equal(sum1.calls, 2, '预热那条不带 conversationId ⇒ 不进这个会话的合计：' + JSON.stringify(sum1));
+    assert.equal(sum1.tokensIn, 2000);
+    assert.equal(sum1.tokensOut, 290);
+    assert.ok(Math.abs(sum1.cost - 0.0073) < 1e-9, 'cost = 0.0042 + 0.0031：' + sum1.cost);
+    assert.deepEqual(await s.usage.summaryByConversation(999), { calls: 0, cost: 0, tokensIn: 0, tokensOut: 0 }, '空会话＝全 0（不是 null）');
   });
 
   // ── 审计账写口（2026-09-17）：v0.3 §4.6「预算与审计：本地兜底」────────────────────────────
@@ -698,6 +721,13 @@ function contractSuite(label, make, caps) {
     assert.deepEqual(await s.audit.countByFirstToken('prefix:exempt'), [{ reason: 'first-round', n: 1 }, { reason: 'idle', n: 1 }], '首词分布（同数时顺序不保证，这里两条各 1）');
     assert.deepEqual(await s.audit.countByFirstToken('prefix:invalidate'), [{ reason: 'fp=a', n: 1 }], '首词＝detail 里第一个空格前那段');
     assert.deepEqual(await s.audit.countByFirstToken('没有这个动作'), [], '没发生过＝空数组');
+    // 按会话回溯（`/trace`）：挂在会话上的 **＋** detail 里带 conv=<id> 的（后者没有会话归属）
+    await s.audit.append({ accountId: 1, action: 'skill:save', detail: 'name=x conv=7', conversationId: null });
+    const trace = await s.audit.traceByConversation({ conversationId: 7, limit: 50 });
+    assert.equal(trace.some((r) => r.detail === 'name=x conv=7'), true, 'detail 里点了会话的行也要回溯得到（既有口径）');
+    assert.deepEqual(Object.keys(trace[0]).sort(), ['action', 'created_at', 'detail', 'id', 'shell_id'], '列名与改造前那条 SQL 逐字一致（前端读它们）');
+    assert.ok(trace.length <= 50, 'limit 生效');
+    assert.deepEqual(await s.audit.traceByConversation({ conversationId: 999, limit: 5 }), [], '没这个会话＝空数组');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {
