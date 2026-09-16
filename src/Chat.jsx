@@ -674,6 +674,11 @@ export default function Chat({ user, onLogout, onGoHome, onGoConsole, initialCon
             patchLast((x) => ({ ...x, streaming: false, thinking: false, error: msg }));
             // 错误结束不自动续发队列：避免“停止”误触发排队消息自动发送；用户可再次回车/发送续上
           },
+          // RA-37 G5 的**回落**那一半（2026-09-18，裁定 B）：只有服务端在续订开播帧里如实说
+          // `stream_hello.gap === true`（环已回收，seq 断了）时才会走到这里 —— 本地那份重建不完整，
+          // 用既有的 loadMessages（/messages 全量）把这一轮重新对齐。gap:false 时根本不会回调，
+          // 界面**不做无谓的全量拉取**（那会把"其实没漏"读成漏）。
+          onReload: (cid) => { if (curRef.current === cid) loadMessages(cid).catch(() => {}); },
         },
         ac.signal);
     } catch (ex) {

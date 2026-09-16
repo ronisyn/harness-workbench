@@ -1,4 +1,6 @@
 // src/api.js - 前端 API 封装（含 SSE 流式）
+// 2026-09-18：流式那一半接到 `src/eventstream.js`（RA-37 客户端重建器）——判别/重建只有那一份实现。
+import { applyEvent, createRunView, lastSeq, parseSse, resumeDecision } from './eventstream.js';
 const TOKEN_KEY = 'rw_token';
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
@@ -140,8 +142,80 @@ export const api = {
 // M1：onIntent / onRoute —— 意图识别与档案路由的灰字回显（系统行，不入历史；§6.1/6.2/§8）
 // 2026-09-17：onProgress —— 进度帧 `{type:'progress', round, roundCap, plan}`（v0.3 §4.7「可观测…进度…逐步可见」）；
 //   另：`tool_done` 的 tool 上可能多一个**只增**字段 `spill`（真的发生了溢出时才有，见 src/Chat.jsx 的展示）。
+// 2026-09-18（裁定 B 落地）：**判别与重建交给 `src/eventstream.js`**（RA-37 的客户端重建器），
+//   本函数不再自己 `JSON.parse` + 一长串 if/else —— 那正是"契约写了一份、客户端另实现一份"的老毛病：
+//   契约新增事件时，重建器认得、这个 switch 不认得，于是界面上表现为"事件丢了"而没有任何报错。
+//   现在：帧 → `applyEvent` 进视图 → **由视图的字段变化驱动回调**（回调面与改造前逐字一致，UI 不用改）。
+//   同时补上 RA-37 G5「断线重连不丢现场」：POST 流**没收到收段帧就断了**（网络抖动/服务重启）时，
+//   自动按 `Last-Event-ID` 续订；只有开播帧如实说 `gap:true`（环已回收）才回落 /messages 拉全量，
+//   回落通过 `handlers.onReload?.(conversationId)` 交给界面（界面本来就有 loadMessages）。
 export async function streamChat({ conversationId, content, provider, model }, handlers, signal) {
-  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onProgress, onApproval, onAsk, onIntent, onRoute, onDone, onError } = handlers || {};
+  const h = handlers || {};
+  const { onDelta, onThinking, onThink, onToolStart, onToolDone, onPlan, onProgress, onApproval, onAsk, onIntent, onRoute, onDone, onError } = h;
+  let view = createRunView();
+  // 一帧 → 视图 → 回调。返回新视图（重建器是纯函数，这里只负责"哪一格变了就叫哪个回调"）。
+  const consume = (ev, prev) => {
+    const next = applyEvent(prev, ev);
+    switch (ev.type) {
+      case 'delta': onDelta?.(String(ev.delta ?? '')); break;
+      case 'thinking': onThinking?.(ev.round); break;
+      case 'think': onThink?.(ev.text); break;
+      case 'tool_start': onToolStart?.(ev.tool); break;
+      case 'tool_done': onToolDone?.(ev.tool); break;
+      case 'plan': onPlan?.(ev.plan); break;
+      case 'progress': onProgress?.(ev); break;
+      case 'approval': onApproval?.(ev); break;
+      case 'ask': onAsk?.(ev); break;
+      case 'intent': onIntent?.(ev); break;
+      case 'route': onRoute?.(ev); break;
+      case 'done': onDone?.(ev.usage || {}); break;
+      case 'error': onError?.(ev.message); break;
+      default: break;   // 其余（run_start/stream_hello/stream_end/prefix_face…）只进视图，不改界面
+    }
+    return next;
+  };
+  // 读一条 SSE 流：按 chunk 增量切帧（传输层的事），切出来的每帧交给重建器（语义层的事）。
+  // `stopAtGap`：续订时**只看开播帧**——服务端如实说"你要的下一条已被环回收"就立刻停，
+  // 把后续那半截（从环里还能捞到的、不连续的事件）**丢掉**：把它接到本地不完整的视图上，
+  // 拼出来的正文就是错的，而错得看不出来（这正是"断线重连不丢现场"要防的）。
+  const pump = async (body, { stopAtGap = false } = {}) => {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const feed = async (text) => {
+      const parts = text.split('\n\n');
+      buf = parts.pop() ?? '';
+      for (const part of parts) {
+        for (const ev of parseSse(part)) {
+          view = consume(ev, view);
+          if (stopAtGap && ev.type === 'stream_hello' && resumeDecision(view) === 'reload') {
+            try { await reader.cancel(); } catch { /* 取消失败不影响结论 */ }
+            return 'reload';
+          }
+        }
+      }
+      return null;
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const stop = await feed(buf);
+      if (stop) return stop;
+    }
+    if (buf.trim()) await feed(buf + '\n\n');
+    return 'end';
+  };
+  const terminal = () => ['done', 'stopped', 'error'].includes(view.status) || view.contentLength !== null;
+  // 续订（GET /api/conversations/:id/stream）：带标准头 Last-Event-ID，从视图的游标接着要
+  const resumeOnce = async () => {
+    const res2 = await fetch('/api/conversations/' + conversationId + '/stream', {
+      headers: { Authorization: 'Bearer ' + getToken(), 'Last-Event-ID': String(lastSeq(view)) },
+      signal,
+    });
+    if (!res2.ok || !res2.body) throw new Error('续订失败（HTTP ' + res2.status + '）');
+    return pump(res2.body, { stopAtGap: true });
+  };
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + getToken() },
@@ -152,34 +226,16 @@ export async function streamChat({ conversationId, content, provider, model }, h
     const j = await res.json().catch(() => ({}));
     throw new Error(j.message || '对话失败');
   }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const parts = buf.split('\n\n');
-    buf = parts.pop() ?? '';
-    for (const part of parts) {
-      const line = part.split('\n').find((l) => l.startsWith('data:'));
-      if (!line) continue;
-      try {
-        const j = JSON.parse(line.slice(5).trim());
-        if (j.type === 'delta') onDelta?.(j.delta);
-        else if (j.type === 'thinking') onThinking?.(j.round);
-        else if (j.type === 'think') onThink?.(j.text);
-        else if (j.type === 'tool_start') onToolStart?.(j.tool);
-        else if (j.type === 'tool_done') onToolDone?.(j.tool);
-        else if (j.type === 'plan') onPlan?.(j.plan);
-        else if (j.type === 'progress') onProgress?.(j);
-        else if (j.type === 'approval') onApproval?.(j);
-        else if (j.type === 'ask') onAsk?.(j);
-        else if (j.type === 'intent') onIntent?.(j);
-        else if (j.type === 'route') onRoute?.(j);
-        else if (j.type === 'done') onDone?.(j.usage || {});
-        else if (j.type === 'error') onError?.(j.message);
-      } catch { /* ignore */ }
+  await pump(res.body);
+  // 传输断了但这一轮**没有收段** ⇒ 现场还在服务端（事件环里），按序号续订，不重新发一遍问题
+  if (!terminal() && !(signal && signal.aborted)) {
+    const how = await resumeOnce();
+    if (how === 'reload') {
+      // 服务端如实说了"你要的下一条已经被环回收"：本地这份重建不完整，交给界面回落 /messages 拉全量
+      h.onReload?.(conversationId);
+    } else if (!terminal()) {
+      onError?.('连接中断，已按序号续订仍未收段（现场见 /messages）');
     }
   }
+  return view;
 }

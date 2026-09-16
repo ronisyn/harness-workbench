@@ -201,6 +201,30 @@ export function rebuild(input) {
 }
 
 /**
+ * 视图里"最后见过的序号"（没有就是 0）——**续订就靠它**：断线后客户端把这个数当 `Last-Event-ID`
+ * 发回去，服务端从 seq+1 接着发（`GET /api/conversations/:id/stream` 认这个标准头）。
+ * 单独导出一个函数而不是让调用方去读 `view.__lastSeq`：那是重建器的内部游标，
+ * 调用方（`src/api.js` 的续订路径）该读的是一个有名有姓的口径。
+ */
+export function lastSeq(view) {
+  const n = Number(view && view.__lastSeq);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * **要不要回落 /messages**（RA-37 G5 的决策那一半，纯函数、可夹具）：
+ * 只有服务端在开播帧里如实说了"你要的下一条已经被环回收"（`stream_hello.gap === true`）才回落；
+ * 其余情况一律**续订**（`gap:false` ＝ 中间没漏，继续跟播）。
+ * 为什么不自己推：环的大小与回收时机在服务端（300 条 / 结束后 60s），客户端推不出来，
+ * 猜错的代价是把"其实没漏"读成漏（白拉一次全量）或把"真漏了"读成没漏（正文缺一段）。
+ */
+export function resumeDecision(view) {
+  const hello = view && view.hello;
+  if (!hello) return 'resume';               // 还没见到开播帧：先接着听
+  return hello.gap === true ? 'reload' : 'resume';
+}
+
+/**
  * RA-37 保真判定：把"事件流重建出来的东西"与服务端事实对账。
  * 纯函数——ground truth 由调用方提供（夹具用合成真值，实测脚本用 DB 查出来的真值）。
  * @param {object} view rebuild() 的结果
