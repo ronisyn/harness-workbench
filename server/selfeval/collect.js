@@ -552,7 +552,7 @@ export function buildSnapshot(raw) {
 }
 
 /** 采集全流程（查库 + 成型）；CLI 与 `propose.js` 都用它，保证两处拿到的是同一份快照。 */
-export async function collectSnapshot({ dbc = db, days = DEFAULT_DAYS, cutoff = null, at = new Date(), root = ROOT, code = null } = {}) {
+export async function collectSnapshot({ dbc = storage, days = DEFAULT_DAYS, cutoff = null, at = new Date(), root = ROOT, code = null } = {}) {
   const [usage, ledger, failures, canary, pipeline] = await Promise.all([
     collectUsage({ dbc, days, cutoff }),
     collectLedger({ dbc, days }),
