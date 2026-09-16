@@ -750,7 +750,7 @@
         },
         {
           "file": "server/tools/index.js",
-          "pattern": "error_code"
+          "pattern": "errorCode: errCode"
         },
         {
           "file": "server/migrations.js",
