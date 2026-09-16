@@ -224,6 +224,30 @@ function fakeMysql() {
       }));
     }
 
+    // 审计的 GROUP BY 计数（`audit.countByAction`，C4/C5 仪表用）：按**整段形状**认（前面的理由同）。
+    if ((m = /^SELECT action, COUNT\(\*\) n FROM audit_log WHERE action IN \(([?\s,]+)\) GROUP BY action$/i.exec(q))) {
+      const n = (m[1].match(/\?/g) || []).length;
+      const want = new Set(Array.from({ length: n }, () => p.shift()));
+      const counts = new Map();
+      for (const row of rowsOf(store, 'audit_log').values()) {
+        if (!want.has(row.action)) continue;
+        counts.set(row.action, (counts.get(row.action) || 0) + 1);
+      }
+      return [...counts.entries()].map(([action, c]) => ({ action, n: c }));
+    }
+
+    // 审计的"首词分布"（`audit.countByFirstToken`，C5 豁免原因）：SUBSTRING_INDEX 的形状按整段认。
+    if ((m = /^SELECT SUBSTRING_INDEX\(detail, ' ', 1\) r, COUNT\(\*\) n FROM audit_log WHERE action=\? GROUP BY r ORDER BY n DESC$/i.exec(q))) {
+      const action = p.shift();
+      const counts = new Map();
+      for (const row of rowsOf(store, 'audit_log').values()) {
+        if (row.action !== action) continue;
+        const w = String(row.detail ?? '').split(' ')[0] || '?';
+        counts.set(w, (counts.get(w) || 0) + 1);
+      }
+      return [...counts.entries()].map(([r, n]) => ({ r, n })).sort((a, b) => b.n - a.n);
+    }
+
     // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
     if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
@@ -652,6 +676,28 @@ function contractSuite(label, make, caps) {
     assert.equal((await s.knowledge.adminList({ accountId: 1, ids: [all[3].id] }))[0].related_component, 'agent', 'related_component 要真的写进去（治理视图读它）');
     assert.deepEqual(await s.knowledge.updateOwned(all[3].id, 999, { status: 'active' }), { updated: false }, '别人的账号改不动');
     await assert.rejects(() => s.knowledge.updateOwned(all[3].id, 1, { accountId: 2 }), (e) => e.code === STORAGE_INVALID_FIELD, '身份字段不许从管理面改');
+  });
+
+  // ── 审计读法（2026-09-17）：C4/C5 仪表要的两条（各动作计数 + 某动作最后一行） ────────────────────
+  test(T('审计读法：countByAction（C4/C5 计数）与 lastByAction（最近一次失效）'), async () => {
+    const { storage: s } = make();
+    await s.audit.append({ accountId: 1, action: 'prefix:invalidate', detail: 'fp=a cnt=1' });
+    await s.audit.append({ accountId: 1, action: 'prefix:exempt', detail: 'first-round' });
+    await s.audit.append({ accountId: 1, action: 'prefix:exempt', detail: 'idle' });
+    await s.audit.append({ accountId: 1, action: 'tool:read_file', detail: '{}' });
+    const counts = await s.audit.countByAction({ actions: ['prefix:invalidate', 'prefix:exempt', 'prefix:collapse'] });
+    const asMap = Object.fromEntries(counts.map((r) => [r.action, r.n]));
+    assert.deepEqual(asMap, { 'prefix:invalidate': 1, 'prefix:exempt': 2 }, '只数点名的三个动作（没出现的动作不补 0——与 GROUP BY 的语义一致）');
+    assert.deepEqual(await s.audit.countByAction({ actions: [] }), [], '空名单＝空结果（不查库、也不许变成"数全部"）');
+    // lastByAction：最后一行（同一 action 多条时取 id 最大的那条）
+    const last = await s.audit.lastByAction('prefix:exempt');
+    assert.equal(last.detail, 'idle', '要最后落的那条（id DESC LIMIT 1）');
+    assert.ok(last.createdAt, '要带介质时间戳（C4 仪表报"最近一次什么时候"）');
+    assert.equal(await s.audit.lastByAction('prefix:collapse'), null, '没发生过的动作＝null（不是空对象）');
+    // countByFirstToken：C5 的"豁免原因"分布（detail 的首词），多的在前
+    assert.deepEqual(await s.audit.countByFirstToken('prefix:exempt'), [{ reason: 'first-round', n: 1 }, { reason: 'idle', n: 1 }], '首词分布（同数时顺序不保证，这里两条各 1）');
+    assert.deepEqual(await s.audit.countByFirstToken('prefix:invalidate'), [{ reason: 'fp=a', n: 1 }], '首词＝detail 里第一个空格前那段');
+    assert.deepEqual(await s.audit.countByFirstToken('没有这个动作'), [], '没发生过＝空数组');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {

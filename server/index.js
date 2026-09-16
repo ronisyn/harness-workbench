@@ -1804,19 +1804,17 @@ app.get('/api/cache-hit/summary', requireAuth, async (req, res) => {
     try {
       // C4/C5 账本与 C1/C2 不同：它们本来就跨账号（预热/换纪元账没有账号），且是**平台级**失效，
       // 所以这里不按 account_id 过滤 —— 口径差异如实公布在 definition 里，避免"两个数各说各话"。
-      const led = await db.query(
-        `SELECT action, COUNT(*) n FROM audit_log WHERE action IN (?,?,?) GROUP BY action`,
-        [PREFIX_LEDGER.INVALIDATE, PREFIX_LEDGER.EXEMPT, PREFIX_LEDGER.COLLAPSE]);
-      const lastInv = await db.query(`SELECT created_at, detail FROM audit_log WHERE action=? ORDER BY id DESC LIMIT 1`, [PREFIX_LEDGER.INVALIDATE]);
-      const ex = await db.query(`SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=? GROUP BY r ORDER BY n DESC`, [PREFIX_LEDGER.EXEMPT]);
-      const byAction = (a) => Number(((led || []).find((r) => r.action === a) || {}).n || 0);
+      const led = await storage.audit.countByAction({ actions: [PREFIX_LEDGER.INVALIDATE, PREFIX_LEDGER.EXEMPT, PREFIX_LEDGER.COLLAPSE] });
+      const lastInv = await storage.audit.lastByAction(PREFIX_LEDGER.INVALIDATE);
+      const ex = await storage.audit.countByFirstToken(PREFIX_LEDGER.EXEMPT);
+      const byAction = (a) => Number((led.find((r) => r.action === a) || {}).n || 0);
       const byReason = {};
-      for (const r of (ex || [])) byReason[String(r.r || '?')] = Number(r.n || 0);
+      for (const r of ex) byReason[String(r.reason || '?')] = Number(r.n || 0);
       c4 = {
         count: byAction(PREFIX_LEDGER.INVALIDATE),
         definition: '非预期整段前缀作废次数（不含首轮、切模型、折叠边界、长空闲、工具面变更）；机检口径=账本 prefix:invalidate 行数',
-        lastAt: lastInv && lastInv[0] ? lastInv[0].created_at : null,
-        lastDetail: lastInv && lastInv[0] ? redactSecrets(String(lastInv[0].detail || '')).slice(0, 200) : null,
+        lastAt: lastInv ? lastInv.createdAt : null,
+        lastDetail: lastInv ? redactSecrets(String(lastInv.detail || '')).slice(0, 200) : null,
         fromLedger: 'audit_log（全账号；C1/C2 是当前账号口径——两者范围不同，勿混用）',
       };
       const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);

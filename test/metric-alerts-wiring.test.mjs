@@ -51,6 +51,18 @@ const summary = async () => {
 before(async () => {
   WS = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-metric-alerts-'));
   LINES = path.join(WS, 'metric-alert-lines.txt');
+  // 账本行**铺进 JSON 介质**（2026-09-17 起审计读法走存储接口 ⇒ 读数来自介质，不再来自假 db）：
+  //   3 行 prefix:invalidate（C4）＋ 12 行 prefix:exempt 且 detail 首词都是 first-round（C5 的原因分布）。
+  //   为什么必须铺：这个夹具的 RW_STORAGE=jsonfile（干净机器形态）——C4/C5 本来就该从**本地账本**读出来，
+  //   这正是"本地兜底"要的性质；以前那两张数来自假 db 的罐头行，是把"账本在库里"当成了前提。
+  const seed = {
+    format: 'rw-store-json', version: 1, tables: { audit: {} }, counters: { audit: 15 },
+  };
+  let id = 0;
+  for (let i = 0; i < 3; i++) seed.tables.audit[String(++id)] = { id, accountId: null, action: 'prefix:invalidate', detail: 'fp=deadbeef cnt=3 peak=5 lane=abc', shellId: null, conversationId: 1, createdAt: '2026-09-17T09:00:00.000Z' };
+  for (let i = 0; i < 12; i++) seed.tables.audit[String(++id)] = { id, accountId: null, action: 'prefix:exempt', detail: 'first-round fp=abc cnt=1', shellId: null, conversationId: 1, createdAt: '2026-09-17T09:00:0' + (i % 10) + '.000Z' };
+  fs.mkdirSync(path.join(WS, 'storage'), { recursive: true });
+  fs.writeFileSync(path.join(WS, 'storage', 'rw-store.json'), JSON.stringify(seed, null, 2), 'utf8');
   const port = await freePort();
   BASE = 'http://127.0.0.1:' + port;
   child = spawn(process.execPath, ['--import', SHELL, path.join('server', 'index.js')], {

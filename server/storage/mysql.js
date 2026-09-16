@@ -656,6 +656,32 @@ function makeApi(r) {
           [conversationId, action]);
         return row ? row.detail : null;
       },
+      /**
+       * 某动作的**最后一行**（`{createdAt, detail}`；没有则 null）—— C4 仪表要报"最近一次非预期失效是什么时候、
+       * 什么原因"（`/api/agent/capabilities`）。与 `lastDetail` 分开是因为那条带会话维（跨轮前缀账专用）。
+       */
+      async lastByAction(action) {
+        const row = await r.one('SELECT created_at, detail FROM audit_log WHERE action=? ORDER BY id DESC LIMIT 1', [action]);
+        return row ? { createdAt: row.created_at, detail: row.detail } : null;
+      },
+      /**
+       * 各动作的条数（C4/C5 仪表）：`actions` 给了就只数这几个（`IN (...)`），不给数全部。
+       * 返回 `[{action, n}]`——形状与调用点原来那条 `GROUP BY` 查询逐字一致。
+       */
+      async countByAction({ actions = null } = {}) {
+        if (Array.isArray(actions) && !actions.length) return [];
+        const where = Array.isArray(actions) ? ` WHERE action IN (${actions.map(() => '?').join(',')})` : '';
+        const rows = await r.many(`SELECT action, COUNT(*) n FROM audit_log${where} GROUP BY action`, actions || []);
+        return rows.map((row) => ({ action: row.action, n: Number(row.n || 0) }));
+      },
+      /**
+       * 某动作的**首词分布**（C5 豁免原因：`prefix:exempt` 的 detail 形如 `first-round …`）：
+       * `SUBSTRING_INDEX(detail,' ',1)` 是 MySQL 的"取第一个空格前那段"，返回 `[{reason, n}]`（多的在前）。
+       */
+      async countByFirstToken(action) {
+        const rows = await r.many("SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=? GROUP BY r ORDER BY n DESC", [action]);
+        return rows.map((row) => ({ reason: row.r, n: Number(row.n || 0) }));
+      },
     },
 
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */

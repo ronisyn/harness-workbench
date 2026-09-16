@@ -849,6 +849,32 @@ function makeApi(holder, save, { persist }) {
           .pop();
         return hit ? hit.detail : null;
       },
+      /** 某动作的最后一行（`{createdAt, detail}`；没有则 null）：与 mysql 侧那条 `ORDER BY id DESC LIMIT 1` 同义。 */
+      async lastByAction(action) {
+        const hit = rowsOf('audit').filter((r) => r.action === action).pop();
+        return hit ? { createdAt: hit.createdAt ?? null, detail: hit.detail ?? null } : null;
+      },
+      /** 各动作的条数（`[{action, n}]`）：语义与 mysql 侧那条 `GROUP BY action` 相同。 */
+      async countByAction({ actions = null } = {}) {
+        const want = Array.isArray(actions) ? new Set(actions) : null;
+        if (want && !want.size) return [];
+        const out = new Map();
+        for (const r of rowsOf('audit')) {
+          if (want && !want.has(r.action)) continue;
+          out.set(r.action, (out.get(r.action) || 0) + 1);
+        }
+        return [...out.entries()].map(([action, n]) => ({ action, n }));
+      },
+      /** 某动作的**首词分布**（C5 豁免原因）：与 mysql 侧 `SUBSTRING_INDEX(detail,' ',1)` 同义（取第一个空格前那段）。 */
+      async countByFirstToken(action) {
+        const out = new Map();
+        for (const r of rowsOf('audit')) {
+          if (r.action !== action) continue;
+          const word = String(r.detail ?? '').split(' ')[0] || '?';
+          out.set(word, (out.get(word) || 0) + 1);
+        }
+        return [...out.entries()].map(([reason, n]) => ({ reason, n })).sort((a, b) => b.n - a.n);
+      },
     },
 
     // ── 外部投递记录（幂等键 + 死信落点）：语义与 mysql 实现逐条对齐 ──────────────────────────    // 为什么它必须在第二个实现里也有：带 `Idempotency-Key` 的 `POST /api/chat` 第一件事就是 `beginDelivery`，
