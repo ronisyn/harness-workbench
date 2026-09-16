@@ -91,6 +91,10 @@ export const CONTRACT = {
     settings: ['get', 'set', 'all', 'getMany'],
     agentRuns: ['create', 'getLatest', 'update'],
     events: ['append', 'read'],
+    // 用量记账（2026-09-17 加**写口**）：v0.3 §4.6「预算与审计：**本地兜底**——无外网/无平台侧时自落账并支持
+    // 离线导出（默认开启）」。迁移前只有直连 SQL 一条路 ⇒ 干净机器上成本计量是空的（"省钱"这条主线在客户机
+    // 上没有数）。本轮只迁**写口**：读法（C1–C5 报表 / 仪表 / 遥测 / 会话导出）仍走 SQL，如实登记。
+    usage: ['append'],
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],
@@ -134,6 +138,10 @@ export const FIELDS = {
   // `createdAt` 也不在列里：它是**所有实体共有的介质时间戳**（`toRecord()` 按 `created_at` 统一带出），
   // 不是 knowledge 特有的字段 —— 写进这张表反而会造成"有的实体登记了、有的没登记"的错觉。
   knowledge: ['accountId', 'scope', 'conversationId', 'shellId', 'kind', 'title', 'body', 'status'],
+  // 用量记账的中性字段名（列名与 `usage_stats` 的建表逐字对应；`createdAt` 不在这里——那是**所有实体共有的
+  // 介质时间戳**，由建表的 `DEFAULT NOW()` / JSON 侧 `nowIso()` 盖，不是调用方能填的字段）
+  usage: ['accountId', 'conversationId', 'agentRunId', 'messageId', 'providerId', 'modelId', 'tokensIn', 'tokensOut',
+    'cost', 'durationMs', 'firstTokenMs', 'cacheHit', 'cacheMiss', 'prefixSysHash', 'prefixToolsHash', 'shellId', 'kind'],
   // deliveries 的方法收的是具名参数（不是整条记录），这里列的是它的**记录形状**：
   // `finish(id, patch)` 的 patch 按它校验，`findByKey`/`list` 回来的记录也按它映射。
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
@@ -175,6 +183,11 @@ export const REQUIRED = {
   // `body` **不**登记：建表里它是可空字段，而"空正文"在现实里是合法的（标题即全部内容），
   // 把它登记成必需会把一条合法写入挡在门外——登记必需字段的判据是"缺了就没有意义"，不是"我们这条路径总是给"。
   knowledge: ['accountId', 'title'],
+  // usage：**必需的是 `kind`**，不是别的。判据＝"缺了这条记录就没有意义"：`usage_stats` 的 `kind` 有默认值
+  // `'request'`，可"用量的种类"（逐轮 round / 折叠 collapse / 标题 title / 摘要 summary / 预热 warmup）
+  // 正是这条账**唯一的分类维度**——漏了它，一条账就退回默认值、混进"真实轮次"里，
+  // 而 C1–C5 的口径全部按 kind 过滤（`cohort.js`）。其余字段各有默认值/可空，不登记。
+  usage: ['kind'],
 };
 
 /**

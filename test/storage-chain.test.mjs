@@ -284,6 +284,7 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
     '事件账本': 'events.append',
     '工具调用账（读）': 'toolCalls.recent',
     '工具调用账（写）': 'toolCalls.append',   // 2026-09-17 从"登记缺口"变成"已迁移"：写口也走接口了
+    '用量记账（逐轮）': 'usage.append',       // 2026-09-17：v0.3 §4.6「预算与审计：本地兜底」的写口
   };
   for (const [what, name] of Object.entries(REQUIRED)) {
     assert.ok(has(name), what + ' 没有经过存储接口（期望 ' + name + '）。实际记录：' + [...names].sort().join(', '));
@@ -295,6 +296,7 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
   const WRITES = {
     accounts: ['create'], sessions: ['create'], conversations: ['create'], messages: ['append', 'guardAppend'],
     events: ['append'], settings: ['set'], agentRuns: ['create', 'update'], deliveries: ['insert'], toolCalls: ['append'],
+    usage: ['append'],
   };
   const unpaired = Object.entries(WRITES)
     .filter(([t, verbs]) => rows(t).length && !verbs.some((v) => has(t + '.' + v)))
@@ -316,6 +318,12 @@ test('机制断言②：这条链的每一段都真的经过存储接口（记�
   assert.equal(rows('toolCalls').length, 1, '本轮执行过一次工具 ⇒ 介质里恰好一行：' + rows('toolCalls').length);
   assert.equal(rows('toolCalls')[0].toolName, 'list_dir');
   assert.equal(typeof rows('toolCalls')[0].args, 'object', '落在文件里的 args 也是对象（与 /toolcalls 读到的一致）');
+  // ④ 用量记账：这一轮真调了模型（离线壳也返回 usage 数字）⇒ 介质里必须有 kind='round' 的账，且经过接口。
+  //    2026-09-17 之前这五处记账全是直连 SQL ⇒ 干净机器上**成本计量是空的**（§4.6「本地兜底」的写口那一半）。
+  assert.ok(rows('usage').some((u) => u.kind === 'round' && Number(u.tokensIn) > 0),
+    '这一轮真花了钱 ⇒ 介质里必须有 kind=round 的用量行：' + JSON.stringify(rows('usage').map((u) => [u.kind, u.tokensIn])).slice(0, 300));
+  assert.ok(has('usage.append'), '用量记账必须经过存储接口（usage.append）');
+  for (const u of rows('usage')) assert.ok(u.createdAt, '每条用量都要有介质时间戳（调用方不给时间，介质自己盖）');
 });
 
 test('[jsonfile] 重启进程后：同一个 token 仍认得出人、同一会话与消息读得回来（数据在文件里，不在内存里）', async () => {

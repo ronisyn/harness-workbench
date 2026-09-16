@@ -26,6 +26,7 @@ import { buildEnvFor, lightDefs } from './agent.js';
 import { toolDefs } from './tools/index.js';
 import { chatOnceWithTools, calcCost } from './llm/gateway.js';
 import { config } from './config.js';
+import { storage } from './storage/index.js'; // v0.3 §4.6「预算与审计：本地兜底」：预热花费也走接口入账
 import { REAL_WHERE } from './cohort.js';
 
 const SETTINGS_PREFIX = 'prefix_epoch:';
@@ -107,11 +108,12 @@ export async function warmLane(lane, { provider = 'deepseek', model = 'deepseek-
     const cost = calcCost(provider, { hit, miss, out: u.tokens_out || 0 });
     // 入账 kind='warmup'：**不进任何 cohort**（REAL/PROBE 档都按 kind='round' 过滤），也不冒充真实轮次
     try {
-      await db.query(`INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id,
-                       tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id,
-                       prefix_sys_hash, prefix_tools_hash)
-                     VALUES (NULL,NULL,NULL,?,?,?,?,?,?,?,?,NOW(),"warmup",NULL,?,?)`,
-        [provider, model, u.tokens_in || 0, u.tokens_out || 0, hit, miss, cost, Date.now() - t0, e.sysHash, e.toolsHash]);
+      await storage.usage.append({
+        accountId: null, conversationId: null, agentRunId: null, providerId: provider, modelId: model,
+        tokensIn: u.tokens_in || 0, tokensOut: u.tokens_out || 0, cacheHit: hit, cacheMiss: miss,
+        cost, durationMs: Date.now() - t0, shellId: null,
+        prefixSysHash: e.sysHash, prefixToolsHash: e.toolsHash, kind: 'warmup',
+      });
     } catch { /* 计量失败不影响预热 */ }
     const note = `lane=${e.lane} sys=${e.sysHash} tools=${e.toolsHash} nTools=${e.defs.length} hit=${hit} miss=${miss} ¥${cost.toFixed(4)} ms=${Date.now() - t0}`;
     db.query('INSERT INTO audit_log (account_id, action, detail) VALUES (?,?,?)', [null, 'prefix:warmup', note]).catch(() => {});

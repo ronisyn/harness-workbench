@@ -535,8 +535,17 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const cCost = calcCost(ctx.__provider || 'deepseek', uc);
           cumCost += cCost; cumTin += r.tokensIn || 0; cumTout += r.tokensOut || 0;
           cumHit += r.cache_hit || 0; cumMiss += r.cache_miss != null ? r.cache_miss : 0;
-          await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"collapse",?)',
-            [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, ctx.__provider || 'deepseek', ctx.__model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, r.cache_miss != null ? r.cache_miss : 0, cCost, ctx.shellId ?? null]);
+          await storage.usage.append({
+            accountId: ctx.accountId ?? null, conversationId: ctx.conversationId ?? null, agentRunId: ctx.__runId ?? null,
+            providerId: ctx.__provider || 'deepseek', modelId: ctx.__model || 'deepseek-v4-flash',
+            tokensIn: r.tokensIn || 0, tokensOut: r.tokensOut || 0,
+            cacheHit: r.cache_hit || 0, cacheMiss: r.cache_miss != null ? r.cache_miss : 0,
+            cost: cCost, shellId: ctx.shellId ?? null, kind: 'collapse',
+          });
+          // ⚠️ 2026-09-17 修（迁接口时发现）：上面这条原先是直连 SQL，**列了 duration_ms 却没给它值**
+          //   （12 个占位符 / 11 个实参）⇒ mysql2 当场抛，被外面的 `catch { 折叠计量失败不影响折叠 }` 吞掉 ⇒
+          //   **每一次折叠的真实 LLM 花费都静默没入账**（与 §4.4.1 规则5「失效可数」、以及本段注释"计入账本"相反）。
+          //   改成具名字段后这类错位结构上不可能再发生（少给一个字段＝那一列走默认值，不会错位）。
         }
       } catch { /* 折叠计量失败不影响折叠 */ }
     } catch { digest = ''; }
@@ -757,8 +766,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
     try {
       const u = res.usage || {};
       const cost = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokens_in || 0) - (u.cache_hit || 0), out: u.tokens_out || 0 });
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id, prefix_sys_hash, prefix_tools_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?,?,?)',
-        [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokens_in || 0, u.tokens_out || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, cost, llmMs, ctx.shellId ?? null, sysHash, toolsHash]);
+      await storage.usage.append({
+        accountId: ctx.accountId ?? null, conversationId: ctx.conversationId ?? null, agentRunId: ctx.__runId ?? null,
+        providerId: provider, modelId: model || provider,
+        tokensIn: u.tokens_in || 0, tokensOut: u.tokens_out || 0,
+        cacheHit: u.cache_hit || 0, cacheMiss: u.cache_miss != null ? u.cache_miss : 0,
+        cost, durationMs: llmMs, shellId: ctx.shellId ?? null,
+        prefixSysHash: sysHash, prefixToolsHash: toolsHash, kind: 'round',
+      });
       cumTin += u.tokens_in || 0; cumTout += u.tokens_out || 0; cumCost += cost;
       cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
     } catch { /* 计量失败不影响执行 */ }
@@ -794,8 +809,14 @@ export async function runAgent({ provider, model, messages, permission = 'full',
           const u = contRes;
           const costSeg = calcCost(provider, { hit: u.cache_hit || 0, miss: u.cache_miss != null ? u.cache_miss : (u.tokensIn || 0) - (u.cache_hit || 0), out: u.tokensOut || 0 });
           try {
-            await db.query('INSERT INTO usage_stats (account_id, conversation_id, agent_run_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind, shell_id, prefix_sys_hash, prefix_tools_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),"round",?,?,?)',
-              [ctx.accountId ?? null, ctx.conversationId ?? null, ctx.__runId ?? null, provider, model || provider, u.tokensIn || 0, u.tokensOut || 0, u.cache_hit || 0, u.cache_miss != null ? u.cache_miss : 0, costSeg, 0, ctx.shellId ?? null, sysHash, toolsHash]);
+            await storage.usage.append({
+              accountId: ctx.accountId ?? null, conversationId: ctx.conversationId ?? null, agentRunId: ctx.__runId ?? null,
+              providerId: provider, modelId: model || provider,
+              tokensIn: u.tokensIn || 0, tokensOut: u.tokensOut || 0,
+              cacheHit: u.cache_hit || 0, cacheMiss: u.cache_miss != null ? u.cache_miss : 0,
+              cost: costSeg, durationMs: 0, shellId: ctx.shellId ?? null,
+              prefixSysHash: sysHash, prefixToolsHash: toolsHash, kind: 'round',
+            });
             cumTin += u.tokensIn || 0; cumTout += u.tokensOut || 0; cumCost += costSeg;
             cumHit += u.cache_hit || 0; cumMiss += u.cache_miss != null ? u.cache_miss : 0; // P8 hit 率测量
           } catch { /* 计量失败不影响续写 */ }

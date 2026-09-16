@@ -54,7 +54,7 @@ export const STORE_FORMAT_FIRST_VERSION = 1;
 // （`server/kbsearch/like.js`，`RW_KB_SEARCH=like`）不碰 SQL，它的记录只能从这套接口读。
 // 有它在表里，夹具/嵌入方才能把条目放进这份 JSON 文件并被 `storage.knowledge.all()` 读到；
 // 不在这张表里的话，`loadDoc` 会把 `tables.knowledge` 当成未知表丢掉（而"丢了却不报错"最坏）。
-const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions', 'knowledge'];
+const TABLES = ['conversations', 'messages', 'toolCalls', 'settings', 'agentRuns', 'events', 'deliveries', 'accounts', 'sessions', 'knowledge', 'usage'];
 
 // 默认落点：工作区下的 storage/（与 spill/、.rw-checkpoints/ 同属"运行期产物"，不进仓库）。
 // 要挪位置得在 server/env.js 加一个 RW_STORAGE_FILE（env.js 是环境事实的唯一出处，本轮由协调方维护，
@@ -756,8 +756,21 @@ function makeApi(holder, save, { persist }) {
       },
     },
 
-    // ── 外部投递记录（幂等键 + 死信落点）：语义与 mysql 实现逐条对齐 ──────────────────────────
-    // 为什么它必须在第二个实现里也有：带 `Idempotency-Key` 的 `POST /api/chat` 第一件事就是 `beginDelivery`，
+    /**
+     * 用量记账（v0.3 §4.6「预算与审计：本地兜底」的写口；与 mysql 实现同一套字段与语义）。
+     * `createdAt` 由介质盖（mysql 侧是建表的 `DEFAULT NOW()`）；`kind` 是必需字段。
+     */
+    usage: {
+      async append(fields) {
+        assertFields('usage', fields);
+        const rec = { id: nextId('usage'), ...fields, createdAt: nowIso() };
+        put('usage', rec);
+        await commit();
+        return { id: rec.id };
+      },
+    },
+
+    // ── 外部投递记录（幂等键 + 死信落点）：语义与 mysql 实现逐条对齐 ──────────────────────────    // 为什么它必须在第二个实现里也有：带 `Idempotency-Key` 的 `POST /api/chat` 第一件事就是 `beginDelivery`，
     // 缺了这一块整轮直接 500（2026-09-16 真机复现）。业务判定（回放/冲突/重发）仍在 `server/deliveries.js`，
     // 这里只负责介质语义 —— 尤其是**唯一键**：同一个（账号 + 幂等键）只能有一行，第二次插入必须抛错
     // （MySQL 靠 uk_deliveries_idem 唯一索引，这里靠同一判据），调用方据此把并发重发判成"进行中"，

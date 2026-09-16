@@ -539,6 +539,32 @@ function contractSuite(label, make, caps) {
     assert.deepEqual(await s.knowledge.remove(otherConv.id, { accountId: 1 }), { removed: false }, '删第二次＝false（幂等可判）');
   });
 
+  // ── 用量记账写口（2026-09-17）：v0.3 §4.6「预算与审计：本地兜底」────────────────────────────
+  test(T('用量：五处记账共用一条写口（逐轮/折叠/标题/摘要/预热），created_at 由介质盖、kind 必填'), async () => {
+    const { storage: s } = make();
+    // 逐轮：字段最全的一条（含前缀指纹与壳）
+    const round = await s.usage.append({
+      accountId: 7, conversationId: 42, agentRunId: 9, providerId: 'deepseek', modelId: 'deepseek-v4-flash',
+      tokensIn: 1200, tokensOut: 30, cacheHit: 900, cacheMiss: 300, cost: 0.0042, durationMs: 810,
+      shellId: 2, prefixSysHash: 'abcdef012345', prefixToolsHash: 'fedcba543210', kind: 'round',
+    });
+    assert.ok(round.id > 0, 'append 要回主键：' + JSON.stringify(round));
+    // 折叠：**特意不给 durationMs**（迁移前那条直连 SQL 就是"列了 duration_ms 却没给值"⇒ 12 占位符 / 11 实参、
+    // mysql2 当场抛、被 catch 吞掉 ⇒ 折叠花费静默丢账）。具名字段下"少给一个字段"＝那一列走默认值，结构上不会错位。
+    const collapse = await s.usage.append({
+      accountId: 7, conversationId: 42, agentRunId: 9, providerId: 'deepseek', modelId: 'deepseek-v4-flash',
+      tokensIn: 800, tokensOut: 260, cacheHit: 0, cacheMiss: 800, cost: 0.0031, shellId: null, kind: 'collapse',
+    });
+    assert.ok(collapse.id > round.id, '两次记账各占一行（不是覆盖）');
+    // 预热：账号/会话/运行都为空（无人会话的维护性花费），只有 provider/model + 指纹 + kind
+    const warm = await s.usage.append({ providerId: 'deepseek', modelId: 'deepseek-v4-flash', tokensIn: 40, tokensOut: 2, cacheHit: 40, cacheMiss: 0, cost: 0.0001, prefixSysHash: 'abcdef012345', prefixToolsHash: 'fedcba543210', kind: 'warmup' });
+    assert.ok(warm.id > collapse.id);
+    // 判据：kind 必填（漏了它这条账会退回默认值 'request'，混进"真实轮次"——C1–C5 的口径全按 kind 过滤）
+    await assert.rejects(() => s.usage.append({ conversationId: 42, tokensIn: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '缺 kind 必须当场拒写');
+    // 字段白名单：拼错的字段名不许静默吞掉
+    await assert.rejects(() => s.usage.append({ kind: 'round', tokenIn: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, '拼错字段名必须报错');
+  });
+
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {
     const { storage: s } = make();
     const mid = await s.tx(async (t) => {

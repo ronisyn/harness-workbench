@@ -32,8 +32,12 @@ export async function autoTitle(id, acc, force) {
       const u = (j && j.usage) || {};
       const miss = Math.max(0, (u.prompt_tokens || 0) - (u.prompt_cache_hit_tokens || 0));
       const cost = calcCost(prov, { hit: u.prompt_cache_hit_tokens || 0, miss, out: u.completion_tokens || 0 });
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"title")',
-        [acc, id, prov, p.defaultModel, u.prompt_tokens || 0, u.completion_tokens || 0, u.prompt_cache_hit_tokens || 0, miss, cost, 0]);
+      await storage.usage.append({
+        accountId: acc, conversationId: id, providerId: prov, modelId: p.defaultModel,
+        tokensIn: u.prompt_tokens || 0, tokensOut: u.completion_tokens || 0,
+        cacheHit: u.prompt_cache_hit_tokens || 0, cacheMiss: miss,
+        cost, durationMs: 0, kind: 'title',
+      });
     } catch { /* 计量失败不影响 */ }
   } catch (e) { console.error('[autotitle] 失败:', e.message); }
   // P25(O-24)：LLM 失败 → 首条用户消息朴素截断兜底（标题不再卡在「新对话」）

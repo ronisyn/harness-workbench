@@ -44,6 +44,14 @@ const COLS = {
     reason: 'reason', rounds: 'rounds', lastStep: 'last_step', toolCounts: 'tool_counts',
   },
   events: { conversationId: 'conversation_id', seq: 'seq', type: 'type', payload: 'payload' },
+  // 用量记账（2026-09-17 加写口）：列名与 `usage_stats` 的建表逐字对应。
+  // `created_at` 不在映射里 —— 建表给的是 `DEFAULT NOW()`，介质自己盖时间戳（调用方不该伪造时间）。
+  usage: {
+    accountId: 'account_id', conversationId: 'conversation_id', agentRunId: 'agent_run_id', messageId: 'message_id',
+    providerId: 'provider_id', modelId: 'model_id', tokensIn: 'tokens_in', tokensOut: 'tokens_out', cost: 'cost',
+    durationMs: 'duration_ms', firstTokenMs: 'first_token_ms', cacheHit: 'cache_hit_tokens', cacheMiss: 'cache_miss_tokens',
+    prefixSysHash: 'prefix_sys_hash', prefixToolsHash: 'prefix_tools_hash', shellId: 'shell_id', kind: 'kind',
+  },
   // 知识库（2026-09-17 加，**只读**：给 `kbsearch/like.js` 取记录用）。
   // 只映射检索层真正要用的列：`related_component` 是管理面的展示列，不在列里（同接口层的字段清单）。
   knowledge: {
@@ -59,7 +67,7 @@ const COLS = {
 const TABLES = {
   conversations: 'conversations', messages: 'messages', toolCalls: 'tool_calls', settings: 'settings',
   agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries', accounts: 'accounts', sessions: 'sessions',
-  knowledge: 'knowledge',
+  knowledge: 'knowledge', usage: 'usage_stats',
 };
 /** JSON 列：写时 stringify、读时 parse（MySQL 的 JSON 列在新旧驱动下有时给对象、有时给字符串）。 */
 const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 'svalue']);
@@ -560,6 +568,18 @@ function makeApi(r) {
         const v = kbVisibleWhere({ accountId, shellId, conversationId, includeConv: true });
         const res = await r.exec(`DELETE FROM knowledge WHERE id=? AND ${v.where}`, [Number(id) || 0, ...v.params]);
         return { removed: res.affectedRows > 0 };
+      },
+    },
+
+    /**
+     * 用量记账（v0.3 §4.6「预算与审计：本地兜底」的写口）：逐轮 / 折叠 / 标题 / 摘要 / 预热五处共用。
+     * `created_at` 由建表的 `DEFAULT NOW()` 盖（调用方不给时间）；`kind` 是必需字段（见接口层的理由）。
+     */
+    usage: {
+      async append(fields) {
+        assertFields('usage', fields);
+        const { sql, params } = insertOf('usage', fields);
+        return { id: (await r.exec(sql, params)).insertId };
       },
     },
 

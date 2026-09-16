@@ -803,8 +803,13 @@ async function generateSummary(provider, earlyText, conversationId) {
       const cowner = await storage.conversations.get(conversationId);
       const miss = u.prompt_cache_miss_tokens != null ? u.prompt_cache_miss_tokens : Math.max(0, (u.prompt_tokens || 0) - (u.prompt_cache_hit_tokens || 0));
       const cost = calcCost(provider, { hit: u.prompt_cache_hit_tokens || 0, miss, out: u.completion_tokens || 0 });
-      await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"summary")',
-        [cowner ? cowner.accountId : null, conversationId, provider, findProvider(provider)?.defaultModel || '', u.prompt_tokens || 0, u.completion_tokens || 0, u.prompt_cache_hit_tokens || 0, miss, cost, 0]);
+      await storage.usage.append({
+        accountId: cowner ? cowner.accountId : null, conversationId, providerId: provider,
+        modelId: findProvider(provider)?.defaultModel || '',
+        tokensIn: u.prompt_tokens || 0, tokensOut: u.completion_tokens || 0,
+        cacheHit: u.prompt_cache_hit_tokens || 0, cacheMiss: miss,
+        cost, durationMs: 0, kind: 'summary',
+      });
     } catch { /* 计量失败不影响 */ }
     if (summary) {
       await db.query('INSERT INTO conv_summaries (conversation_id, summary, updated_at) VALUES (?,?,NOW()) ON DUPLICATE KEY UPDATE summary=VALUES(summary), updated_at=NOW()', [conversationId, summary]);

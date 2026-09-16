@@ -1388,8 +1388,13 @@ export async function summarizeConversation(cid, opts = {}) {
         const cowner = (await db.query('SELECT account_id FROM conversations WHERE id=?', [conversationId]))[0];
         const miss = r.cache_miss != null ? r.cache_miss : Math.max(0, (r.tokensIn || 0) - (r.cache_hit || 0));
         const cost = calcCost(opts.provider || 'deepseek', { hit: r.cache_hit || 0, miss, out: r.tokensOut || 0 });
-        await db.query('INSERT INTO usage_stats (account_id, conversation_id, provider_id, model_id, tokens_in, tokens_out, cache_hit_tokens, cache_miss_tokens, cost, duration_ms, created_at, kind) VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),"summary")',
-          [cowner ? cowner.account_id : null, conversationId, opts.provider || 'deepseek', opts.model || 'deepseek-v4-flash', r.tokensIn || 0, r.tokensOut || 0, r.cache_hit || 0, miss, cost, 0]);
+        await storage.usage.append({
+          accountId: cowner ? cowner.account_id : null, conversationId,
+          providerId: opts.provider || 'deepseek', modelId: opts.model || 'deepseek-v4-flash',
+          tokensIn: r.tokensIn || 0, tokensOut: r.tokensOut || 0,
+          cacheHit: r.cache_hit || 0, cacheMiss: miss,
+          cost, durationMs: 0, kind: 'summary',
+        });
       } catch { /* 计量失败不影响 */ }
     } catch (e) { summary = '【会话归档 v2 语义摘要生成失败，回退结构化】' + (e.message || '').slice(0, 200); }
   }
