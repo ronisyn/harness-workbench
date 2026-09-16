@@ -68,6 +68,21 @@ function fakeMysql() {
       return (row) => (row.account_id ?? null) === (acc ?? null)
         || (row.channel !== null && row.channel !== undefined && String(row.channel).toLowerCase() !== 'web' && (row.account_id ?? null) === null);
     }
+    // 特例②：知识库的"会话可见范围"那一段（`server/knowledge.js` 的 `kbVisibleWhere({includeConv:true})`
+    // **逐字**生成的形状）：账号 + (global ∪ 本壳 shell ∪ 本会话 conv) + 仅 active。
+    // 为什么必须按整段认：它是 `kb_del` 的安全判据，拆成若干条通用条件去糊＝把"这条 SQL 到底怎么判"
+    // 从夹具里抹掉，那正是这段代码最需要被钉住的地方。参数顺序＝account_id, shell_id, conversation_id。
+    if (/^account_id=\? AND \(scope="global" OR \(scope="shell" AND shell_id<=>\?\)( OR \(scope="conv" AND conversation_id=\?\))?\)( AND status="active")?$/i.test(t)) {
+      const acc = params.shift();
+      const shell = params.shift();
+      const conv = params.length ? params.shift() : undefined;
+      const needActive = /status="active"/i.test(t);
+      return (row) => (row.account_id ?? null) === (acc ?? null)
+        && (!needActive || row.status === 'active')
+        && (row.scope === 'global'
+          || (row.scope === 'shell' && (row.shell_id ?? null) === (shell ?? null))
+          || (conv !== undefined && row.scope === 'conv' && (row.conversation_id ?? null) === (conv ?? null)));
+    }
     // 其余条件用 ` AND ` 连起来；每个条件消费 0/1/N 个参数，顺序即参数顺序
     const conds = t.split(/\s+AND\s+/i).map((c) => {
       const s = c.trim();
@@ -161,11 +176,26 @@ function fakeMysql() {
       return acc ? [{ id: acc.id, username: acc.username, role: acc.role }] : [];
     }
 
-    // DELETE（`server/auth.js:45` 的退出登录）
-    if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\?$/i.exec(q))) {
+    // DELETE：一条或两条等值条件（原来只认一条——`server/auth.js:45` 的退出登录；
+    // 2026-09-17 起 knowledge.remove 发的是 `id=? AND account_id=?`，两条都要认）。
+    if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\?(?: AND (\w+)=\?)?$/i.exec(q))) {
       const rows = rowsOf(store, m[1]);
       let removed = 0;
-      for (const [k, row] of [...rows]) if (row[m[2]] === p[0]) { rows.delete(k); removed++; }
+      for (const [k, row] of [...rows]) {
+        if (row[m[2]] !== p[0]) continue;
+        if (m[3] !== undefined && row[m[3]] !== p[1]) continue;
+        rows.delete(k); removed++;
+      }
+      return { insertId: 0, affectedRows: removed };
+    }
+
+    // DELETE + 组合条件（`knowledge.removeVisible`：id + 由 kbVisibleWhere 生成的可见范围段）
+    if ((m = /^DELETE FROM (\w+) WHERE (\w+)=\? AND (.+)$/i.exec(q))) {
+      const rows = rowsOf(store, m[1]);
+      const id = p.shift();
+      const keep = whereOf(m[3], p);
+      let removed = 0;
+      for (const [k, row] of [...rows]) if (row[m[2]] === id && keep(row)) { rows.delete(k); removed++; }
       return { insertId: 0, affectedRows: removed };
     }
 
@@ -174,7 +204,8 @@ function fakeMysql() {
       let rest = m[3];
       let limit = null; let desc = false; let orderCol = 'id'; let whereRaw = null;
       if ((mm = /\s+LIMIT (\d+)\s*$/i.exec(rest))) { limit = Number(mm[1]); rest = rest.slice(0, mm.index); }
-      if ((mm = /\s+ORDER BY (\w+)( DESC)?\s*$/i.exec(rest))) { orderCol = mm[1]; desc = !!mm[2]; rest = rest.slice(0, mm.index); }
+      // `ORDER BY` 两种方向都要认：`ASC` 此前没人发过，`knowledge.all` 是第一条（2026-09-17 加写口时补上）
+      if ((mm = /\s+ORDER BY (\w+)( DESC| ASC)?\s*$/i.exec(rest))) { orderCol = mm[1]; desc = String(mm[2] || '').trim().toUpperCase() === 'DESC'; rest = rest.slice(0, mm.index); }
       if ((mm = /^\s+WHERE (.+)$/i.exec(rest))) whereRaw = mm[1];
       else if (rest.trim()) throw new Error('假 pool 不认识的 SELECT 尾巴：' + rest);
       let rows = [...rowsOf(store, table).values()];
@@ -450,6 +481,62 @@ function contractSuite(label, make, caps) {
     const many = await s.settings.getMany(['guard_a', '没有这个键']);
     assert.deepEqual(many, { guard_a: 1 }, '只回存在的键（调用方按"没这个键"兜默认值）');
     assert.deepEqual(await s.settings.getMany([]), {}, '空集合不查库，也不许炸');
+  });
+
+  // ── 知识库的写口（2026-09-17）：干净机器上"攒记忆"（kb_add 去重/覆盖、kb_del 可见范围删除）────
+  test(T('知识：同名去重 → 覆盖（touch 刷新时间戳）→ 只有同一条；body 可为空、身份字段不许从修订改'), async () => {
+    const { storage: s } = make();
+    const base = { accountId: 1, scope: 'conv', conversationId: 7, shellId: null, kind: 'fact', status: 'active' };
+    const add = await s.knowledge.append({ ...base, title: '部署口径', body: '蓝绿部署' });
+    assert.ok(add.id > 0, 'append 要回主键（调用方拿它回显/再次定位）');
+    assert.equal(await s.knowledge.findByTitle({ accountId: 1, scope: 'conv', conversationId: 7, shellId: null, kind: 'fact', title: '部署口径' }).then((r) => r && r.body), '蓝绿部署');
+    // 同名不同会话/不同账号：都**不是**同一条（去重判据的六个条件一个都不能少）
+    assert.equal(await s.knowledge.findByTitle({ accountId: 1, scope: 'conv', conversationId: 8, shellId: null, kind: 'fact', title: '部署口径' }), null, '别的会话不算同名');
+    assert.equal(await s.knowledge.findByTitle({ accountId: 2, scope: 'conv', conversationId: 7, shellId: null, kind: 'fact', title: '部署口径' }), null, '别的账号不算同名');
+    assert.equal(await s.knowledge.findByTitle({ accountId: 1, scope: 'global', conversationId: null, shellId: null, kind: 'fact', title: '部署口径' }), null, '别的 scope 不算同名');
+    // 覆盖：只有一条（不是又插一条），且 touch 刷新时间戳（A6：覆盖视为最新当前事实）
+    const before = (await s.knowledge.all(1))[0].createdAt;
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(await s.knowledge.update(add.id, { body: '改成灰度发布', touch: true }), { updated: true });
+    const rows = await s.knowledge.all(1);
+    assert.equal(rows.length, 1, '覆盖不许变成第二条');
+    assert.equal(rows[0].body, '改成灰度发布');
+    assert.equal(rows[0].status, 'active');
+    assert.ok(new Date(rows[0].createdAt).getTime() > new Date(before).getTime(), 'touch 要把时间戳往前推（两个实现的时钟源各自不同，但语义一致）');
+    // 身份字段不许从"修订"这条路改（否则等于换条目、绕过同名判定）
+    for (const bad of ['accountId', 'scope', 'conversationId', 'shellId', 'kind', 'titled']) {
+      await assert.rejects(() => s.knowledge.update(add.id, { [bad]: 1 }), (e) => e.code === STORAGE_INVALID_FIELD, bad + ' 不该可修订');
+    }
+    assert.deepEqual(await s.knowledge.update(999999, { body: 'x' }), { updated: false }, '改不存在的行＝false，不是异常');
+    // body 可为空（建表里它可空，"标题即全部内容"是合法记忆）
+    const bare = await s.knowledge.append({ accountId: 1, scope: 'global', conversationId: null, shellId: null, kind: 'fact', title: '只有标题', body: '', status: 'active' });
+    assert.ok(bare.id > 0);
+    // 缺必需字段：当场报错，不静默写半条
+    await assert.rejects(() => s.knowledge.append({ scope: 'global', title: '没账号' }), (e) => e.code === STORAGE_INVALID_FIELD);
+    await assert.rejects(() => s.knowledge.append({ accountId: 1, scope: 'global' }), (e) => e.code === STORAGE_INVALID_FIELD, '缺 title');
+  });
+
+  test(T('知识：可见范围删除（global ∪ 本壳 ∪ 本会话、仅 active）与账号边界，两个实现同一条判据'), async () => {
+    const { storage: s } = make();
+    const mk = (fields) => s.knowledge.append({ kind: 'guide', status: 'active', body: 'b', ...fields });
+    const g = await mk({ accountId: 1, scope: 'global', conversationId: null, shellId: null, title: 'g' });
+    const mine = await mk({ accountId: 1, scope: 'conv', conversationId: 7, shellId: null, title: 'mine' });
+    const otherConv = await mk({ accountId: 1, scope: 'conv', conversationId: 8, shellId: null, title: 'otherConv' });
+    const otherShell = await mk({ accountId: 1, scope: 'shell', conversationId: null, shellId: 3, title: 'otherShell' });
+    const otherAcc = await mk({ accountId: 2, scope: 'global', conversationId: null, shellId: null, title: 'otherAcc' });
+    const dead = await mk({ accountId: 1, scope: 'global', conversationId: null, shellId: null, title: 'dead', status: 'superseded' });
+    const vis = (id) => s.knowledge.removeVisible(id, { accountId: 1, shellId: 3, conversationId: 7 });
+    assert.deepEqual(await vis(otherAcc.id), { removed: false }, '别人的条目不许删');
+    assert.deepEqual(await vis(otherConv.id), { removed: false }, '别的会话私有不许删');
+    assert.deepEqual(await vis(dead.id), { removed: false }, '非 active（superseded/obsolete）不在可见范围内，不许删');
+    assert.deepEqual(await vis(otherShell.id), { removed: true }, '本壳私有在可见范围内（本例 shellId=3）');
+    assert.deepEqual(await vis(mine.id), { removed: true }, '本会话私有可删');
+    assert.deepEqual(await vis(g.id), { removed: true }, 'global（同账号）可删');
+    assert.equal((await s.knowledge.all(1)).length, 2, '该账号还剩 otherConv + dead 两条');
+    // 账号级删除（管理面口径）：只保证不许删到别人的
+    assert.deepEqual(await s.knowledge.remove(otherConv.id, { accountId: 9 }), { removed: false });
+    assert.deepEqual(await s.knowledge.remove(otherConv.id, { accountId: 1 }), { removed: true });
+    assert.deepEqual(await s.knowledge.remove(otherConv.id, { accountId: 1 }), { removed: false }, '删第二次＝false（幂等可判）');
   });
 
   test(T('事务：提交后全部可见（tx 的返回值要透出来）'), async () => {

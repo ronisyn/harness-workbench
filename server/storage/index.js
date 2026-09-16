@@ -94,10 +94,15 @@ export const CONTRACT = {
     // 登录链（G1 出口"干净机器 + 一份配置 → 跑通一次对话"的前置）：账号与会话
     accounts: ['findByUsername', 'create'],
     sessions: ['create', 'findValid', 'remove'],
-    // 知识库（2026-09-17 加）：**不**为写加，为"第二个检索实现"加 —— `server/kbsearch/like.js` 不碰 SQL，
-    // 它的记录必须从这套接口读出来（`fts.js` 那边自己去问 MySQL，用不到本方法）。
-    // 现在只有 `all(accountId)` 一个动词：调用方（检索后端）真正用到的只有它，别的等有第二个使用者再加。
-    knowledge: ['all'],
+    // 知识库（2026-09-17 加）：**先**为"第二个检索实现"加（`server/kbsearch/like.js` 不碰 SQL，
+    // 它的记录必须从这套接口读出来），**再**为"干净机器上要能攒记忆"加写口（v0.3 §4.3「记忆」行：
+    // FTS 打底 + 分层召回 + 受限自动沉淀）——在此之前只有读：检索跑得起来、条目却攒不下来。
+    // 口子只开到"模型侧记忆真正用到的形状"：`kb_add`（同名去重 → 覆盖/新增）、`kb_del`（可见范围内删）。
+    // **管理面（`GET /api/knowledge` 的展示列视图、`PATCH` 的状态治理）仍走 SQL，未迁移**——那是管理视图口径，
+    // 不是引擎跑起来必需的那条链（见收口表第九节的"仍未闭合"）。
+    // `removeVisible` 收的是**安全边界**（照 `conversations.getAs` 那条"接口上不留不带账号的读法"的先例）：
+    // 会话可见范围＝本账号的 (global ∪ 本壳 shell ∪ 本会话 conv) 且 status=active，两个实现都要保证同一条。
+    knowledge: ['all', 'append', 'update', 'remove', 'removeVisible', 'findByTitle'],
     // 非必需：本轮示范迁移的第七个实体（`jsonfile.js` 对它显式抛"不支持"）
     // `list` 另接受**可选**的 `accountId` 过滤（`{state?, limit?, accountId?}`）：路由按调用者账号收口时用它，
     // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
@@ -134,6 +139,16 @@ export const FIELDS = {
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
 };
 
+/**
+ * **可修订字段**的白名单（`update(id, patch)` 用；没登记的实体＝按 `partial:true` 校验整份 `FIELDS`）。
+ * 为什么 knowledge 要单独收窄：`accountId/scope/conversationId/shellId/kind` 是这条记忆的**身份**，
+ * 从"修订"这条路改它们等于把一条记忆换成另一条（还绕过了 `kb_add` 的同名/冲突判定）；
+ * 只有正文、状态、标题是"这条记忆的内容"。两个实现共用这一份清单，不许各写一份。
+ */
+export const PATCHABLE = {
+  knowledge: ['body', 'status', 'title'],
+};
+
 /** 展平成 `['query', 'conversations.create', ...]`：夹具与自检用它比对两个实现的方法面。 */
 export function contractMethods() {
   const out = [...CONTRACT.verbs];
@@ -155,8 +170,11 @@ export const REQUIRED = {
   toolCalls: ['toolName'],
   agentRuns: ['conversationId'],
   events: ['conversationId', 'type'],
-  // knowledge：**本实现只读**（只有 `all`）⇒ 不登记必需字段。登记的语义是"写入时缺了就报错"，
-  // 而这里没有写入口；给一个不会被任何写入路径读到的清单，只会让下一个人以为"写知识要走接口"。
+  // knowledge：**写入用到的必需字段**（`append` 时缺了就报错）。`accountId` 是 NOT NULL；
+  // `title` 与它一起构成"这条记忆是什么"（`kb_add` 里 title 也是必填、空 title 当场抛）。
+  // `body` **不**登记：建表里它是可空字段，而"空正文"在现实里是合法的（标题即全部内容），
+  // 把它登记成必需会把一条合法写入挡在门外——登记必需字段的判据是"缺了就没有意义"，不是"我们这条路径总是给"。
+  knowledge: ['accountId', 'title'],
 };
 
 /**

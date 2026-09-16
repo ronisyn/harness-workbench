@@ -24,6 +24,11 @@ const LOG = process.env.RW_OFFLINE_SHELL_LOG || '';
 const note = (rec) => { if (LOG) { try { fs.appendFileSync(LOG, JSON.stringify(rec) + '\n'); } catch { /* 观测失败不影响对话 */ } } };
 
 const QUERY = process.env.RW_KB_SHELL_Q || '部署口径';
+// 2026-09-17 加：这一轮要发哪个工具（默认空＝保持原样，只发 `kb_search`）。
+// 写路径的端到端夹具（`test/kbsearch-e2e.test.mjs` 的"干净机器上攒记忆"）用它发 `kb_add` / `kb_del`；
+// 显式指定工具时**不再看关键词**（闸门仍是一次性的：一个进程只发一次，避免死循环）。
+const TOOL = process.env.RW_KB_SHELL_TOOL || '';
+const TOOL_ARGS = process.env.RW_KB_SHELL_ARGS || '{}';
 let call = 0;
 chatStreamWithTools.impl = async (provider, model, msgs, defs, opts = {}) => {
   call += 1;
@@ -34,6 +39,16 @@ chatStreamWithTools.impl = async (provider, model, msgs, defs, opts = {}) => {
     toolNames: (defs || []).map((d) => d && d.function && d.function.name).filter(Boolean),
   });
   const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+  // 显式指定了工具：只要它在工具面里就发一次（写路径夹具用；关键词判据不参与，免得为了触发它去凑词）
+  if (TOOL && !globalThis.__kbShellDone && defs.some((d) => d.function.name === TOOL)) {
+    globalThis.__kbShellDone = true;
+    return {
+      content: '', reasoning: '按夹具脚本调用 ' + TOOL, finishReason: 'tool_calls',
+      toolCalls: [{ id: 'call_kb_scripted', type: 'function', function: { name: TOOL, arguments: TOOL_ARGS } }],
+      usage: { tokens_in: 900, tokens_out: 20, cache_hit: 700, cache_miss: 200 },
+      streamed: false,
+    };
+  }
   // 只在"用户这轮明确要求搜知识库"且**本进程还没搜过**时发起一次工具调用（与另一只壳同款的一次性闸门）
   if (!globalThis.__kbShellDone && defs.some((d) => d.function.name === 'kb_search')
       && /知识库|记得|约定|搜一下|查一下/.test(String((lastUser && lastUser.content) || ''))) {

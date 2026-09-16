@@ -13,9 +13,12 @@
 //
 // 本实现**没有**"不支持"的方法：契约里的每一项 MySQL 都能服务（对照 `jsonfile.js` 的显式抛错）。
 import { db, pool } from '../db.js';
-import { assertFields } from './index.js';
+import { assertFields, STORAGE_INVALID_FIELD, PATCHABLE } from './index.js';
+import { kbVisibleWhere } from '../knowledge.js';
 
 const IMPL = 'mysql';
+// 注：`PATCHABLE.knowledge` **不要**在模块顶层读成常量——本文件与 `storage/index.js` 是环（index → mysql → index），
+// 顶层读会踩 TDZ（"Cannot access 'PATCHABLE' before initialization"）。用到时在函数体里读（那时两边都已求值完）。
 
 /** 中性字段名 → 列名。表名也在这里（接口层因此完全不含表/列名）。 */
 const COLS = {
@@ -504,6 +507,59 @@ function makeApi(r) {
       async all(accountId) {
         const rows = await r.many('SELECT * FROM knowledge WHERE account_id=? ORDER BY id ASC', [accountId]);
         return rows.map((row) => toRecord('knowledge', row));
+      },
+      /** 追加一条知识（`kb_add` 的新增分支 / 沉淀写点）。 */
+      async append(fields) {
+        assertFields('knowledge', fields);
+        const { sql, params } = insertOf('knowledge', fields);
+        return { id: (await r.exec(sql, params)).insertId };
+      },
+      /**
+       * 修订一条（`kb_add` 的覆盖分支、管理面的状态修订）：**只认白名单里的字段**，别的当场报错
+       * （`accountId/scope/...` 是这条记忆的身份，从"修订"这条路改它们等于换条目）。
+       * `touch:true` ⇒ 同时把 `created_at` 刷成介质当前时间：这是 `kb_add` 覆盖时那句
+       * `created_at=NOW()` 的逐字语义（A6：覆盖视为"最新当前事实"）。
+       */
+      async update(id, patch = {}) {
+        const keys = Object.keys(patch).filter((k) => k !== 'touch');
+        for (const k of keys) {
+          if (!PATCHABLE.knowledge.includes(k)) {
+            const e = new Error(`未知字段 knowledge.${k}（可修订的只有：${PATCHABLE.knowledge.join(', ')}）`);
+            e.code = STORAGE_INVALID_FIELD;
+            throw e;
+          }
+        }
+        const sets = keys.map((k) => `${COLS.knowledge[k]}=?`);
+        const params = keys.map((k) => enc(COLS.knowledge[k], patch[k]));
+        if (patch.touch) sets.push('created_at=NOW()');
+        if (!sets.length) return { updated: false };
+        const res = await r.exec(`UPDATE knowledge SET ${sets.join(', ')} WHERE id=?`, [...params, id]);
+        return { updated: res.affectedRows > 0 };
+      },
+      /**
+       * 同名条目（`kb_add` 的去重口径，逐字）：同账号 + 同 scope + 同壳 + 同会话 + 同 kind + 同 title，
+       * 取最新一条。`<=>` 是 NULL 安全等（global 条目的 `conversation_id`/`shell_id` 就是 NULL）。
+       */
+      async findByTitle({ accountId, scope, conversationId = null, shellId = null, kind = null, title } = {}) {
+        const row = await r.one(
+          'SELECT * FROM knowledge WHERE account_id=? AND scope=? AND shell_id<=>? AND conversation_id<=>? AND kind=? AND title=? ORDER BY id DESC LIMIT 1',
+          [accountId, scope, shellId, conversationId, kind, title]);
+        return toRecord('knowledge', row);
+      },
+      /** 按 id + 账号删（管理面的删除口径：至少保证"不许删到别人的"）。 */
+      async remove(id, { accountId } = {}) {
+        const res = await r.exec('DELETE FROM knowledge WHERE id=? AND account_id=?', [Number(id) || 0, accountId]);
+        return { removed: res.affectedRows > 0 };
+      },
+      /**
+       * 按**会话可见范围**删（`kb_del` 的口径）：账号 + (global ∪ 本壳 shell ∪ 本会话 conv) + 仅 active。
+       * 可见范围的 SQL 片段只有一份出处（`server/knowledge.js` 的 `kbVisibleWhere`，注入/检索/删除共用），
+       * 所以这里**不重写条件**，直接引用它。
+       */
+      async removeVisible(id, { accountId, shellId = null, conversationId = null } = {}) {
+        const v = kbVisibleWhere({ accountId, shellId, conversationId, includeConv: true });
+        const res = await r.exec(`DELETE FROM knowledge WHERE id=? AND ${v.where}`, [Number(id) || 0, ...v.params]);
+        return { removed: res.affectedRows > 0 };
       },
     },
 

@@ -36,7 +36,9 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { RW_WORKSPACE } from '../env.js';
-import { assertFields, unsupported, FIELDS } from './index.js';
+import { assertFields, unsupported, FIELDS, STORAGE_INVALID_FIELD, PATCHABLE } from './index.js';
+// 注：`PATCHABLE.knowledge` 在**函数体里**读（不在顶层读成常量）：本文件与 storage/index.js 是环，
+// 顶层读会踩 TDZ（"Cannot access 'PATCHABLE' before initialization"，与 mysql.js 那条同因）。
 
 const IMPL = 'jsonfile';
 // 文件格式的身份与版本（v0.3 §4.9：存储格式带版本号与迁移链）。**导出**：夹具要断言"文件里写的就是当前版本"，
@@ -678,14 +680,79 @@ function makeApi(holder, save, { persist }) {
     },
 
     /**
-     * 知识库：给"第二个检索实现"（`server/kbsearch/like.js`）取记录用，**本实现只读**（没有写动词）。
-     * 过滤口径与 mysql 实现**逐条对齐**：只按账号收口，可见范围/状态守卫由检索层判（不在这里发明第二份）。
+     * 知识库：给"第二个检索实现"（`server/kbsearch/like.js`）取记录用；**2026-09-17 起也承担写口**
+     * ——干净机器（不连 MySQL）上要能**攒记忆**：`kb_add` 的同名去重/覆盖、`kb_del` 的可见范围删除。
+     * 过滤口径与 mysql 实现**逐条对齐**：`all` 只按账号收口；`removeVisible` 的可见范围判据在这里用 JS
+     * 写了一遍（MySQL 侧引用 `kbVisibleWhere` 那份 SQL）——两边的**同一条判据**由 `test/storage.test.mjs`
+     * 的同一组契约用例盖住（"MySQL 靠 SQL / 这里靠同一判据"是本仓 `deliveries` 唯一键的既有手法）。
      * 排序 `id ASC` 同上（mysql 侧那条 ORDER BY 的理由）：给一个稳定顺序，真正的排序在 `like.js` 里。
      */
     knowledge: {
       async all(accountId) {
         const rows = rowsOf('knowledge').filter((r) => Number(r.accountId) === Number(accountId));
         return snap(rows);
+      },
+      async append(fields) {
+        assertFields('knowledge', fields);
+        const rec = { id: nextId('knowledge'), ...fields, createdAt: nowIso() };
+        put('knowledge', rec);
+        await commit();
+        return { id: rec.id };
+      },
+      /** 修订：白名单的**唯一出处**在接口层（`PATCHABLE`），`touch` 刷新介质时间戳。 */
+      async update(id, patch = {}) {
+        // 先校验再查行：**字段非法永远是错误**（哪怕这条记录不存在）——顺序反过来时，
+        // "删掉之后再改一个拼错的字段"会静默返回 updated:false，调用方永远看不到自己写错了字段名。
+        for (const k of Object.keys(patch)) {
+          if (k === 'touch') continue;
+          if (!PATCHABLE.knowledge.includes(k)) {
+            const e = new Error(`未知字段 knowledge.${k}（可修订的只有：${PATCHABLE.knowledge.join(', ')}）`);
+            e.code = STORAGE_INVALID_FIELD;
+            throw e;
+          }
+        }
+        const rec = rowsOf('knowledge').find((r) => Number(r.id) === Number(id));
+        if (!rec) return { updated: false };
+        for (const k of Object.keys(patch)) {
+          if (k === 'touch') continue;
+          rec[k] = clone(patch[k]);
+        }
+        if (patch.touch) rec.createdAt = nowIso();
+        await commit();
+        return { updated: true };
+      },
+      /** 同名条目（`kb_add` 去重口径）：NULL 安全等（`<=>` 的 JS 等价物就是按 `?? null` 比）。 */
+      async findByTitle({ accountId, scope, conversationId = null, shellId = null, kind = null, title } = {}) {
+        const eq = (a, b) => (a ?? null) === (b ?? null);
+        const hit = rowsOf('knowledge')
+          .filter((r) => eq(r.accountId, accountId) && r.scope === scope && eq(r.shellId, shellId)
+            && eq(r.conversationId, conversationId) && r.kind === kind && r.title === title)
+          .pop();   // rowsOf 升序 ⇒ 最后一条即"id 最大"（对应 mysql 的 ORDER BY id DESC LIMIT 1）
+        return hit ? snap(hit) : null;
+      },
+      async remove(id, { accountId } = {}) {
+        const key = rowsOf('knowledge').find((r) => Number(r.id) === Number(id) && Number(r.accountId) === Number(accountId))?.id;
+        if (key === undefined) return { removed: false };
+        delete holder.doc.tables.knowledge[String(key)];
+        await commit();
+        return { removed: true };
+      },
+      /**
+       * 可见范围删除：账号 + (global ∪ 本壳 shell ∪ 本会话 conv) + 仅 active，与 mysql 侧
+       * `kbVisibleWhere({includeConv:true})` 同一条判据（`status` 缺省即 active，见那里的注释）。
+       */
+      async removeVisible(id, { accountId, shellId = null, conversationId = null } = {}) {
+        const eq = (a, b) => (a ?? null) === (b ?? null);
+        const key = rowsOf('knowledge').find((r) => Number(r.id) === Number(id)
+          && Number(r.accountId) === Number(accountId)
+          && r.status === 'active'
+          && (r.scope === 'global'
+            || (r.scope === 'shell' && eq(r.shellId, shellId))
+            || (r.scope === 'conv' && eq(r.conversationId, conversationId ?? -1))))?.id;
+        if (key === undefined) return { removed: false };
+        delete holder.doc.tables.knowledge[String(key)];
+        await commit();
+        return { removed: true };
       },
     },
 

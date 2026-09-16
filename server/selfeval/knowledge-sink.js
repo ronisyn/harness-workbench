@@ -193,32 +193,40 @@ export function decisionOf(answer) {
  * 带覆盖/冲突判定与 `source` 语义）。这里只需要最朴素的 INSERT，列形状与它**逐字一致**，
  * 且口径就在这一处——不复制它那套冲突判定（那会让"沉淀"多出第二份语义）。
  *
+ * 2026-09-17：写口从"直连 SQL 的库句柄"改成**存储接口**（v0.3 §4.1「存储走接口」）——干净机器上
+ * 也要能沉淀（此前只有 MySQL 一条路）。字段形状一字未改，换的只是介质入口。
+ *
  * 前置（缺一个就抛，绝不静默写）：`entry.title`、`entry.body`、`decision.write===true`、`accountId`。
  *
  * @param {object} entry `proposeKnowledge` 产出的待审条目
  * @param {{answer:string}} o 人在卡片上给的答复（经 `decisionOf` 解释）
- * @param {{dbc:object, accountId:number, conversationId?:number, shellId?:number|null, kind?:string}} deps
+ * @param {{store:object, accountId:number, conversationId?:number, shellId?:number|null, kind?:string}} deps
  * @returns {Promise<{written:boolean, id?:number, scope?:string, reason:string}>}
  */
-export async function writeKnowledge(entry, { answer, dbc, accountId, conversationId = null, shellId = null, kind = null } = {}) {
+export async function writeKnowledge(entry, { answer, store, accountId, conversationId = null, shellId = null, kind = null } = {}) {
   const d = decisionOf(answer);
   if (!d.write) return { written: false, reason: d.reason };
   if (!entry || !String(entry.title || '').trim() || !String(entry.body || '').trim()) {
     throw new Error('拒绝写入：待审条目缺 title/body（空条目不是知识）');
   }
-  if (!dbc || typeof dbc.query !== 'function') throw new Error('拒绝写入：没有可用的库句柄（dbc）');
+  if (!store || !store.knowledge || typeof store.knowledge.append !== 'function') throw new Error('拒绝写入：没有可用的存储句柄（store）');
   if (!accountId) throw new Error('拒绝写入：knowledge.account_id 需要账号（无人确认的自动写入不在此列——本函数必须由人的确认驱动）');
   const scope = d.scope;
   const kindCode = kind || entry.kind || 'lesson';
   if (!SINK_KINDS.includes(kindCode)) throw new Error('拒绝写入：kind 不在既有取值域内（' + kindCode + '）');
   // 正文带上"来源 + 待审指纹 + 确认痕迹"：事后对账要能看出这条是怎么来的（与 selfeval 的 fprint 同口径）
   const body = `> ${SINK_TAG}｜来源：会话 #${entry.conversationId ?? conversationId ?? '-'}｜依据：${V03} §4.3｜指纹：${entry.fingerprint || entry.id}\n\n${entry.body}`;
-  const r = await dbc.query(
-    'INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)',
-    [accountId, scope, scope === 'conv' ? (entry.conversationId ?? conversationId ?? null) : null,
-      scope === 'shell' ? (shellId ?? null) : null, kindCode, String(entry.title).slice(0, 200), body.slice(0, 8000), 'active'],
-  );
-  return { written: true, id: (r && r.insertId) || null, scope, reason: d.reason };
+  const r = await store.knowledge.append({
+    accountId,
+    scope,
+    conversationId: scope === 'conv' ? (entry.conversationId ?? conversationId ?? null) : null,
+    shellId: scope === 'shell' ? (shellId ?? null) : null,
+    kind: kindCode,
+    title: String(entry.title).slice(0, 200),
+    body: body.slice(0, 8000),
+    status: 'active',
+  });
+  return { written: true, id: (r && r.id) || null, scope, reason: d.reason };
 }
 
 /** 逗号分隔的"本批挂了哪些卡"（日志/报告用；空则如实说没有候选）。 */

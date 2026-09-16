@@ -1016,9 +1016,11 @@ const RAW_TOOLS = [
       // E2 防激进覆盖：同名且新旧内容差异显著（字符集合 Jaccard 相似度 <0.35 且新旧均非空）时，
       // 默认拒绝覆盖并回显旧内容片段，让调用方确认（overwrite:true 显式覆盖）或换 title——避免无意冲掉高价值旧记忆
       const convId = scope === 'conv' ? (ctx.conversationId || null) : null;
-      const exist = await db.query('SELECT id, body FROM knowledge WHERE account_id=? AND scope=? AND (conversation_id<=>?) AND (shell_id<=>?) AND kind=? AND title=? ORDER BY id DESC LIMIT 1', [ctx.accountId, scope, convId, shellId, kind, title]);
-      if (exist.length) {
-        const oldB = String(exist[0].body || '');
+      // v0.3 §4.1「存储走接口」：这三条（同名查 / 覆盖 / 新增）走存储接口，干净机器上才攒得下记忆。
+      // 判据与形状一字未改（同名去重的六个条件、覆盖时的 touch、新增时的八列），只是换了介质入口。
+      const exist = await storage.knowledge.findByTitle({ accountId: ctx.accountId, scope, conversationId: convId, shellId, kind, title });
+      if (exist) {
+        const oldB = String(exist.body || '');
         const jac = (() => {
           if (!oldB || !body) return 1; // 一侧为空不算差异冲突（覆盖空值/旧值缺失可放行）
           const sa = new Set(oldB), sb = new Set(body);
@@ -1027,14 +1029,14 @@ const RAW_TOOLS = [
           return inter / Math.max(1, sa.size + sb.size - inter);
         })();
         if (!a.overwrite && jac < 0.35) {
-          return { saved: false, conflict: true, id: exist[0].id, scope, kind, title, source: writeSource(ctx),
+          return { saved: false, conflict: true, id: exist.id, scope, kind, title, source: writeSource(ctx),
             reason: '同名条目已存在且新旧内容差异显著（相似度 ' + jac.toFixed(2) + ' < 0.35），已拒绝覆盖以防误冲高价值旧记忆。请确认：若确为同主题更新请在调用中加 overwrite:true 覆盖；否则请改用不同 title 新增。现有内容片段：' + oldB.slice(0, 300) + (oldB.length > 300 ? '…' : '') };
         }
-        await db.query('UPDATE knowledge SET body=?, status="active", created_at=NOW() WHERE id=?', [body, exist[0].id]); // A6：覆盖视为最新当前事实
-        return { saved: true, id: exist[0].id, updated: true, scope, kind, title, source: writeSource(ctx) };
+        await storage.knowledge.update(exist.id, { body, status: 'active', touch: true }); // A6：覆盖视为最新当前事实
+        return { saved: true, id: exist.id, updated: true, scope, kind, title, source: writeSource(ctx) };
       }
-      const r = await db.query('INSERT INTO knowledge (account_id, scope, conversation_id, shell_id, kind, title, body, status) VALUES (?,?,?,?,?,?,?,?)', [ctx.accountId, scope, convId, shellId, kind, title, body, 'active']);
-      return { saved: true, id: r.insertId, updated: false, scope, kind, title, source: writeSource(ctx) };
+      const r = await storage.knowledge.append({ accountId: ctx.accountId, scope, conversationId: convId, shellId, kind, title, body, status: 'active' });
+      return { saved: true, id: r.id, updated: false, scope, kind, title, source: writeSource(ctx) };
     } },
   { name: 'kb_search', description: '搜索知识库/长期记忆（标题+正文关键词，当前会话可见范围=本会话 conv + 本会话所属壳私有 shell + 全部 global；仅当前事实 active——A6 起 superseded/obsolete 仅历史不返回）。记得相关约定、历史决策、用户偏好时先搜这里', 
     params: { q: { type: 'string', required: true, desc: '关键词' } },
@@ -1058,9 +1060,10 @@ const RAW_TOOLS = [
     run: async (a, ctx) => {
       // ④ 可见范围删除保护：仅能删自己账号且当前会话可见范围的条目（防误删他壳/他会话私有记忆；统一出口 kbVisibleWhere A6 生产化）
       const shellId = (ctx.shellId && ctx.shellKey && ctx.shellKey !== 'default') ? ctx.shellId : null;
-      const v = kbVisibleWhere({ accountId: ctx.accountId, shellId, conversationId: ctx.conversationId || null, includeConv: true });
-      const r = await db.query(`DELETE FROM knowledge WHERE id=? AND ${v.where}`, [a.id, ...v.params]);
-      return { deleted: r.affectedRows > 0 };
+      // v0.3 §4.1「存储走接口」：可见范围判据仍在**唯一出处**（kbVisibleWhere），由存储实现引用它（mysql）
+      // 或在实现内用同一判据判（jsonfile）——两条路的行为由 test/storage.test.mjs 的同一组契约用例盖住。
+      const r = await storage.knowledge.removeVisible(a.id, { accountId: ctx.accountId, shellId, conversationId: ctx.conversationId || null });
+      return { deleted: r.removed === true };
     } },
 
   // ---------- 任务契约（外部驱动器：讨论达成共识后立项 → 无人值守执行） ----------

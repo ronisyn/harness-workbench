@@ -67,16 +67,22 @@ test('A1：工具描述里也带一句（模型在**调用前**就知道），�
 });
 
 // ── ③ 真实 execTool 路径（本地 HTTP server，不碰外网） ─────────────────────────────
-// 只替换 db.query（留痕/去重都在它上面）；execTool 从 tools/index.js 导入的是同一个 db 对象 ⇒ 替换生效。
-// 不碰真实库：本夹具断言的是"模型看到的文本"，写一行真账对结论没有增益，反而给生产表添噪音。
+// 只替换 db.query / db.run（留痕/去重/入库都在它们上面）；execTool 从 tools/index.js 导入的是同一个 db 对象 ⇒
+// 替换生效。
+// ⚠️ 2026-09-17 补 `db.run`（此前只替换了 `db.query`）：`kb_add` 的写口迁到存储接口后，插入走的是
+//    `storage/mysql.js` 的 `exec` → **`db.run`** —— 只挡 query 时这条夹具会真的往库里写一行
+//    （实测发生了什么、怎么清理的见 `架构文档冲突登记` C-63）。夹具的口径没变：**一行真账都不许写**。
+// 不碰真实库：本夹具断言的是"模型看到的文本"与"归属字段"，写一行真账对结论没有增益，反而给生产表添噪音。
 const real = { query: db.query, run: db.run };
 const calls = [];
 const rows = [];
-db.query = async (sql, params) => {
+const record = (sql, params) => {
   calls.push({ sql, params });
   if (/FROM knowledge WHERE account_id=\?/.test(sql)) return rows;
   return { affectedRows: 1, insertId: rows.length + 1 }; // 其余按写入处理（含 audit_log / tool_calls）
 };
+db.query = async (sql, params) => record(sql, params);
+db.run = async (sql, params) => record(sql, params);
 test.after(() => {
   db.query = real.query;
   db.run = real.run;
