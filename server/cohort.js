@@ -51,6 +51,36 @@ export const ORPHAN_WHERE = (alias = '') => {
 };
 export const REAL_WHERE = (alias = '') => `NOT ${PROBE_WHERE(alias)} AND NOT ${ORPHAN_WHERE(alias)}`;
 
+/**
+ * 用 JS 复算"属于真实流量"的会话 id 集合 —— 与 `REAL_WHERE` **同一套判据、同一组常量**
+ * （探针命名族 `PROBE_TITLE_RE` ＋「已删除的探针会话靠 `prefix:` 账本捞回」）。
+ *
+ * 为什么要有它（v0.3 §4.1「存储走接口」＋ §4.8 的 C1/C2 读数）：`REAL_WHERE` 带**跨表子查询**，
+ * JSON 介质里的受限条件解析器表达不了；裁定 A 把"归属"从**谓词**改成**两次读法**——
+ * 先用两类事实解析出 id 集合（本函数），再按 id 列表取用量行（`usage.roundRowsByAccount`）。
+ * 判据仍只有一份：本函数与 `REAL_WHERE` 都由 `PROBE_TITLE_RE` 生成，不是各写一套。
+ *
+ * 语义边界（与 SQL 逐条对应）：
+ *   · 命名族命中 ⇒ 探针；`prefix:` 账本里出现过、且**已不在 conversations** ⇒ 探针（捞已删的）；
+ *   · 账本里出现的**现存**会话**不算探针**（2026-09-15 实测踩过：改造后每个新会话都落 `prefix:*`，
+ *     不限定"已删除"会把真实会话误杀）；
+ *   · 孤儿（`conversation_id IS NULL` 或会话已删）**天然不在**返回名单里（名单只由现存会话构成）。
+ * @param {{conversations?: Array<{id:any,title?:string}>, probeLedgerConvIds?: Array<any>}} o
+ * @returns {number[]} 真实流量的会话 id（升序无关，调用方按需用 Set 包）
+ */
+export function realConversationIds({ conversations = [], probeLedgerConvIds = [] } = {}) {
+  const re = new RegExp(PROBE_TITLE_RE);
+  const known = new Set(conversations.map((c) => Number(c.id)));
+  const probe = new Set();
+  for (const c of conversations) if (re.test(String(c.title || ''))) probe.add(Number(c.id));
+  for (const raw of probeLedgerConvIds) {
+    if (raw === null || raw === undefined) continue;
+    const id = Number(raw);
+    if (!known.has(id)) probe.add(id); // 已删除的探针会话：靠账本捞回（SQL 那一支的 `NOT IN conversations` 同理）
+  }
+  return conversations.map((c) => Number(c.id)).filter((id) => !probe.has(id));
+}
+
 // 真实流量内部再分「人发起」与「定时任务」：定时任务是平台自己每天跑的（`定时任务：` 前缀），
 // 它不是"用户真实使用"，但也不是探针 —— 混在一起会让"真实流量"这个说法失真。分开展示、合并不隐藏。
 export const SCHEDULED_WHERE = (alias = '') => {
