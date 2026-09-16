@@ -1189,6 +1189,23 @@ test('[契约] 前缀账四个读数：计数/首词/最近若干/时间范围�
   assert.match(seen[3].sql, /MIN\(created_at\) at, MAX\(created_at\) at2/, '时间范围沿用原来那条 SQL 的列名');
 });
 
+test('[契约] 壳那条只读：mysql 按语句取（中性字段名），jsonfile 如实给空（不是"不支持"）', async () => {
+  // 为什么不许在 jsonfile 上抛：一份 JSON 存储文件里**本来就没有壳定义** —— "没有壳"是事实
+  // （干净机器上没有金标可跑），与 `capabilities()` 那类"介质没这能力"不是一回事。
+  const { storage: js } = makeJsonFile();
+  assert.deepEqual(await js.shells.listWithEvalRef(), [], 'JSON 介质如实给空列表');
+  const fake = {
+    async query(sql) {
+      assert.match(sql, /^SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''$/, '语句与迁移前逐字一致');
+      return [{ id: 3, skey: 'code', name: '代码壳', eval_ref: 'code' }];
+    },
+    async run() { return {}; },
+  };
+  const my = createMysqlStorage({ db: fake });
+  assert.deepEqual(await my.shells.listWithEvalRef(), [{ id: 3, skey: 'code', name: '代码壳', evalRef: 'code' }],
+    '按契约给中性字段名（eval_ref → evalRef）');
+});
+
 // ── 选择点与迁移示范（源码级：这两条才是"可替换"的机检）────────────────────────────────────
 test('单一选择点：全仓只有 env.js 声明、storage/index.js 选择（绕过它就等于没抽象）', () => {
   const walk = (dir) => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap((it) => {

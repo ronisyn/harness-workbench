@@ -233,9 +233,13 @@ export async function collectFailures({ dbc = storage, days = DEFAULT_DAYS } = {
  *    的 `runGoldenChecks`）：金标实现会 import `tools/manifest.js`，并行改动可能让它暂时语法不过，
  *    夹具不该被这件事牵连成假红/假绿。
  */
-export async function collectCanary({ dbc = db, checks = null } = {}) {
-  const shells = await sel(dbc, "SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''");
-  if (failed(shells)) return { available: false, error: failed(shells), shells: [] };
+export async function collectCanary({ dbc = storage, checks = null } = {}) {
+  // 2026-09-18：两条读法都改走存储接口（`shells.listWithEvalRef` + `audit.lastByAction`）——
+  // 迁移前直连 SQL ⇒ 干净机器（jsonfile 介质）上这一档整块是空的（"没有壳"与"读不到库"分不开）。
+  // 形状与迁移前逐字一致：壳那行按中性字段 `evalRef` 取，`lastRun` 仍是 `{at, detail}`。
+  const shellRows = await viaInterface(dbc.shells.listWithEvalRef());
+  if (failed(shellRows)) return { available: false, error: failed(shellRows), shells: [] };
+  const shells = (Array.isArray(shellRows) ? shellRows : []).map((s) => ({ id: s.id, skey: s.skey, name: s.name, eval_ref: s.evalRef ?? null }));
   let runGoldenChecks = checks;
   if (typeof runGoldenChecks !== 'function') {
     try { ({ runGoldenChecks } = await import('../canary.js')); }
@@ -251,14 +255,15 @@ export async function collectCanary({ dbc = db, checks = null } = {}) {
       out.push({ shellId: s.id, skey: s.skey, ref: s.eval_ref, error: String(e.message || e) });
     }
   }
-  // canary:run 最近一次账本行（`server/canary.js` 的调用方落 audit_log）
-  const last = await sel(dbc, "SELECT created_at at, detail FROM audit_log WHERE action='canary:run' ORDER BY id DESC LIMIT 1");
+  // canary:run 最近一次账本行（`server/canary.js` 的调用方落 audit_log）：走既有读法 `lastByAction`
+  const last = await viaInterface(dbc.audit.lastByAction('canary:run'));
+  const lastRow = failed(last) ? null : (last && last.createdAt !== undefined ? { at: last.createdAt, detail: last.detail ?? null } : null);
   // 金标集身份**从逐壳读数出**（`out` 的各项带 `ref`），不是从上面的 DB 行出：
   // DB 行的字段名是 `eval_ref`，而 `goldenSetIdentities` 读的是 `s.ref` —— 传错字段会让这 65 条读数
   // 全部落进 `{ref: undefined, exists:false, count:0}`，于是同一份报告里 `metrics.canary.goldenSets`
   // 恒报"金标不存在"，而顶层 `golden`（同一批壳、同一套金标）报 `code@<sha>(9条)` —— 自相矛盾。
   // 两处形状对齐的依据在 `scripts/metrics-report.mjs`：那边也是 `shells.map(s => ({ ref: s.ref }))`。
-  return { available: true, shells: out, goldenSets: goldenSetIdentities(out.map((s) => ({ ref: s.ref }))), lastRun: failed(last) ? null : (last[0] || null) };
+  return { available: true, shells: out, goldenSets: goldenSetIdentities(out.map((s) => ({ ref: s.ref }))), lastRun: lastRow };
 }
 
 /**

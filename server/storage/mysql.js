@@ -55,6 +55,8 @@ const COLS = {
   // 审计账（2026-09-17 加写口）：列名与 `audit_log` 建表逐字对应；`created_at` 由库的 `DEFAULT NOW()` 盖。
   // `audit_log_archive`（90 天归档表）**不在**这里：归档是维护作业的读法+搬表，本轮只迁写口（如实登记）。
   audit: { accountId: 'account_id', action: 'action', detail: 'detail', shellId: 'shell_id', conversationId: 'conversation_id' },
+  // 壳（只读，2026-09-18 为遥测采集加）：列名与 `shells` 建表逐字对应
+  shells: { skey: 'skey', name: 'name', evalRef: 'eval_ref' },
   // 知识库（2026-09-17 加，**只读**：给 `kbsearch/like.js` 取记录用）。
   // 只映射检索层真正要用的列：`related_component` 是管理面的展示列，不在列里（同接口层的字段清单）。
   knowledge: {
@@ -70,7 +72,7 @@ const COLS = {
 const TABLES = {
   conversations: 'conversations', messages: 'messages', toolCalls: 'tool_calls', settings: 'settings',
   agentRuns: 'agent_runs', events: 'events', deliveries: 'deliveries', accounts: 'accounts', sessions: 'sessions',
-  knowledge: 'knowledge', usage: 'usage_stats', audit: 'audit_log',
+  knowledge: 'knowledge', usage: 'usage_stats', audit: 'audit_log', shells: 'shells',
 };
 /** JSON 列：写时 stringify、读时 parse（MySQL 的 JSON 列在新旧驱动下有时给对象、有时给字符串）。 */
 const JSON_COLS = new Set(['payload', 'args', 'tool_counts', 'response_json', 'svalue']);
@@ -889,6 +891,18 @@ function makeApi(r) {
         if (d) { conds.push('created_at > NOW() - INTERVAL ? DAY'); params.push(d); }
         const row = await r.one(`SELECT MIN(created_at) at, MAX(created_at) at2 FROM audit_log WHERE ${conds.join(' AND ')}`, params);
         return row ? { at: row.at ?? null, at2: row.at2 ?? null } : null;
+      },
+    },
+
+    /**
+     * 配了金标的壳（㉔ 遥测采集要问"哪些壳有金标"）：语句与迁移前**逐字一致**
+     * （`SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''`），
+     * 只是按契约把列名映射成中性字段名（`eval_ref` → `evalRef`）。
+     */
+    shells: {
+      async listWithEvalRef() {
+        const rows = await r.many("SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''");
+        return rows.map((row) => toRecord('shells', row));
       },
     },
 

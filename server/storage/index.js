@@ -124,6 +124,13 @@ export const CONTRACT = {
     // 不传＝不筛（既有"无账号维度"的默认行为不变）。过滤条件必须**下推到介质**（SQL 的 WHERE / 先筛后截窗口），
     // 不能取回来再在内存里筛 —— 那样别人的行会先把 LIMIT 窗口占满。
     deliveries: ['insert', 'findByKey', 'claimRetry', 'finish', 'list'],
+    // 壳定义（**只读一条**，2026-09-18 为遥测采集加）：㉔ 的金标读数要"哪些壳配了金标"——
+    // `selfeval/collect.js` 的 `collectCanary` 迁移前直连 `SELECT … FROM shells WHERE eval_ref …`。
+    // 为什么只开这一条读、不开整实体：**唯一使用者是遥测采集**，读的也只有"配了金标的壳"这一问；
+    // 壳的编辑面仍在 `server/index.js`（不在本次范围内）——按 v0.3 §0.6「不做的范围」，不预造。
+    // JSON 介质上返回**空列表**（那份文件里没有壳定义）——这是事实，不是"不支持"：
+    // 干净机器上没有壳＝没有金标可跑，与 `capabilities()` 那类能力缺失不是一回事。
+    shells: ['listWithEvalRef'],
   },
 };
 
@@ -159,6 +166,8 @@ export const FIELDS = {
   // deliveries 的方法收的是具名参数（不是整条记录），这里列的是它的**记录形状**：
   // `finish(id, patch)` 的 patch 按它校验，`findByKey`/`list` 回来的记录也按它映射。
   deliveries: ['accountId', 'conversationId', 'idemKey', 'requestHash', 'state', 'messageId', 'runId', 'response', 'lastError', 'lastErrorCode', 'attempts'],
+  // 壳（只读那条的**记录形状**；`id` 由 `toRecord()` 统一带出，不在这里重复）
+  shells: ['skey', 'name', 'evalRef'],
 };
 
 /**

@@ -339,6 +339,17 @@ function makeApi(holder, save, { persist }) {
 
   const api = {
     /** 实现名（诊断用；两个实现都有这一项，夹具比对方法面时按契约清单逐项对，不看它）。 */
+    /**
+     * 壳定义（只读一条，2026-09-18 为遥测采集加）：**本介质里没有壳表** ⇒ 返回空列表。
+     * 这不是"不支持"、也不是"静默降级"：一份 JSON 存储文件里本来就没有壳定义，
+     * "没有壳"就是事实（干净机器上没有金标可跑）。要区分"没这能力"，看 `capabilities()`。
+     */
+    shells: {
+      async listWithEvalRef() {
+        return [];
+      },
+    },
+
     impl: IMPL,
     /**
      * 介质自报能力（裁定 C）：本介质**没有** `events_archive` / `audit_log_archive` 两张归档表，

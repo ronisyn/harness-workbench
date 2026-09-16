@@ -61,6 +61,18 @@ function makeFakeDb(handler) {
         const r = handler('SELECT MIN(created_at) at, MAX(created_at) at2 FROM audit_log WHERE action LIKE \'prefix:%\'', []);
         return (Array.isArray(r) && r[0]) || null;
       },
+      async lastByAction(action) {
+        const r = handler(`SELECT created_at at, detail FROM audit_log WHERE action='${action}' ORDER BY id DESC LIMIT 1`, []);
+        const row = (Array.isArray(r) && r[0]) || null;
+        return row ? { createdAt: row.at ?? row.createdAt ?? null, detail: row.detail ?? null } : null;
+      },
+    },
+    // 壳那条只读（2026-09-18）：值仍从同一个 handler 来，映射成契约里的中性字段名 `evalRef`
+    shells: {
+      async listWithEvalRef() {
+        const r = handler("SELECT id, skey, name, eval_ref FROM shells WHERE eval_ref IS NOT NULL AND eval_ref <> ''", []);
+        return (Array.isArray(r) ? r : []).map((s) => ({ id: s.id, skey: s.skey, name: s.name, evalRef: s.eval_ref ?? s.evalRef ?? null }));
+      },
     },
     toolCalls: {
       async failureTotals({ days = 7 } = {}) {
