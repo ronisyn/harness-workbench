@@ -784,9 +784,13 @@ function makeApi(r) {
       /**
        * 某动作的**首词分布**（C5 豁免原因：`prefix:exempt` 的 detail 形如 `first-round …`）：
        * `SUBSTRING_INDEX(detail,' ',1)` 是 MySQL 的"取第一个空格前那段"，返回 `[{reason, n}]`（多的在前）。
+       * 2026-09-18：加**可选**时间窗（遥测采集要 7 天窗；不传＝全量，既有调用方一个字不用改）。
        */
-      async countByFirstToken(action) {
-        const rows = await r.many("SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=? GROUP BY r ORDER BY n DESC", [action]);
+      async countByFirstToken(action, { days = null } = {}) {
+        const d = Number(days) > 0 ? Number(days) : null;
+        const win = d ? ' AND created_at > NOW() - INTERVAL ? DAY' : '';
+        const rows = await r.many(`SELECT SUBSTRING_INDEX(detail, ' ', 1) r, COUNT(*) n FROM audit_log WHERE action=?${win} GROUP BY r ORDER BY n DESC`,
+          d ? [action, d] : [action]);
         return rows.map((row) => ({ reason: row.r, n: Number(row.n || 0) }));
       },
       /**
@@ -847,6 +851,44 @@ function makeApi(r) {
         const [arc] = await r.many('SELECT COUNT(*) c, MIN(created_at) oldest FROM audit_log_archive');
         const rec = (row) => ({ rows: Number((row && row.c) || 0), oldest: (row && row.oldest) || null });
         return { current: rec(cur), archived: rec(arc) };
+      },
+      /**
+       * **按动作前缀**计数（遥测采集那一档：`action LIKE 'prefix:%'`，可带时间窗）——
+       * 2026-09-18 从 `selfeval/collect.js` 的 `collectLedger` 迁来；`actions` 的形状与那条 SQL 逐字一致
+       * （`[{action, n}]`，多的在前由调用方决定，这里不排序——原来那条也没排序）。
+       */
+      async countByActionPrefix(prefix, { days = null } = {}) {
+        const d = Number(days) > 0 ? Number(days) : null;
+        const win = d ? ' AND created_at > NOW() - INTERVAL ? DAY' : '';
+        const rows = await r.many(`SELECT action, COUNT(*) n FROM audit_log WHERE action LIKE ?${win} GROUP BY action`,
+          d ? [String(prefix) + '%', d] : [String(prefix) + '%']);
+        return rows.map((row) => ({ action: row.action, n: Number(row.n || 0) }));
+      },
+      /**
+       * **最近若干条**（可限定"前缀 + 指定动作集合"）：列名别名 `cid`/`at` **逐字沿用**调用点原来那条 SQL
+       * （`conversation_id cid, created_at at`）——换实现不改快照的形状。
+       */
+      async recentByActions({ prefix = null, actions = [], days = null, limit = 20 } = {}) {
+        const conds = [];
+        const params = [];
+        if (prefix) { conds.push('action LIKE ?'); params.push(String(prefix) + '%'); }
+        if (Array.isArray(actions) && actions.length) { conds.push(`action IN (${actions.map(() => '?').join(',')})`); params.push(...actions); }
+        if (!conds.length) conds.push('1=1');
+        const d = Number(days) > 0 ? Number(days) : null;
+        if (d) { conds.push('created_at > NOW() - INTERVAL ? DAY'); params.push(d); }
+        const n = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
+        return r.many(`SELECT id, action, detail, conversation_id cid, created_at at FROM audit_log WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ${n}`, params);
+      },
+      /** 时间范围（`{at, at2}` ＝ MIN/MAX(created_at)；可限定前缀与时间窗）。 */
+      async timeRange({ prefix = null, days = null } = {}) {
+        const conds = [];
+        const params = [];
+        if (prefix) { conds.push('action LIKE ?'); params.push(String(prefix) + '%'); }
+        if (!conds.length) conds.push('1=1');
+        const d = Number(days) > 0 ? Number(days) : null;
+        if (d) { conds.push('created_at > NOW() - INTERVAL ? DAY'); params.push(d); }
+        const row = await r.one(`SELECT MIN(created_at) at, MAX(created_at) at2 FROM audit_log WHERE ${conds.join(' AND ')}`, params);
+        return row ? { at: row.at ?? null, at2: row.at2 ?? null } : null;
       },
     },
 

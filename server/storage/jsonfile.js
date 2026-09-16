@@ -976,11 +976,14 @@ function makeApi(holder, save, { persist }) {
         }
         return [...out.entries()].map(([action, n]) => ({ action, n }));
       },
-      /** 某动作的**首词分布**（C5 豁免原因）：与 mysql 侧 `SUBSTRING_INDEX(detail,' ',1)` 同义（取第一个空格前那段）。 */
-      async countByFirstToken(action) {
+      /** 某动作的**首词分布**（C5 豁免原因）：与 mysql 侧 `SUBSTRING_INDEX(detail,' ',1)` 同义（取第一个空格前那段）。
+       *  2026-09-18：加**可选**时间窗（与 mysql 侧同批；不传＝全量）。 */
+      async countByFirstToken(action, { days = null } = {}) {
+        const floor = Number(days) > 0 ? Date.now() - Number(days) * 86400000 : null;
         const out = new Map();
         for (const r of rowsOf('audit')) {
           if (r.action !== action) continue;
+          if (floor !== null && new Date(r.createdAt || 0).getTime() < floor) continue;
           const word = String(r.detail ?? '').split(' ')[0] || '?';
           out.set(word, (out.get(word) || 0) + 1);
         }
@@ -1080,6 +1083,49 @@ function makeApi(holder, save, { persist }) {
           if (at && (oldest === null || at < oldest)) oldest = at;
         }
         return { current: { rows: rows.length, oldest }, archived: { rows: 0, oldest: null } };
+      },
+      /** 按动作前缀计数（可带时间窗；判据与 mysql 那条 `LIKE ?` 同义）。 */
+      async countByActionPrefix(prefix, { days = null } = {}) {
+        const p = String(prefix);
+        const floor = Number(days) > 0 ? Date.now() - Number(days) * 86400000 : null;
+        const by = new Map();
+        for (const r of rowsOf('audit')) {
+          if (!String(r.action || '').startsWith(p)) continue;
+          if (floor !== null && new Date(r.createdAt || 0).getTime() < floor) continue;
+          by.set(r.action, (by.get(r.action) || 0) + 1);
+        }
+        return [...by.entries()].map(([action, n]) => ({ action, n }));
+      },
+      /** 最近若干条（列名别名 `cid`/`at` 与 mysql 侧一致 —— 快照形状不许因介质而变）。 */
+      async recentByActions({ prefix = null, actions = [], days = null, limit = 20 } = {}) {
+        const list = Array.isArray(actions) ? actions.map(String) : [];
+        const floor = Number(days) > 0 ? Date.now() - Number(days) * 86400000 : null;
+        const n = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
+        let rows = rowsOf('audit').filter((r) => {
+          if (prefix && !String(r.action || '').startsWith(String(prefix))) return false;
+          if (list.length && !list.includes(String(r.action || ''))) return false;
+          if (floor !== null && new Date(r.createdAt || 0).getTime() < floor) return false;
+          return true;
+        });
+        rows = rows.slice().reverse().slice(0, n);
+        return rows.map((r) => ({
+          id: r.id, action: r.action ?? null, detail: r.detail ?? null,
+          cid: r.conversationId ?? null, at: r.createdAt ?? null,
+        }));
+      },
+      /** 时间范围（`{at, at2}`）；本介质的时间戳是**进程写入的 ISO 字符串**，直接按字典序取最小/最大。 */
+      async timeRange({ prefix = null, days = null } = {}) {
+        const floor = Number(days) > 0 ? Date.now() - Number(days) * 86400000 : null;
+        let min = null; let max = null;
+        for (const r of rowsOf('audit')) {
+          if (prefix && !String(r.action || '').startsWith(String(prefix))) continue;
+          if (floor !== null && new Date(r.createdAt || 0).getTime() < floor) continue;
+          const at = r.createdAt ?? null;
+          if (!at) continue;
+          if (min === null || at < min) min = at;
+          if (max === null || at > max) max = at;
+        }
+        return { at: min, at2: max };
       },
     },
 

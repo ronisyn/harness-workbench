@@ -185,24 +185,25 @@ export async function collectUsage({ dbc = db, days = DEFAULT_DAYS, cutoff = nul
   return out;
 }
 
-/** 失效账本（C4 `prefix:invalidate` / C5 `prefix:exempt` / `prefix:collapse`，落 `audit_log`） */
-export async function collectLedger({ dbc = db, days = DEFAULT_DAYS } = {}) {
+/** 失效账本（C4 `prefix:invalidate` / C5 `prefix:exempt` / `prefix:collapse`，落 `audit_log`）
+ *  2026-09-18：四条读法**改走存储接口**（`audit.countByActionPrefix/recentByActions/timeRange` ＋
+ *  已有的 `countByFirstToken` 加可选时间窗）——迁移前它们直连 SQL ⇒ 干净机器（jsonfile 介质）上
+ *  这一档整块是空的。返回形状与迁移前**逐字一致**（`[{action,n}]`、`[{word,n}]`、
+ *  `[{id,action,detail,cid,at}]`、`{at,at2}`）：快照是给人看也给 M3 判据读的。
+ *  `action='prefix:exempt'` 的首词分布那条仍走 `countByFirstToken`（同一个介质方法，新增时间窗参数）。
+ */
+export async function collectLedger({ dbc = storage, days = DEFAULT_DAYS } = {}) {
   const d = Math.max(1, Math.floor(Number(days) || DEFAULT_DAYS));
-  const W = "action LIKE 'prefix:%' AND created_at > NOW() - INTERVAL ? DAY";
-  const counts = await sel(dbc, `SELECT action, COUNT(*) n FROM audit_log WHERE ${W} GROUP BY action`, [d]);
-  const exempt = await sel(dbc,
-    `SELECT SUBSTRING_INDEX(detail, ' ', 1) word, COUNT(*) n FROM audit_log
-      WHERE ${W} AND action='prefix:exempt' GROUP BY word ORDER BY n DESC`, [d]);
-  const recent = await sel(dbc,
-    `SELECT id, action, detail, conversation_id cid, created_at at FROM audit_log
-      WHERE ${W} AND action IN ('prefix:invalidate','prefix:collapse') ORDER BY id DESC LIMIT 20`, [d]);
-  const firstAt = await sel(dbc, `SELECT MIN(created_at) at, MAX(created_at) at2 FROM audit_log WHERE ${W}`, [d]);
+  const counts = await viaInterface(dbc.audit.countByActionPrefix('prefix:', { days: d }));
+  const exempt = await viaInterface(dbc.audit.countByFirstToken('prefix:exempt', { days: d }));
+  const recent = await viaInterface(dbc.audit.recentByActions({ prefix: 'prefix:', actions: ['prefix:invalidate', 'prefix:collapse'], days: d, limit: 20 }));
+  const range = await viaInterface(dbc.audit.timeRange({ prefix: 'prefix:', days: d }));
   return {
     counts: failed(counts) ? [] : counts,
     exemptWords: failed(exempt) ? [] : exempt,
     recent: failed(recent) ? [] : recent,
-    range: failed(firstAt) ? null : (firstAt[0] || null),
-    errors: [failed(counts), failed(exempt), failed(recent), failed(firstAt)].filter(Boolean),
+    range: failed(range) ? null : (Array.isArray(range) ? (range[0] || null) : (range || null)),
+    errors: [failed(counts), failed(exempt), failed(recent), failed(range)].filter(Boolean),
   };
 }
 

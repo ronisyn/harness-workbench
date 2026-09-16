@@ -1145,6 +1145,50 @@ test('[契约] 失败率三个读数：真实/探针分档、无码归显式档�
   assert.match(seen[2], /LIMIT 20$/, '按工具汇总那条带 LIMIT（上限不许无界）');
 });
 
+test('[契约] 前缀账四个读数：计数/首词/最近若干/时间范围（两个实现同跑）', async () => {
+  const { storage: js } = makeJsonFile();
+  await js.audit.append({ action: 'prefix:exempt', detail: 'first-round 12' });
+  await js.audit.append({ action: 'prefix:exempt', detail: 'first-round 13' });
+  await js.audit.append({ action: 'prefix:exempt', detail: 'tool-face-changed 3' });
+  await js.audit.append({ action: 'prefix:invalidate', detail: 'first-diff-idx=3' });
+  await js.audit.append({ action: 'prefix:collapse', detail: 'collapse cost=0.1' });
+  await js.audit.append({ action: 'chat:send', detail: '与前缀无关的动作' });
+  const counts = await js.audit.countByActionPrefix('prefix:', { days: 7 });
+  assert.deepEqual(counts.map((r) => [r.action, r.n]).sort(), [['prefix:collapse', 1], ['prefix:exempt', 3], ['prefix:invalidate', 1]],
+    '只数前缀族那些动作（chat:send 不算）');
+  assert.equal((await js.audit.countByActionPrefix('prefix:', { days: 7 })).length, 3, '按动作分档，不合并');
+  assert.deepEqual(await js.audit.countByFirstToken('prefix:exempt', { days: 7 }),
+    [{ reason: 'first-round', n: 2 }, { reason: 'tool-face-changed', n: 1 }], '首词分布、多的在前');
+  const recent = await js.audit.recentByActions({ prefix: 'prefix:', actions: ['prefix:invalidate', 'prefix:collapse'], days: 7, limit: 20 });
+  assert.deepEqual(recent.map((r) => r.action), ['prefix:collapse', 'prefix:invalidate'], '倒序（最近在前），且只要点名的那两种动作');
+  assert.deepEqual(Object.keys(recent[0]).sort(), ['action', 'at', 'cid', 'detail', 'id'], '列名别名与 mysql 侧逐字一致（cid/at）');
+  const range = await js.audit.timeRange({ prefix: 'prefix:', days: 7 });
+  assert.ok(range.at && range.at2, '时间范围两端都要有');
+  assert.ok(range.at <= range.at2, 'at 不晚于 at2');
+
+  // MySQL 侧：假库只认这三种形状（形状改了当场红）
+  const seen = [];
+  const fake = {
+    async query(sql, p) {
+      seen.push({ sql: sql.replace(/\s+/g, ' ').trim(), params: p });
+      if (/GROUP BY action/.test(sql)) return [{ action: 'prefix:exempt', n: 3 }];
+      if (/SUBSTRING_INDEX/.test(sql)) return [{ r: 'first-round', n: 2 }];
+      if (/action IN \(/.test(sql)) return [{ id: 9, action: 'prefix:invalidate', detail: 'x', cid: 184, at: '2026-09-16 03:00:00' }];
+      if (/MIN\(created_at\)/.test(sql)) return [{ at: '2026-09-15 01:00:00', at2: '2026-09-16 03:00:00' }];
+      throw new Error('假库不认识的语句：' + sql);
+    },
+    async run() { return {}; },
+  };
+  const my = createMysqlStorage({ db: fake });
+  assert.deepEqual(await my.audit.countByActionPrefix('prefix:', { days: 7 }), [{ action: 'prefix:exempt', n: 3 }]);
+  assert.deepEqual(await my.audit.countByFirstToken('prefix:exempt', { days: 7 }), [{ reason: 'first-round', n: 2 }]);
+  assert.deepEqual((await my.audit.recentByActions({ prefix: 'prefix:', actions: ['prefix:invalidate', 'prefix:collapse'], days: 7, limit: 20 }))[0].cid, 184);
+  assert.deepEqual(await my.audit.timeRange({ prefix: 'prefix:', days: 7 }), { at: '2026-09-15 01:00:00', at2: '2026-09-16 03:00:00' });
+  assert.deepEqual(seen[0].params, ['prefix:%', 7], '前缀与时间窗都是参数化的');
+  assert.match(seen[2].sql, /LIMIT 20$/, '最近若干条带 LIMIT（上限不许无界）');
+  assert.match(seen[3].sql, /MIN\(created_at\) at, MAX\(created_at\) at2/, '时间范围沿用原来那条 SQL 的列名');
+});
+
 // ── 选择点与迁移示范（源码级：这两条才是"可替换"的机检）────────────────────────────────────
 test('单一选择点：全仓只有 env.js 声明、storage/index.js 选择（绕过它就等于没抽象）', () => {
   const walk = (dir) => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap((it) => {

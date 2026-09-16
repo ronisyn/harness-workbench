@@ -41,6 +41,27 @@ function makeFakeDb(handler) {
     // 也要提供"介质方法"。**值仍从同一个 handler 来**（把迁移前那条 SQL 的形状原样喂给 handler），
     // 所以快照里的数字一个字没变 —— 这本身就是"换实现不改调用方"的机检：同一批样本，
     // 走接口与走 SQL 必须给出同一份快照（`test/selfeval.test.mjs` 的断言逐条比的就是这个）。
+    // 存储接口那一半（2026-09-18）：`collectLedger` 已改走接口（`audit.*`），所以假库也要提供这几个
+    // "介质方法"。**值仍从同一个 handler 来**（把迁移前那几条 SQL 的形状喂给 handler），
+    // 于是快照里的数字一个字没变 —— 同一批样本走接口与走 SQL 必须给出同一份快照。
+    audit: {
+      async countByActionPrefix(prefix, { days = null } = {}) {
+        const r = handler(`SELECT action, COUNT(*) n FROM audit_log WHERE action LIKE '${prefix}%' AND created_at > NOW() - INTERVAL ? DAY GROUP BY action`, [days]);
+        return Array.isArray(r) ? r : [];
+      },
+      async countByFirstToken(action, { days = null } = {}) {
+        const r = handler(`SELECT SUBSTRING_INDEX(detail, ' ', 1) word, COUNT(*) n FROM audit_log WHERE action='${action}' GROUP BY word ORDER BY n DESC`, [days]);
+        return Array.isArray(r) ? r : [];
+      },
+      async recentByActions({ limit = 20 } = {}) {
+        const r = handler(`SELECT id, action, detail, conversation_id cid, created_at at FROM audit_log WHERE action IN ('prefix:invalidate','prefix:collapse') ORDER BY id DESC LIMIT ${limit}`, []);
+        return Array.isArray(r) ? r : [];
+      },
+      async timeRange() {
+        const r = handler('SELECT MIN(created_at) at, MAX(created_at) at2 FROM audit_log WHERE action LIKE \'prefix:%\'', []);
+        return (Array.isArray(r) && r[0]) || null;
+      },
+    },
     toolCalls: {
       async failureTotals({ days = 7 } = {}) {
         const r = handler('SELECT COUNT(*) calls FROM tool_calls WHERE conversation_id > 0 AND created_at > NOW() - INTERVAL ? DAY', [days, days, days]);
